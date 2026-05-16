@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"net/http"
 	"os"
@@ -114,7 +113,6 @@ func SynthesizeStream(text, voice string, onChunk func(AudioChunk)) error {
 	//    The server expects both before it starts responding.
 	configJSON := `{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}`
 	configMsg := fmt.Sprintf("X-Timestamp:%s\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n%s", timestamp, configJSON)
-	log.Printf("[TTS] sending config + ssml, url=%s", wsURL)
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(configMsg)); err != nil {
 		return fmt.Errorf("send config: %w", err)
 	}
@@ -157,7 +155,6 @@ func SynthesizeStream(text, voice string, onChunk func(AudioChunk)) error {
 				continue
 			}
 			if chunkCount == 0 {
-				log.Printf("[TTS] first binary chunk: headerLen=%d audioLen=%d", headerLen, len(audioData))
 			}
 			chunkCount++
 			onChunk(AudioChunk{Data: audioData})
@@ -166,12 +163,10 @@ func SynthesizeStream(text, voice string, onChunk func(AudioChunk)) error {
 			headers, body := parseHeadersAndBody(data)
 			path := headers["Path"]
 			if path != "turn.end" && chunkCount == 0 {
-				log.Printf("[TTS] text msg path=%q headers=%v body_preview=%s", path, headers, string(body[:min(len(body), 120)]))
 			}
 
 			switch path {
 			case "turn.end":
-				log.Printf("[TTS] done, chunks=%d", chunkCount)
 				onChunk(AudioChunk{Final: true})
 				return nil
 
@@ -328,7 +323,6 @@ func SynthesizeStretched(text, voice string, targetDuration float64) (string, er
 	ttsDuration, err := mp3Duration(rawMP3)
 	if err != nil || ttsDuration <= 0 {
 		// Can't measure duration, return unstretched audio
-		log.Printf("[TTS] cannot measure mp3 duration, returning unstretched")
 		return rawB64, nil
 	}
 
@@ -342,11 +336,9 @@ func SynthesizeStretched(text, voice string, targetDuration float64) (string, er
 	// Clamp to atempo range (0.5 to 2.0); chain filters for extremes
 	stretched, err := stretchMP3(rawMP3, ratio)
 	if err != nil {
-		log.Printf("[TTS] stretch failed, returning unstretched: %v", err)
 		return rawB64, nil
 	}
 
-	log.Printf("[TTS] lip-sync: tts=%.2fs target=%.2fs ratio=%.2f", ttsDuration, targetDuration, ratio)
 	return base64.StdEncoding.EncodeToString(stretched), nil
 }
 
@@ -414,11 +406,9 @@ func buildAtempoFilter(ratio float64) string {
 func Warmup(voice string) {
 	go func() {
 		if _, err := Synthesize("ready", voice); err != nil {
-			log.Printf("[TTS] warmup failed (non-fatal): %v", err)
 		}
 	}()
 }
 
 func init() {
-	log.Printf("[TTS] Go-native Edge TTS ready (no Python relay)")
 }

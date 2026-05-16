@@ -9,7 +9,6 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -175,7 +174,6 @@ func (ab *AudioBuffer) cutSegment(endSample int) {
 	ab.lastSpeechTime = now
 	speaker := string(rune('A' + ab.speakerTurn%26))
 
-	fmt.Fprintf(os.Stderr, "asr: speech segment %.1fs (%d samples), speaker=%s, sending to whisper-server\n", segDur, segLen, speaker)
 
 	go ab.processSegment(segment, segDur, false, speaker) // final result
 }
@@ -265,13 +263,11 @@ func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial
 
 	wavData, err := pcmToWav(samples)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "asr: wav encode error: %v\n", err)
 		return
 	}
 
 	text, err := ab.callWhisperServer(wavData)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "asr: whisper-server error: %v\n", err)
 		return
 	}
 
@@ -286,9 +282,7 @@ func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial
 			return
 		}
 		ab.lastStreamingText = text
-		fmt.Fprintf(os.Stderr, "asr: streaming: %q\n", text)
 	} else {
-		fmt.Fprintf(os.Stderr, "asr: recognized: %q\n", text)
 	}
 
 	if ab.onResult != nil {

@@ -203,7 +203,7 @@
     ttsAudio = new Audio(url);
     ttsAudio.volume = 0.9;
     ttsAudio.playbackRate = smoothSpeechRate(speechRate);
-    ttsAudio.play().catch((e) => console.warn('[AI翻译] TTS play:', e.message));
+    ttsAudio.play().catch(() => {});
   }
 
   function stopTTS() {
@@ -244,16 +244,14 @@
           ttsSourceBuffer.onupdateend = drainTTSQueue;
           drainTTSQueue();
         } catch (e) {
-          console.warn('[AI翻译] MSE addSourceBuffer failed, falling back');
           ttsMSEWorks = false;
           ttsMediaSource = null;
           ttsSourceBuffer = null;
         }
       };
 
-      ttsAudio.play().catch((e) => console.warn('[AI翻译] TTS play:', e.message));
+      ttsAudio.play().catch(() => {});
     } catch (e) {
-      console.warn('[AI翻译] MSE not available, using fallback');
       ttsMSEWorks = false;
     }
   }
@@ -310,7 +308,7 @@
       ttsAudio = new Audio(url);
       ttsAudio.volume = 0.9;
       ttsAudio.playbackRate = ttsFallbackRate;
-      ttsAudio.play().catch((e) => console.warn('[AI翻译] TTS fallback play:', e.message));
+      ttsAudio.play().catch(() => {});
     }
     ttsFallbackChunks = [];
     finishWarmup();
@@ -346,7 +344,6 @@
     var player = document.querySelector('#movie_player') ||
                  document.querySelector('.html5-video-player');
     if (!player) {
-      console.warn('[AI翻译] DOM 观察器: 找不到播放器元素');
       return false;
     }
 
@@ -371,7 +368,6 @@
         lastDOMSubtitle = text;
         showSubtitle(text, null);
         ws.send(JSON.stringify({ type: 'subtitle', text: text }));
-        console.log('[AI翻译] DOM 字幕: %s', text.substring(0, 80));
       }
     }
 
@@ -429,7 +425,6 @@
 
     // Initial check
     setTimeout(checkAndSend, 500);
-    console.log('[AI翻译] DOM 字幕观察器已启动');
     return true;
   }
 
@@ -440,7 +435,6 @@
     }
     lastDOMSubtitle = '';
     subtitleMode = false;
-    console.log('[AI翻译] DOM 字幕观察器已停止');
   }
 
 
@@ -452,10 +446,8 @@
 
   async function extractSubtitles() {
     const host = location.hostname;
-    console.log('[AI翻译] extractSubtitles: host=%s', host);
     if (host.includes('youtube.com')) return extractYouTubeSubs();
     if (host.includes('bilibili.com')) return extractBilibiliSubs();
-    console.log('[AI翻译] extractSubtitles: no platform match, trying TextTrack');
     return extractTextTrackSubs();
   }
 
@@ -475,7 +467,6 @@
         return JSON.parse(m[1]);
       } catch (_) {
         // The JSON might be too large or contain trailing data; try a simpler approach
-        console.warn('[AI翻译] readPageVar: %s JSON parse failed, trying alternative', varName);
         return null;
       }
     }
@@ -485,12 +476,10 @@
 	  async function extractYouTubeSubs() {
 	    var ytData = readPageVar('ytInitialPlayerResponse');
 	    if (!ytData || !ytData.captions) {
-	      console.warn('[AI翻译] YouTube: ytInitialPlayerResponse.captions not found');
 	      return null;
 	    }
 	    var tracks = ytData.captions.playerCaptionsTracklistRenderer?.captionTracks;
 	    if (!tracks || tracks.length === 0) {
-	      console.warn('[AI翻译] YouTube: no caption tracks');
 	      return null;
 	    }
 
@@ -526,7 +515,6 @@
 
 	    var subs = null;
 	    for (var ui = 0; ui < urls.length; ui++) {
-	      console.log('[AI翻译] YouTube try[%d]: %s', ui, urls[ui].substring(0, 120));
 	      subs = await tryFetchTimedtext(urls[ui]);
 	      if (subs) break;
 	      subs = await tryFetchTimedtextViaMain(urls[ui]);
@@ -534,26 +522,20 @@
 	    }
 
 	    if (subs) {
-	      console.log('[AI翻译] YouTube: 提取到 %d 条字幕', subs.length);
 	      return subs;
 	    }
-	    console.warn('[AI翻译] YouTube: 所有方式都无法提取字幕');
 	    return null;
 	  }
 
 	  async function tryFetchTimedtext(url) {
 	    try {
 	      var resp = await fetch(url);
-	      console.log('[AI翻译] tryFetchTimedtext: status=%d content-type=%s', resp.status, resp.headers.get('content-type'));
-	      if (!resp.ok) { console.warn('[AI翻译] tryFetchTimedtext: bad status'); return null; }
+	      if (!resp.ok) {return null; }
 	      var text = await resp.text();
-	      console.log('[AI翻译] tryFetchTimedtext: bodyLen=%d preview=%s', text.length, text.substring(0, 120));
-	      if (!text || text.length < 20) { console.warn('[AI翻译] tryFetchTimedtext: body too short'); return null; }
+	      if (!text || text.length < 20) {return null; }
 	      var subs = parseTimedtextXML(text);
-	      console.log('[AI翻译] tryFetchTimedtext: parsed %d subs', subs ? subs.length : 0);
 	      return subs;
 	    } catch (e) {
-	      console.warn('[AI翻译] tryFetchTimedtext: exception %s', e.message);
 	      return null;
 	    }
 	  }
@@ -577,20 +559,15 @@
 
 	  async function tryFetchTimedtextViaMain(url) {
 	    try {
-	      console.log('[AI翻译] tryFetchTimedtextViaMain: url=%s', url.substring(0, 120));
 	      var result = await new Promise(function (resolve) {
 	        chrome.runtime.sendMessage({ type: 'fetchInMain', url: url }, resolve);
 	      });
-	      console.log('[AI翻译] tryFetchTimedtextViaMain: ok=%s textLen=%d error=%s',
-	        result && result.ok, result && result.text ? result.text.length : 0, result && result.error);
-	      if (!result) { console.warn('[AI翻译] tryFetchTimedtextViaMain: no result'); return null; }
-	      if (!result.ok) { console.warn('[AI翻译] tryFetchTimedtextViaMain: not ok, error=%s', result.error); return null; }
-	      if (!result.text || result.text.length < 20) { console.warn('[AI翻译] tryFetchTimedtextViaMain: text too short'); return null; }
+	      if (!result) {return null; }
+	      if (!result.ok) {return null; }
+	      if (!result.text || result.text.length < 20) {return null; }
 	      var subs = parseTimedtextXML(result.text);
-	      console.log('[AI翻译] tryFetchTimedtextViaMain: parsed %d subs', subs ? subs.length : 0);
 	      return subs;
 	    } catch (e) {
-	      console.warn('[AI翻译] tryFetchTimedtextViaMain: exception %s', e.message);
 	      return null;
 	    }
 	  }
@@ -602,7 +579,6 @@
 
     // Step 2: if not found, try Bilibili API
     if (!subUrl) {
-      console.log('[AI翻译] B站: __INITIAL_STATE__ 没有字幕, 尝试 API...');
       try {
         var bvid = location.pathname.split('/video/')[1];
         if (bvid) {
@@ -632,10 +608,8 @@
           subs.push({ text: text, start: body[i].from, end: body[i].to });
         }
       }
-      console.log('[AI翻译] B站: 提取到 %d 条字幕', subs.length);
       return subs.length > 0 ? subs : null;
     } catch (e) {
-      console.warn('[AI翻译] B站字幕下载失败:', e);
       return null;
     }
   }
@@ -655,7 +629,7 @@
         subs.push({ text: text, start: cue.startTime, end: cue.endTime });
       }
     }
-    if (subs.length > 0) console.log('[AI翻译] TextTrack: 提取到 %d 条字幕', subs.length);
+    if (subs.length > 0);
     return subs.length > 0 ? subs : null;
   }
 
@@ -666,7 +640,6 @@
       video = duckedVideo;
     }
     if (!video) {
-      console.warn('[AI翻译] 未找到正在播放的视频');
       sendStatus('error', '未找到正在播放的视频元素');
       return false;
     }
@@ -678,13 +651,11 @@
         stream = video.captureStream();
       } catch (e) {
         // captureStream() might fail on some sites
-        console.warn('[AI翻译] captureStream() 失败，尝试 captureStream(0)');
         stream = video.captureStream(0);
       }
 
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length === 0) {
-        console.warn('[AI翻译] 视频无音轨，尝试捕获系统音频');
         // Fallback: request tab capture via background
         return await startTabCapture();
       }
@@ -694,7 +665,6 @@
       setupAudioProcessing(audioStream);
       return true;
     } catch (err) {
-      console.error('[AI翻译] 音频捕获失败:', err);
       sendStatus('error', '音频捕获失败: ' + err.message);
       return false;
     }
@@ -739,7 +709,6 @@
     if (!preheatActive) {
       processorNode.connect(audioContext.destination);
     }
-    console.log('[AI翻译] 音频处理已启动 16kHz/mono');
   }
 
   function stopAudioCapture() {
@@ -766,7 +735,6 @@
     try {
       ws = new WebSocket(settings.wsUrl);
     } catch (err) {
-      console.error('[AI翻译] WebSocket 创建失败:', err);
       scheduleReconnect();
       return;
     }
@@ -774,11 +742,9 @@
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
-      console.log('[AI翻译] WebSocket 已连接');
       reconnectAttempts = 0;
       sendStatus('connected');
 
-      console.log('[AI翻译] ▷ config');
       ws.send(JSON.stringify({
         type: 'config',
         sourceLang: settings.sourceLang,
@@ -791,7 +757,6 @@
 
       // In sync mode: send preprocess right after config (server processes sequentially)
       if (syncMode && pendingSubs) {
-        console.log('[AI翻译] ▷ preprocess (%d subtitles)', pendingSubs.length);
         ws.send(JSON.stringify({
           type: 'preprocess',
           subs: pendingSubs,
@@ -803,19 +768,15 @@
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        console.log('[AI翻译] ◁', msg.type, msg.status || msg.original || '');
         handleServerMessage(msg);
       } catch (err) {
-        console.error('[AI翻译] 消息解析失败:', err);
       }
     };
 
     ws.onclose = (event) => {
-      console.log('[AI翻译] WebSocket 断开:', event.code, event.reason);
       ws = null;
       if (isRunning) {
         if (syncMode || subtitleMode) {
-          console.log('[AI翻译] 字幕模式断开');
           stopSyncPlayback();
           stopDOMSubtitleObserver();
           isRunning = false;
@@ -831,21 +792,18 @@
     };
 
     ws.onerror = (err) => {
-      console.error('[AI翻译] WebSocket 错误');
       // onclose will fire after this
     };
   }
 
   function scheduleReconnect() {
     if (reconnectAttempts >= MAX_RECONNECT) {
-      console.error('[AI翻译] 重连失败，已达最大重试次数');
       sendStatus('error', '连接失败，请确保后端服务已启动');
       return;
     }
 
     const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 15000);
     reconnectAttempts++;
-    console.log(`[AI翻译] ${delay / 1000}s 后重连 (第 ${reconnectAttempts} 次)`);
 
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => {
@@ -883,7 +841,6 @@
 
       // ─── Preprocess messages (sync mode) ──────────────────────────
       case 'preprocess_start':
-        console.log('[AI翻译] 预处理开始: %d 条字幕', msg.total);
         sendStatus('preprocessing', '预处理 ' + msg.total + ' 条字幕...');
         break;
 
@@ -894,47 +851,39 @@
           }
           // Sort by index to maintain correct order
           preprocessedItems.sort((a, b) => a.index - b.index);
-          console.log('[AI翻译] 预处理进度: %d/%d', preprocessedItems.length, msg.total || '?');
         }
         break;
 
       case 'preprocess_complete':
-        console.log('[AI翻译] 预处理完成, %d 条字幕, 启动同步播放', preprocessedItems.length);
         sendStatus('playing');
         startSyncPlayback();
         break;
 
       case 'preprocess_error':
-        console.error('[AI翻译] 预处理错误:', msg.message);
         sendStatus('error', msg.message);
         fallbackToASR();
         break;
 
       // ─── Status ────────────────────────────────────────────────────
       case 'status':
-        console.log('[AI翻译] 状态:', msg.status);
         if (msg.status === 'configured') {
           if (!syncMode) {
             // In ASR mode: send warmup. In sync mode: preprocess already sent.
-            console.log('[AI翻译] ▷ warmup');
             ws.send(JSON.stringify({ type: 'warmup' }));
           }
         } else if (msg.status === 'ready') {
           if (preheatActive) {
             preheatPhase2();
           } else if (!startSent && !syncMode) {
-            console.log('[AI翻译] ready handler: startSent=%s syncMode=%s subtitleMode=%s', startSent, syncMode, subtitleMode);
             if (subtitleMode) {
               // DOM subtitle mode: no audio capture, just activate
               startSent = true;
-              console.log('[AI翻译] ▷ start (DOM subtitle mode)');
               ws.send(JSON.stringify({ type: 'start' }));
               chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
             } else {
               startAudioCapture().then(ok => {
                 if (ok) {
                   startSent = true;
-                  console.log('[AI翻译] ▷ start');
                   ws.send(JSON.stringify({ type: 'start' }));
                   chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
                 } else {
@@ -953,7 +902,6 @@
         break;
 
       case 'error':
-        console.error('[AI翻译] 服务端错误:', msg.message);
         sendStatus('error', msg.message);
         finishWarmup();
         break;
@@ -1004,7 +952,6 @@
   function preheat() {
     if (preheatActive || preheatReady || isRunning || ws) return;
     preheatActive = true;
-    console.log('[AI翻译] 自动开始翻译...');
     start();
   }
 
@@ -1013,10 +960,8 @@
       if (ok) {
         preheatActive = false;
         preheatReady = true;
-        console.log('[AI翻译] 后台预热完成 — 即点即用');
       } else {
         preheatActive = false;
-        console.warn('[AI翻译] 后台预热音频捕获失败');
       }
     });
   }
@@ -1024,10 +969,8 @@
   function activatePipeline() {
     if (processorNode) {
       processorNode.connect(audioContext.destination);
-      console.log('[AI翻译] 音频管线已激活');
     }
     startSent = true;
-    console.log('[AI翻译] ▷ start');
     ws.send(JSON.stringify({ type: 'start' }));
     chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
   }
@@ -1048,7 +991,6 @@
   }
 
   function hideLoading() {
-    console.log('[AI翻译] hideLoading — 设置 display=none !important');
     clearTimeout(loadingOverlay._safetyTimer);
     clearTimeout(loadingOverlay._resumeTimer);
     loadingOverlay.style.setProperty('display', 'none', 'important');
@@ -1056,7 +998,6 @@
 
   function finishWarmup() {
     if (warmupDone) return;
-    console.log('[AI翻译] finishWarmup — 解除静音 + 关闭 loading');
     warmupDone = true;
     unduckVideoAudio();
     hideLoading();
@@ -1067,7 +1008,6 @@
   function startSyncPlayback() {
     syncVideo = findVideoElement();
     if (!syncVideo) {
-      console.warn('[AI翻译] sync mode: 找不到视频元素');
       fallbackToASR();
       return;
     }
@@ -1080,7 +1020,6 @@
           item.audioEl.volume = 0.9;
           item.audioEl.playbackRate = syncVideo.playbackRate || 1.0;
         } catch (e) {
-          console.warn('[AI翻译] 创建 Audio 失败:', e);
         }
       }
     }
@@ -1089,7 +1028,6 @@
     syncVideo.addEventListener('ratechange', onVideoRateChange);
 
     lastSyncTime = syncVideo.currentTime;
-    console.log('[AI翻译] 同步播放开始, items=%d, currentTime=%.1f', preprocessedItems.length, lastSyncTime);
     chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
     finishWarmup();
     syncLoop();
@@ -1140,7 +1078,6 @@
         }
       }
     }
-    console.log('[AI翻译] reSync to %.1f', currentTime);
   }
 
   function onVideoRateChange() {
@@ -1171,7 +1108,6 @@
   }
 
   function fallbackToASR() {
-    console.log('[AI翻译] 回退到 ASR 模式');
     stopSyncPlayback();
     // Retry with ASR mode
     startASRMode();
@@ -1201,7 +1137,6 @@
       savedVolume = video.volume;
       video.volume = savedVolume * DUCK_VOLUME;
       duckedVideo = video;
-      console.log('[AI翻译] 视频音量已降低至 %d%', Math.round(DUCK_VOLUME * 100));
     }
   }
 
@@ -1209,7 +1144,6 @@
     if (duckedVideo) {
       duckedVideo.volume = savedVolume;
       duckedVideo = null;
-      console.log('[AI翻译] 视频音量已恢复');
     }
   }
 
@@ -1222,7 +1156,6 @@
     subtitleMode = false;
     pendingSubs = null;
 
-    console.log('[AI翻译] 启动翻译...');
     sendStatus('starting', '连接中...');
 
     // Kill preheat BEFORE any async work to prevent race conditions
@@ -1242,7 +1175,6 @@
     // Safety timeout
     loadingOverlay._safetyTimer = setTimeout(() => {
       if (!warmupDone) {
-        console.warn('[AI翻译] 超时，强制关闭 loading');
         finishWarmup();
       }
     }, 15000);
@@ -1250,7 +1182,6 @@
     // Try subtitle extraction for sync mode
     const subs = await extractSubtitles();
     if (subs && subs.length > 0) {
-      console.log('[AI翻译] 检测到 %d 条字幕，使用同步模式', subs.length);
       syncMode = true;
       pendingSubs = subs;
 
@@ -1269,7 +1200,6 @@
     // API extraction failed — try DOM subtitle observer for YouTube
     subtitleMode = canObserveDOMSubtitles();
     if (subtitleMode) {
-      console.log('[AI翻译] 使用 DOM 字幕观察模式');
       // Connect WS if needed (same flow as sync mode)
       if (ws) {
         ws.onclose = null;
@@ -1283,12 +1213,10 @@
     }
 
     // No subtitles at all — use ASR mode
-    console.log('[AI翻译] 未检测到字幕，使用 ASR 模式');
 
     // If preheat fully ready, activate instantly
     if (preheatReady && ws && ws.readyState === WebSocket.OPEN) {
       preheatReady = false;
-      console.log('[AI翻译] 使用预热管线，即时启动');
       activatePipeline();
       return;
     }
@@ -1310,7 +1238,6 @@
     isRunning = false;
     startSent = false;
 
-    console.log('[AI翻译] 停止翻译');
 
     if (syncMode) {
       stopSyncPlayback();
@@ -1371,7 +1298,6 @@
   });
 
   // ─── Initialization ───────────────────────────────────────────────
-  console.log('[AI翻译] 内容脚本已加载');
 
   // Start background preheat as soon as a video is detected
   tryPreheat();

@@ -41,7 +41,6 @@ type Client struct {
 	sourceLang      string
 	targetLang      string
 	active          bool
-	audioChunkCount int // diagnostic counter
 }
 
 // Subtitle is a single subtitle cue extracted from a video platform.
@@ -111,7 +110,6 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 	if c.translator != nil && c.targetLang != "" {
 		translated, err := c.translator.Translate(text, c.sourceLang, c.targetLang)
 		if err != nil {
-			log.Printf("translate error: %v", err)
 			c.sendJSON(OutMsg{Type: "error", Message: fmt.Sprintf("Translation error: %v", err)})
 			return
 		}
@@ -138,7 +136,6 @@ func (c *Client) generateAndSendTTS(text string, speechRate float64, originalDur
 	if originalDuration > 0.5 {
 		audioB64, err := tts.SynthesizeStretched(text, voice, originalDuration)
 		if err != nil {
-			log.Printf("tts stretched error: %v", err)
 			return
 		}
 		c.sendJSON(OutMsg{
@@ -187,7 +184,6 @@ func (c *Client) generateAndSendTTS(text string, speechRate float64, originalDur
 		}
 	})
 	if err != nil {
-		log.Printf("tts error: %v", err)
 		c.sendJSON(OutMsg{Type: "audio_end", Original: text, Index: -1, SpeechRate: speechRate})
 	}
 }
@@ -201,7 +197,6 @@ func (c *Client) handleDOMSubtitle(text string) {
 	}
 	translated, err := c.translator.Translate(text, c.sourceLang, c.targetLang)
 	if err != nil {
-		log.Printf("dom subtitle translate error: %v", err)
 		c.sendJSON(OutMsg{Type: "error", Message: fmt.Sprintf("Translation error: %v", err)})
 		return
 	}
@@ -230,7 +225,6 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 		return
 	}
 
-	log.Printf("preprocess: %d subtitles, translating + synthesizing...", len(subs))
 	c.sendJSON(OutMsg{Type: "preprocess_start", Total: len(subs)})
 
 	voice := tts.VoiceForLang(c.targetLang)
@@ -274,7 +268,6 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 			var err error
 			audio, err = tts.Synthesize(translation, voice)
 			if err != nil {
-				log.Printf("preprocess tts error [%d]: %v", idx, err)
 			}
 			item := PreprocessResult{
 				Index:       idx,
@@ -301,7 +294,6 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 	}
 
 	c.sendJSON(OutMsg{Type: "preprocess_complete"})
-	log.Printf("preprocess complete: %d/%d subtitles synthesized", total, len(subs))
 }
 
 // mergeSubtitles deduplicates and merges adjacent subtitles with very short gaps.
@@ -337,7 +329,6 @@ var whisperServerURL string
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("upgrade error: %v", err)
 		return
 	}
 	defer conn.Close()
@@ -348,13 +339,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		targetLang: "zh-Hans",
 	}
 
-	log.Printf("client connected from %s", r.RemoteAddr)
 
 	for {
 		msgType, data, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("ws read error: %v", err)
 			}
 			return
 		}
@@ -363,7 +352,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		case websocket.TextMessage:
 			var msg InMsg
 			if err := json.Unmarshal(data, &msg); err != nil {
-				log.Printf("json parse error: %v", err)
 				continue
 			}
 
@@ -381,7 +369,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					client.onASRResult,
 				)
 				client.sendJSON(OutMsg{Type: "status", Status: "configured"})
-				log.Printf("client configured: %s → %s", client.sourceLang, client.targetLang)
 
 			case "warmup":
 				go func() {
@@ -390,7 +377,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					// TTS warmup (fire-and-forget via Go-native Edge TTS)
 					tts.Warmup(tts.VoiceForLang(client.targetLang))
 					client.sendJSON(OutMsg{Type: "status", Status: "ready"})
-					log.Printf("warmup complete for %s → %s", client.sourceLang, client.targetLang)
 				}()
 
 			case "start":
@@ -408,7 +394,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				go client.handlePreprocess(msg.Subs)
 
 			default:
-				log.Printf("unknown message type: %s", msg.Type)
 			}
 
 		case websocket.BinaryMessage:
@@ -419,22 +404,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			samples := make([]int16, sampleCount)
 			for i := 0; i < sampleCount; i++ {
 				samples[i] = int16(binary.LittleEndian.Uint16(data[i*2 : (i+1)*2]))
-			}
-
-			// Diagnostic: log audio level every ~2 seconds
-			client.audioChunkCount++
-			if client.audioChunkCount%15 == 1 {
-				var sum int
-				for _, s := range samples {
-					if s < 0 {
-						sum -= int(s)
-					} else {
-						sum += int(s)
-					}
-				}
-				avgLevel := float64(sum) / float64(sampleCount) / 32768.0
-				log.Printf("audio chunk #%d: %d samples, avg level=%.4f",
-					client.audioChunkCount, sampleCount, avgLevel)
 			}
 
 			client.audioBuf.Append(samples)
@@ -482,7 +451,6 @@ func startWhisperServer(cfg *config.Config) (*exec.Cmd, error) {
 		"--no-timestamps",
 	}
 
-	log.Printf("Starting whisper-server: %s %v", serverExe, args)
 	cmd := exec.Command(serverExe, args...)
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
@@ -497,7 +465,6 @@ func startWhisperServer(cfg *config.Config) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("whisper-server startup: %w", err)
 	}
 
-	log.Printf("whisper-server ready at %s (model loaded, ~0ms per-request overhead)", whisperServerURL)
 	return cmd, nil
 }
 
@@ -568,9 +535,6 @@ func main() {
 	// Start whisper-server (keeps model warm)
 	whisperCmd, err := startWhisperServer(cfg)
 	if err != nil {
-		log.Printf("⚠ ASR unavailable: %v", err)
-		log.Printf("  The extension will still connect but ASR won't work.")
-		log.Printf("  Make sure whisper-server.exe and model are in place.")
 	} else {
 		defer whisperCmd.Process.Kill()
 	}
@@ -591,16 +555,12 @@ func main() {
 	})
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
-	log.Printf("=== AI Translation Backend ===")
-	log.Printf("WebSocket: ws://localhost%s/ws", addr)
-	log.Printf("Health:    http://localhost%s/health", addr)
 
 	// Graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("Shutting down...")
 		if whisperCmd != nil {
 			whisperCmd.Process.Kill()
 		}

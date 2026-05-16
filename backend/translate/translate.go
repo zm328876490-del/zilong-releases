@@ -78,7 +78,6 @@ func (t *Translator) Translate(text, from, to string) (string, error) {
 		t.cachePut(cacheKey, result)
 		return result, nil
 	}
-	fmt.Printf("translate: microsoft failed (%v), trying next backend\n", err)
 
 	if t.baiduAppID != "" {
 		result, err := t.translateBaidu(text, from, to)
@@ -86,7 +85,6 @@ func (t *Translator) Translate(text, from, to string) (string, error) {
 			t.cachePut(cacheKey, result)
 			return result, nil
 		}
-		fmt.Printf("translate: baidu failed (%v), trying next backend\n", err)
 	}
 
 	result, err = t.translateGoogle(text, from, to)
