@@ -1004,8 +1004,8 @@
   function preheat() {
     if (preheatActive || preheatReady || isRunning || ws) return;
     preheatActive = true;
-    console.log('[AI翻译] 后台预热开始...');
-    connectWebSocket();
+    console.log('[AI翻译] 自动开始翻译...');
+    start();
   }
 
   function preheatPhase2() {
@@ -1324,9 +1324,6 @@
     stopTTS();
     contentDiv.innerHTML = '';
     finishWarmup();
-
-    // Re-preheat for next use
-    setTimeout(() => tryPreheat(), 1000);
 
     chrome.runtime.sendMessage({ type: 'stopped' }).catch(() => {});
   }
