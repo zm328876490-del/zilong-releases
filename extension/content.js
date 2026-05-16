@@ -37,6 +37,7 @@
   let syncRafId = null;           // requestAnimationFrame ID
   let lastSyncTime = 0;           // last video.currentTime
   let syncVideo = null;           // the video element being synced to
+  let currentSyncAudio = null;    // currently playing TTS audio (to stop before next)
 
   // DOM subtitle observer state
   let subtitleMode = false;       // true = DOM caption extraction mode
@@ -182,6 +183,7 @@
   // ─── TTS (streaming Edge TTS via MSE, with fallback) ────────────────
   let lastSpokenText = '';
   let ttsAudio = null;
+  let ttsAudioUrl = null;    // blob URL for revocation on stop
 
   // Speech rate smoothing: 3-sentence moving average
   const rateHistory = [];
@@ -213,6 +215,7 @@
 
     const url = `data:${mimeType};base64,${base64}`;
     ttsAudio = new Audio(url);
+    ttsAudioUrl = url;
     ttsAudio.volume = 0.9;
     ttsAudio.playbackRate = smoothSpeechRate(speechRate);
     ttsAudio.play().catch(() => {});
@@ -220,14 +223,27 @@
 
   function stopTTS() {
     if (ttsAudio) {
+      // Detach source to kill any buffered playback immediately
+      try { ttsAudio.src = ''; } catch (_) {}
       try { ttsAudio.pause(); } catch (_) {}
       ttsAudio = null;
     }
-    // Clean up MSE
-    if (ttsMediaSource && ttsMediaSource.readyState === 'open') {
-      try { ttsMediaSource.endOfStream(); } catch (_) {}
+    // Revoke old blob URL to prevent memory leaks
+    if (ttsAudioUrl) {
+      try { URL.revokeObjectURL(ttsAudioUrl); } catch (_) {}
+      ttsAudioUrl = null;
     }
-    ttsMediaSource = null;
+    // Clean up MSE — end the stream regardless of readyState
+    if (ttsMediaSource) {
+      try {
+        if (ttsMediaSource.readyState === 'open') {
+          ttsMediaSource.endOfStream();
+        }
+      } catch (_) {}
+      // Detach any pending sourceopen callback by clearing onsourceopen
+      ttsMediaSource.onsourceopen = null;
+      ttsMediaSource = null;
+    }
     ttsSourceBuffer = null;
     ttsPendingBuffers = [];
   }
@@ -245,6 +261,7 @@
     try {
       ttsMediaSource = new MediaSource();
       const url = URL.createObjectURL(ttsMediaSource);
+      ttsAudioUrl = url;
       ttsAudio = new Audio(url);
       ttsAudio.volume = 0.9;
       ttsAudio.playbackRate = ttsFallbackRate;
@@ -270,6 +287,8 @@
 
   function handleAudioChunk(msg) {
     if (!msg.audio) return;
+    // Discard stale chunks from a previous (now-cancelled) TTS utterance
+    if (msg.original && msg.original !== lastSpokenText) return;
     const binary = atob(msg.audio);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -299,6 +318,8 @@
   }
 
   function handleAudioEnd(msg) {
+    // Discard stale end marker from a previous (now-cancelled) TTS utterance
+    if (msg.original && msg.original !== lastSpokenText) return;
     if (ttsMSEWorks && ttsMediaSource) {
       const finalize = () => {
         drainTTSQueue();
@@ -317,6 +338,7 @@
     if (ttsFallbackChunks.length > 0) {
       const blob = new Blob(ttsFallbackChunks, { type: 'audio/mpeg' });
       const url = URL.createObjectURL(blob);
+      ttsAudioUrl = url;
       ttsAudio = new Audio(url);
       ttsAudio.volume = 0.9;
       ttsAudio.playbackRate = ttsFallbackRate;
@@ -999,6 +1021,10 @@
         item.played = true;
         showSubtitle(item.original, item.translation);
         if (item.audioEl) {
+          if (currentSyncAudio && !currentSyncAudio.paused) {
+            currentSyncAudio.pause();
+          }
+          currentSyncAudio = item.audioEl;
           item.audioEl.play().catch(() => {});
         }
       }
@@ -1015,6 +1041,11 @@
       } else {
         item.played = true;
       }
+    }
+    // Stop previously playing audio — the next frame will start the correct one
+    if (currentSyncAudio) {
+      try { currentSyncAudio.pause(); } catch (_) {}
+      currentSyncAudio = null;
     }
     // Stop any playing TTS from items far past
     for (const item of preprocessedItems) {
@@ -1042,6 +1073,10 @@
     if (syncVideo) {
       syncVideo.removeEventListener('ratechange', onVideoRateChange);
       syncVideo = null;
+    }
+    if (currentSyncAudio) {
+      try { currentSyncAudio.pause(); } catch (_) {}
+      currentSyncAudio = null;
     }
     for (const item of preprocessedItems) {
       if (item.audioEl) {
