@@ -41,6 +41,8 @@
   // DOM subtitle observer state
   let subtitleMode = false;       // true = DOM caption extraction mode
   let domObserver = null;         // MutationObserver for caption elements
+  let ccObserver = null;          // MutationObserver for CC button (prevents user turning off)
+  let captionStyleEl = null;      // injected <style> to hide native YouTube captions
   let lastDOMSubtitle = '';       // deduplicate consecutive identical captions
 
   // ─── Loading Overlay (shown during warmup, auto-hides on first TTS) ──
@@ -347,6 +349,32 @@
       return false;
     }
 
+    // Force YouTube CC on — the DOM nodes we observe only exist when CC is active
+    var ccBtn = player.querySelector('.ytp-subtitles-button');
+    if (ccBtn && ccBtn.getAttribute('aria-pressed') === 'false') {
+      ccBtn.click();
+    }
+
+    // Prevent user from turning CC off during translation
+    if (ccBtn) {
+      ccObserver = new MutationObserver(function () {
+        var btn = player.querySelector('.ytp-subtitles-button');
+        if (btn && btn.getAttribute('aria-pressed') === 'false') {
+          btn.click();
+        }
+      });
+      ccObserver.observe(ccBtn, {
+        attributes: true,
+        attributeFilter: ['aria-pressed'],
+      });
+    }
+
+    // Hide YouTube native caption display so the user sees our overlay instead
+    captionStyleEl = document.createElement('style');
+    captionStyleEl.id = '__ai_caption_hider__';
+    captionStyleEl.textContent = '.caption-window { opacity: 0 !important; }';
+    document.head.appendChild(captionStyleEl);
+
     function getCurrentCaptionText() {
       // YouTube caption segments
       var segments = player.querySelectorAll('.ytp-caption-segment');
@@ -433,6 +461,14 @@
       domObserver.disconnect();
       domObserver = null;
     }
+    if (ccObserver) {
+      ccObserver.disconnect();
+      ccObserver = null;
+    }
+    if (captionStyleEl) {
+      captionStyleEl.remove();
+      captionStyleEl = null;
+    }
     lastDOMSubtitle = '';
     subtitleMode = false;
   }
@@ -446,7 +482,6 @@
 
   async function extractSubtitles() {
     const host = location.hostname;
-    if (host.includes('youtube.com')) return extractYouTubeSubs();
     if (host.includes('bilibili.com')) return extractBilibiliSubs();
     return extractTextTrackSubs();
   }
@@ -473,104 +508,6 @@
     return null;
   }
 
-	  async function extractYouTubeSubs() {
-	    var ytData = readPageVar('ytInitialPlayerResponse');
-	    if (!ytData || !ytData.captions) {
-	      return null;
-	    }
-	    var tracks = ytData.captions.playerCaptionsTracklistRenderer?.captionTracks;
-	    if (!tracks || tracks.length === 0) {
-	      return null;
-	    }
-
-	    // Prefer ASR (auto-generated), fall back to manual
-	    var track = tracks.find(function (t) { return t.kind === 'asr'; }) || tracks[0];
-	    var lang = track.languageCode || 'en';
-
-	    // Build minimal timedtext URLs.
-	    // The baseUrl from ytInitialPlayerResponse includes ip/signature/expire
-	    // params that cause empty responses from extension context.
-	    var videoId = '';
-	    var m = location.search.match(/[?&]v=([^&]+)/);
-	    if (m) videoId = m[1];
-	    if (!videoId) {
-	      m = location.pathname.match(/\/video\/([^/?]+)/);
-	      if (m) videoId = m[1];
-	    }
-
-	    // Several URL variants to try (simplest first, no signature needed)
-	    var urls = [];
-	    if (videoId) {
-	      urls.push('https://www.youtube.com/api/timedtext?v=' + videoId + '&lang=' + lang + '&fmt=vtt');
-	      urls.push('https://www.youtube.com/api/timedtext?v=' + videoId + '&lang=' + lang + '&fmt=srv3');
-	      urls.push('https://www.youtube.com/api/timedtext?v=' + videoId + '&lang=' + lang);
-	    }
-	    // Also try the baseUrl with fmt=vtt appended
-	    if (track.baseUrl) {
-	      var raw = track.baseUrl;
-	      if (raw.indexOf('//') === 0) raw = 'https:' + raw;
-	      urls.push(raw + '&fmt=vtt');
-	      urls.push(raw);
-	    }
-
-	    var subs = null;
-	    for (var ui = 0; ui < urls.length; ui++) {
-	      subs = await tryFetchTimedtext(urls[ui]);
-	      if (subs) break;
-	      subs = await tryFetchTimedtextViaMain(urls[ui]);
-	      if (subs) break;
-	    }
-
-	    if (subs) {
-	      return subs;
-	    }
-	    return null;
-	  }
-
-	  async function tryFetchTimedtext(url) {
-	    try {
-	      var resp = await fetch(url);
-	      if (!resp.ok) {return null; }
-	      var text = await resp.text();
-	      if (!text || text.length < 20) {return null; }
-	      var subs = parseTimedtextXML(text);
-	      return subs;
-	    } catch (e) {
-	      return null;
-	    }
-	  }
-
-	  function parseTimedtextXML(raw) {
-	    var subs = [];
-	    var re = /<text start="([\d.]+)" dur="([\d.]+)">([^<]*)<\/text>/g;
-	    var m;
-	    while ((m = re.exec(raw)) !== null) {
-	      var start = parseFloat(m[1]);
-	      var dur = parseFloat(m[2]);
-	      var txt = document.createElement('textarea');
-	      txt.innerHTML = m[3];
-	      var text = txt.value.trim();
-	      if (text.length >= 2) {
-	        subs.push({ text: text, start: start, end: start + dur });
-	      }
-	    }
-	    return subs.length > 0 ? subs : null;
-	  }
-
-	  async function tryFetchTimedtextViaMain(url) {
-	    try {
-	      var result = await new Promise(function (resolve) {
-	        chrome.runtime.sendMessage({ type: 'fetchInMain', url: url }, resolve);
-	      });
-	      if (!result) {return null; }
-	      if (!result.ok) {return null; }
-	      if (!result.text || result.text.length < 20) {return null; }
-	      var subs = parseTimedtextXML(result.text);
-	      return subs;
-	    } catch (e) {
-	      return null;
-	    }
-	  }
   async function extractBilibiliSubs() {
     // Step 1: try reading subtitle URL from page's __INITIAL_STATE__
     var s = readPageVar('__INITIAL_STATE__');
