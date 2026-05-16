@@ -99,23 +99,29 @@
         transition: opacity 0.3s !important;
         max-width: 85vw !important;
       }
-      #__ai_subtitle_overlay__ .subtitle-line {
+      #__ai_subtitle_overlay__ .subtitle-box {
         background: rgba(0, 0, 0, 0.78) !important;
-        color: #fff !important;
         padding: 10px 22px !important;
         border-radius: 10px !important;
-        margin: 4px 0 !important;
-        font-size: 20px !important;
-        line-height: 1.5 !important;
-        letter-spacing: 0.5px !important;
-        text-shadow: 0 1px 3px rgba(0,0,0,0.5) !important;
-        word-break: break-word !important;
         display: inline-block !important;
         animation: __fadeIn__ 0.25s ease-out !important;
+      }
+      #__ai_subtitle_overlay__ .subtitle-line {
+        color: #fff !important;
+        text-shadow: 0 1px 3px rgba(0,0,0,0.5) !important;
+        word-break: break-word !important;
+        line-height: 1.5 !important;
+        letter-spacing: 0.5px !important;
+        text-align: center !important;
       }
       #__ai_subtitle_overlay__ .subtitle-original {
         font-size: 16px !important;
         opacity: 0.85 !important;
+        margin-bottom: 2px !important;
+      }
+      #__ai_subtitle_overlay__ .subtitle-translation {
+        font-size: 20px !important;
+        font-weight: 500 !important;
       }
       #__ai_subtitle_overlay__ .subtitle-speaker {
         display: inline-block !important;
@@ -147,11 +153,15 @@
       lastSpeaker = speaker;
       html += `<div class="subtitle-speaker">Speaker ${escapeHTML(speaker)}</div>`;
     }
-    if (original) {
-      html += `<div class="subtitle-line subtitle-original">${escapeHTML(original)}</div>`;
-    }
-    if (translation) {
-      html += `<div class="subtitle-line">${escapeHTML(translation)}</div>`;
+    if (original || translation) {
+      html += '<div class="subtitle-box">';
+      if (original) {
+        html += `<div class="subtitle-line subtitle-original">${escapeHTML(original)}</div>`;
+      }
+      if (translation) {
+        html += `<div class="subtitle-line subtitle-translation">${escapeHTML(translation)}</div>`;
+      }
+      html += '</div>';
     }
     contentDiv.innerHTML = html;
 
