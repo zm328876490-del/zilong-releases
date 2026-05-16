@@ -1,0 +1,235 @@
+/* popup.css */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 320px;
+  font-family: -apple-system, 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  font-size: 13px;
+  color: #1a1a2e;
+  background: #f8f9fc;
+}
+
+.container {
+  padding: 16px;
+}
+
+/* ─── Header ─────────────────────────────── */
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e5ee;
+}
+
+header h1 {
+  font-size: 18px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.status-idle,
+.status-connected,
+.status-listening,
+.status-starting,
+.status-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 12px;
+}
+
+.status-idle {
+  color: #8b8fa3;
+  background: #eef0f5;
+}
+.status-connected {
+  color: #6366f1;
+  background: #eef0ff;
+}
+.status-listening {
+  color: #059669;
+  background: #d1fae5;
+  animation: pulse 2s infinite;
+}
+.status-starting {
+  color: #d97706;
+  background: #fef3c7;
+}
+.status-error {
+  color: #dc2626;
+  background: #fee2e2;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* ─── Form ───────────────────────────────── */
+.form-group {
+  margin-bottom: 12px;
+}
+
+.form-row {
+  display: flex;
+  gap: 10px;
+}
+
+.form-row .form-group {
+  flex: 1;
+}
+
+label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #4b5563;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+input,
+select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 13px;
+  background: #fff;
+  transition: border-color 0.15s;
+  font-family: inherit;
+}
+
+input:focus,
+select:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+select {
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7280' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+}
+
+.hint {
+  display: block;
+  font-size: 10px;
+  color: #6b7280;
+  text-decoration: none;
+  margin-top: 3px;
+}
+
+.optional {
+  font-weight: 400;
+  color: #9ca3af;
+  font-size: 10px;
+  text-transform: none;
+}
+
+/* ─── Button ─────────────────────────────── */
+button {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.btn-start {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+}
+
+.btn-start:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+}
+
+.btn-stop {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  color: #fff;
+}
+
+.btn-stop:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+}
+
+button:active {
+  transform: scale(0.98);
+}
+
+.error-msg {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: #fee2e2;
+  color: #dc2626;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+fieldset.translate-section {
+  border: 1px solid #e2e5ee;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+fieldset.translate-section legend {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4b5563;
+  padding: 0 4px;
+}
+
+.recommended {
+  color: #059669;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.fallback-hint {
+  font-size: 10px;
+  color: #9ca3af;
+  text-align: center;
+  margin: 4px 0 8px;
+}

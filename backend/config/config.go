@@ -1,0 +1,70 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+)
+
+type Config struct {
+	Port       string
+	WhisperExe string // path to whisper-cli.exe (whisper-server.exe is derived from this)
+	ModelPath  string
+	ModelDir   string
+}
+
+// WhisperPort returns the port for whisper-server (different from our WS port).
+func (c *Config) WhisperPort() string {
+	return "8080"
+}
+
+func Load() *Config {
+	cfg := &Config{
+		Port:     "9527",
+		ModelDir: filepath.Join("..", "models"),
+	}
+
+	if p := os.Getenv("PORT"); p != "" {
+		cfg.Port = p
+	}
+
+	exeName := "whisper-cli"
+	if runtime.GOOS == "windows" {
+		exeName = "whisper-cli.exe"
+	}
+
+	// Look for whisper-cli in common locations
+	candidates := []string{
+		filepath.Join(".", exeName),
+		filepath.Join("..", "whisper.cpp", "build", "bin", "Release", exeName),
+		filepath.Join("..", "whisper.cpp", "build", "bin", exeName),
+		filepath.Join("..", "whisper.cpp", exeName),
+	}
+	if envExe := os.Getenv("WHISPER_EXE"); envExe != "" {
+		candidates = append([]string{envExe}, candidates...)
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			cfg.WhisperExe = c
+			break
+		}
+	}
+
+	// Model candidates
+	modelCandidates := []string{
+		filepath.Join(cfg.ModelDir, "ggml-tiny.bin"),
+		filepath.Join(cfg.ModelDir, "ggml-tiny.gguf"),
+		filepath.Join(cfg.ModelDir, "ggml-tiny.en.bin"),
+	}
+	if envModel := os.Getenv("WHISPER_MODEL"); envModel != "" {
+		modelCandidates = append([]string{envModel}, modelCandidates...)
+	}
+	for _, c := range modelCandidates {
+		if _, err := os.Stat(c); err == nil {
+			cfg.ModelPath = c
+			break
+		}
+	}
+
+	return cfg
+}

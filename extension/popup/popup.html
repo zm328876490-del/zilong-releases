@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=320, initial-scale=1.0">
+  <title>AI 实时翻译</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>AI 实时翻译</h1>
+      <div id="statusIndicator" class="status-idle">
+        <span class="dot"></span>
+        <span id="statusText">未连接</span>
+      </div>
+    </header>
+
+    <main>
+      <div class="form-group">
+        <label for="wsUrl">后端地址</label>
+        <input type="text" id="wsUrl" value="ws://localhost:9527/ws" placeholder="ws://localhost:9527/ws">
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label for="sourceLang">源语言</label>
+          <select id="sourceLang">
+            <option value="auto">自动检测</option>
+            <option value="en">English</option>
+            <option value="zh">中文</option>
+            <option value="ja">日本語</option>
+            <option value="ko">한국어</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="es">Español</option>
+            <option value="pt">Português</option>
+            <option value="ru">Русский</option>
+            <option value="th">ไทย</option>
+            <option value="vi">Tiếng Việt</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="targetLang">目标语言</label>
+          <select id="targetLang">
+            <option value="zh-Hans">中文(简体)</option>
+            <option value="en">English</option>
+            <option value="ja">日本語</option>
+            <option value="ko">한국어</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="es">Español</option>
+            <option value="pt">Português</option>
+            <option value="ru">Русский</option>
+            <option value="th">ไทย</option>
+            <option value="vi">Tiếng Việt</option>
+          </select>
+        </div>
+      </div>
+
+      <fieldset class="translate-section">
+        <legend>百度翻译 <span class="optional">(可选·国内备用)</span></legend>
+        <div class="form-group">
+          <label for="baiduAppID">APP ID</label>
+          <input type="text" id="baiduAppID" placeholder="百度翻译开放平台 APP ID">
+        </div>
+        <div class="form-group">
+          <label for="baiduSecret">密钥 (Secret)</label>
+          <input type="password" id="baiduSecret" placeholder="百度翻译 Secret Key">
+        </div>
+        <a href="https://fanyi-api.baidu.com/" target="_blank" class="hint">免费注册 (1M 字符/月) → 获取 APP ID 和密钥</a>
+      </fieldset>
+
+      <div class="fallback-hint">
+        默认使用微软翻译（免费·国内可用），无需配置即可使用
+      </div>
+
+      <button id="toggleBtn" class="btn-start">
+        <span id="toggleIcon">▶</span>
+        <span id="toggleText">开始翻译</span>
+      </button>
+
+      <div id="errorMsg" class="error-msg" style="display:none"></div>
+    </main>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

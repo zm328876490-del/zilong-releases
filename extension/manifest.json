@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "AI 实时翻译",
+  "version": "1.0.0",
+  "description": "视频/直播实时翻译：字幕 + TTS 播报",
+  "permissions": ["activeTab", "storage", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "AI 实时翻译"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "128": "icons/icon.png"
+  }
+}
