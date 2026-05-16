@@ -71,10 +71,12 @@ type OutMsg struct {
 	Audio       string             `json:"audio,omitempty"`
 	AudioMime   string             `json:"audioMime,omitempty"`
 	SpeechRate  float64            `json:"speechRate,omitempty"`
-	Partial     bool               `json:"partial,omitempty"` // true for streaming ASR preview
-	Index       int                `json:"index,omitempty"`   // audio chunk sequence number (-1 = end)
-	Items       []PreprocessResult `json:"items,omitempty"`   // batch preprocess results
-	Total       int                `json:"total,omitempty"`   // total subtitle count
+	Duration    float64            `json:"duration,omitempty"` // original speech duration (sec)
+	Speaker     string             `json:"speaker,omitempty"`  // speaker label (A, B, C, ...)
+	Partial     bool               `json:"partial,omitempty"`  // true for streaming ASR preview
+	Index       int                `json:"index,omitempty"`    // audio chunk sequence number (-1 = end)
+	Items       []PreprocessResult `json:"items,omitempty"`    // batch preprocess results
+	Total       int                `json:"total,omitempty"`    // total subtitle count
 }
 
 type InMsg struct {
@@ -95,11 +97,11 @@ func (c *Client) sendJSON(msg OutMsg) error {
 	return c.conn.WriteJSON(msg)
 }
 
-func (c *Client) onASRResult(text string, speechRate float64, isPartial bool) {
+func (c *Client) onASRResult(text string, speechRate float64, duration float64, isPartial bool, speaker string) {
 	if !c.active {
 		return
 	}
-	c.sendJSON(OutMsg{Type: "original", Text: text, Partial: isPartial})
+	c.sendJSON(OutMsg{Type: "original", Text: text, Partial: isPartial, Speaker: speaker, Duration: duration})
 
 	// Partial results are streaming previews — don't translate or TTS yet
 	if isPartial {
@@ -119,18 +121,38 @@ func (c *Client) onASRResult(text string, speechRate float64, isPartial bool) {
 				Original:    text,
 				Translation: translated,
 				SpeechRate:  speechRate,
+				Duration:    duration,
+				Speaker:     speaker,
 			})
 
 			// Generate TTS in background (doesn't block next ASR result)
-			go c.generateAndSendTTS(translated, speechRate)
+			go c.generateAndSendTTS(translated, speechRate, duration)
 		}
 	}
 }
 
-func (c *Client) generateAndSendTTS(text string, speechRate float64) {
+func (c *Client) generateAndSendTTS(text string, speechRate float64, originalDuration float64) {
 	voice := tts.VoiceForLang(c.targetLang)
 
-	// Send audio_start first so the client can prepare MSE / playback
+	// Lip-sync path: stretch TTS to match original speech duration
+	if originalDuration > 0.5 {
+		audioB64, err := tts.SynthesizeStretched(text, voice, originalDuration)
+		if err != nil {
+			log.Printf("tts stretched error: %v", err)
+			return
+		}
+		c.sendJSON(OutMsg{
+			Type:       "audio",
+			Original:   text,
+			Audio:      audioB64,
+			AudioMime:  "audio/mpeg",
+			SpeechRate: speechRate,
+			Duration:   originalDuration,
+		})
+		return
+	}
+
+	// Streaming path (no duration info, e.g. DOM subtitles or partial)
 	c.sendJSON(OutMsg{
 		Type:       "audio_start",
 		Original:   text,
@@ -166,7 +188,6 @@ func (c *Client) generateAndSendTTS(text string, speechRate float64) {
 	})
 	if err != nil {
 		log.Printf("tts error: %v", err)
-		// Signal client that the TTS stream failed — triggers fallback or cleanup
 		c.sendJSON(OutMsg{Type: "audio_end", Original: text, Index: -1, SpeechRate: speechRate})
 	}
 }
@@ -192,7 +213,7 @@ func (c *Client) handleDOMSubtitle(text string) {
 		Original:    text,
 		Translation: translated,
 	})
-	go c.generateAndSendTTS(translated, 5.0)
+	go c.generateAndSendTTS(translated, 5.0, 0) // DOM subtitles have no duration info
 }
 
 // handlePreprocess runs concurrent translation + TTS synthesis for all subtitles

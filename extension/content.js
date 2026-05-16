@@ -115,6 +115,17 @@
         font-size: 16px !important;
         opacity: 0.85 !important;
       }
+      #__ai_subtitle_overlay__ .subtitle-speaker {
+        display: inline-block !important;
+        background: rgba(99, 102, 241, 0.85) !important;
+        color: #fff !important;
+        padding: 2px 10px !important;
+        border-radius: 12px !important;
+        font-size: 12px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.5px !important;
+        margin-bottom: 2px !important;
+      }
       @keyframes __fadeIn__ {
         from { opacity: 0; transform: translateY(6px); }
         to   { opacity: 1; transform: translateY(0); }
@@ -126,8 +137,14 @@
 
   const contentDiv = overlay.querySelector('#__subtitle_content__');
 
-  function showSubtitle(original, translation) {
+  let lastSpeaker = '';
+
+  function showSubtitle(original, translation, speaker) {
     let html = '';
+    if (speaker && speaker !== lastSpeaker) {
+      lastSpeaker = speaker;
+      html += `<div class="subtitle-speaker">Speaker ${escapeHTML(speaker)}</div>`;
+    }
     if (original) {
       html += `<div class="subtitle-line subtitle-original">${escapeHTML(original)}</div>`;
     }
@@ -140,6 +157,7 @@
     clearTimeout(contentDiv._clearTimer);
     contentDiv._clearTimer = setTimeout(() => {
       contentDiv.innerHTML = '';
+      lastSpeaker = '';
     }, 5000);
   }
 
@@ -644,8 +662,8 @@
   async function startAudioCapture() {
     let video = findVideoElement();
     // Fallback: video may be muted/hidden by our loading overlay
-    if (!video && mutedVideo) {
-      video = mutedVideo;
+    if (!video && duckedVideo) {
+      video = duckedVideo;
     }
     if (!video) {
       console.warn('[AI翻译] 未找到正在播放的视频');
@@ -838,11 +856,11 @@
   function handleServerMessage(msg) {
     switch (msg.type) {
       case 'original':
-        showSubtitle(msg.text, null);
+        showSubtitle(msg.text, null, msg.speaker);
         break;
 
       case 'result':
-        showSubtitle(msg.original, msg.translation);
+        showSubtitle(msg.original, msg.translation, msg.speaker);
         break;
 
       case 'audio_start':
@@ -954,8 +972,9 @@
   }
 
   // ─── Control ──────────────────────────────────────────────────────
-  let mutedVideo = null;
+  let duckedVideo = null;   // video whose audio is ducked (not muted)
   let savedVolume = 1;
+  const DUCK_VOLUME = 0.25; // video volume during TTS playback
   let warmupDone = false;
   let startSent = false;  // prevents duplicate 'start' messages
 
@@ -1039,7 +1058,7 @@
     if (warmupDone) return;
     console.log('[AI翻译] finishWarmup — 解除静音 + 关闭 loading');
     warmupDone = true;
-    unmuteCurrentVideo();
+    unduckVideoAudio();
     hideLoading();
   }
 
@@ -1176,21 +1195,21 @@
     connectWebSocket();
   }
 
-  function muteCurrentVideo() {
+  function duckVideoAudio() {
     const video = findVideoElement();
     if (video) {
       savedVolume = video.volume;
-      video.volume = 0;
-      mutedVideo = video;
-      console.log('[AI翻译] 视频已静音');
+      video.volume = savedVolume * DUCK_VOLUME;
+      duckedVideo = video;
+      console.log('[AI翻译] 视频音量已降低至 %d%', Math.round(DUCK_VOLUME * 100));
     }
   }
 
-  function unmuteCurrentVideo() {
-    if (mutedVideo) {
-      mutedVideo.volume = savedVolume;
-      mutedVideo = null;
-      console.log('[AI翻译] 视频已解除静音');
+  function unduckVideoAudio() {
+    if (duckedVideo) {
+      duckedVideo.volume = savedVolume;
+      duckedVideo = null;
+      console.log('[AI翻译] 视频音量已恢复');
     }
   }
 
@@ -1217,7 +1236,7 @@
       ws = null;
     }
 
-    muteCurrentVideo();
+    duckVideoAudio();
     showLoading();
 
     // Safety timeout

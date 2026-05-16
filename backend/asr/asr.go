@@ -40,18 +40,22 @@ type AudioBuffer struct {
 	serverURL string
 	language  string
 
-	// onResult callback: text, speechRate (chars/sec), isPartial
-	onResult func(originalText string, speechRate float64, isPartial bool)
+	// onResult callback: text, speechRate (chars/sec), duration (sec), isPartial, speaker label
+	onResult func(originalText string, speechRate float64, duration float64, isPartial bool, speaker string)
 
 	// streaming state
 	lastFlushSample   int
 	lastStreamingText string
 	streamingStop     chan struct{}
 	speechActive      bool
+
+	// speaker diarization (pause-based heuristic)
+	speakerTurn    int
+	lastSpeechTime time.Time
 }
 
 // NewAudioBuffer creates a new audio buffer.
-func NewAudioBuffer(serverURL, language string, onResult func(string, float64, bool)) *AudioBuffer {
+func NewAudioBuffer(serverURL, language string, onResult func(string, float64, float64, bool, string)) *AudioBuffer {
 	return &AudioBuffer{
 		samples:    make([]int16, 0, sampleRate*10),
 		speechStart: -1,
@@ -162,9 +166,18 @@ func (ab *AudioBuffer) cutSegment(endSample int) {
 	copy(segment, ab.samples[ab.speechStart:endSample])
 
 	segDur := float64(segLen) / sampleRate
-	fmt.Fprintf(os.Stderr, "asr: speech segment %.1fs (%d samples), sending to whisper-server\n", segDur, segLen)
 
-	go ab.processSegment(segment, segDur, false) // final result
+	// Speaker diarization: if gap since last speech > 1.5s, assume new speaker
+	now := time.Now()
+	if !ab.lastSpeechTime.IsZero() && now.Sub(ab.lastSpeechTime) > 1500*time.Millisecond {
+		ab.speakerTurn++
+	}
+	ab.lastSpeechTime = now
+	speaker := string(rune('A' + ab.speakerTurn%26))
+
+	fmt.Fprintf(os.Stderr, "asr: speech segment %.1fs (%d samples), speaker=%s, sending to whisper-server\n", segDur, segLen, speaker)
+
+	go ab.processSegment(segment, segDur, false, speaker) // final result
 }
 
 func calcRMS(samples []int16) float64 {
@@ -239,13 +252,13 @@ func (ab *AudioBuffer) flushStreamingChunk() {
 	ab.mu.Unlock()
 
 	segDur := float64(segLen) / sampleRate
-	go ab.processSegment(segment, segDur, true) // partial result
+	go ab.processSegment(segment, segDur, true, "") // partial result (no speaker)
 }
 
 // ─── Whisper-server communication ────────────────────────────────────
 
 // processSegment sends a speech segment to whisper-server via HTTP.
-func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial bool) {
+func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial bool, speaker string) {
 	if ab.serverURL == "" {
 		return
 	}
@@ -281,7 +294,7 @@ func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial
 	if ab.onResult != nil {
 		charCount := len([]rune(text))
 		speechRate := float64(charCount) / segDur
-		ab.onResult(text, speechRate, isPartial)
+		ab.onResult(text, speechRate, segDur, isPartial, speaker)
 	}
 }
 

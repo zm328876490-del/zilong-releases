@@ -13,6 +13,10 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -304,6 +308,106 @@ func escapeXML(s string) string {
 		}
 	}
 	return buf.String()
+}
+
+// SynthesizeStretched synthesizes TTS audio and stretches/compresses it
+// to match the target duration (in seconds) using ffmpeg atempo.
+// Returns base64-encoded MP3.
+func SynthesizeStretched(text, voice string, targetDuration float64) (string, error) {
+	// Get raw TTS audio first
+	rawB64, err := Synthesize(text, voice)
+	if err != nil {
+		return "", err
+	}
+
+	rawMP3, err := base64.StdEncoding.DecodeString(rawB64)
+	if err != nil {
+		return "", fmt.Errorf("decode tts: %w", err)
+	}
+
+	ttsDuration, err := mp3Duration(rawMP3)
+	if err != nil || ttsDuration <= 0 {
+		// Can't measure duration, return unstretched audio
+		log.Printf("[TTS] cannot measure mp3 duration, returning unstretched")
+		return rawB64, nil
+	}
+
+	ratio := targetDuration / ttsDuration
+
+	// Only stretch if difference is significant (> 10%)
+	if ratio > 0.9 && ratio < 1.1 {
+		return rawB64, nil
+	}
+
+	// Clamp to atempo range (0.5 to 2.0); chain filters for extremes
+	stretched, err := stretchMP3(rawMP3, ratio)
+	if err != nil {
+		log.Printf("[TTS] stretch failed, returning unstretched: %v", err)
+		return rawB64, nil
+	}
+
+	log.Printf("[TTS] lip-sync: tts=%.2fs target=%.2fs ratio=%.2f", ttsDuration, targetDuration, ratio)
+	return base64.StdEncoding.EncodeToString(stretched), nil
+}
+
+// mp3Duration returns the duration of an MP3 file in seconds using ffprobe.
+func mp3Duration(mp3 []byte) (float64, error) {
+	tmpFile, err := os.CreateTemp("", "tts_*.mp3")
+	if err != nil {
+		return 0, err
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmpFile.Write(mp3); err != nil {
+		tmpFile.Close()
+		return 0, err
+	}
+	tmpFile.Close()
+
+	out, err := exec.Command("ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", tmpPath).Output()
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+}
+
+// stretchMP3 stretches/compresses MP3 audio by the given ratio using ffmpeg atempo.
+func stretchMP3(mp3 []byte, ratio float64) ([]byte, error) {
+	tmpIn, err := os.CreateTemp("", "tts_in_*.mp3")
+	if err != nil {
+		return nil, err
+	}
+	tmpInPath := tmpIn.Name()
+	defer os.Remove(tmpInPath)
+	if _, err := tmpIn.Write(mp3); err != nil {
+		tmpIn.Close()
+		return nil, err
+	}
+	tmpIn.Close()
+
+	tmpOutPath := filepath.Join(os.TempDir(), fmt.Sprintf("tts_out_%d.mp3", time.Now().UnixNano()))
+
+	// Chain multiple atempo filters if ratio is outside [0.5, 2.0]
+	filter := buildAtempoFilter(ratio)
+
+	cmd := exec.Command("ffmpeg", "-y", "-v", "quiet", "-i", tmpInPath, "-filter:a", filter, "-c:a", "libmp3lame", "-b:a", "48k", tmpOutPath)
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg atempo: %w", err)
+	}
+	defer os.Remove(tmpOutPath)
+
+	return os.ReadFile(tmpOutPath)
+}
+
+// buildAtempoFilter returns an ffmpeg atempo filter string for the given ratio.
+// Chains multiple atempo filters for values outside [0.5, 2.0].
+func buildAtempoFilter(ratio float64) string {
+	if ratio >= 0.5 && ratio <= 2.0 {
+		return fmt.Sprintf("atempo=%.4f", ratio)
+	}
+	// For extreme values, chain sqrt(ratio) twice
+	mid := math.Sqrt(ratio)
+	return fmt.Sprintf("atempo=%.4f,atempo=%.4f", mid, mid)
 }
 
 // Warmup performs a fire-and-forget warmup call.
