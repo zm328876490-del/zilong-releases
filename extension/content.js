@@ -38,6 +38,11 @@
   let lastSyncTime = 0;           // last video.currentTime
   let syncVideo = null;           // the video element being synced to
 
+  // DOM subtitle observer state
+  let subtitleMode = false;       // true = DOM caption extraction mode
+  let domObserver = null;         // MutationObserver for caption elements
+  let lastDOMSubtitle = '';       // deduplicate consecutive identical captions
+
   // ─── Loading Overlay (shown during warmup, auto-hides on first TTS) ──
   const loadingOverlay = document.createElement('div');
   loadingOverlay.id = '__ai_loading_overlay__';
@@ -308,6 +313,119 @@
       })[0] || videos[0];
   }
 
+
+  // ─── DOM Subtitle Observer (YouTube caption element scraping) ──────────
+  // Watches YouTube's built-in caption display elements and extracts text
+  // in real-time. This bypasses YouTube's timedtext API blocks.
+
+  function canObserveDOMSubtitles() {
+    var player = document.querySelector("#movie_player") ||
+                 document.querySelector(".html5-video-player");
+    return !!player;
+  }
+
+  function startDOMSubtitleObserver() {
+    var player = document.querySelector('#movie_player') ||
+                 document.querySelector('.html5-video-player');
+    if (!player) {
+      console.warn('[AI翻译] DOM 观察器: 找不到播放器元素');
+      return false;
+    }
+
+    function getCurrentCaptionText() {
+      // YouTube caption segments
+      var segments = player.querySelectorAll('.ytp-caption-segment');
+      if (segments.length === 0) {
+        segments = player.querySelectorAll('.caption-window span');
+      }
+      var texts = [];
+      for (var i = 0; i < segments.length; i++) {
+        var t = (segments[i].textContent || '').trim();
+        if (t) texts.push(t);
+      }
+      return texts.join(' ');
+    }
+
+    function checkAndSend() {
+      if (!isRunning || !ws || ws.readyState !== WebSocket.OPEN) return;
+      var text = getCurrentCaptionText();
+      if (text && text !== lastDOMSubtitle && text.length >= 2) {
+        lastDOMSubtitle = text;
+        showSubtitle(text, null);
+        ws.send(JSON.stringify({ type: 'subtitle', text: text }));
+        console.log('[AI翻译] DOM 字幕: %s', text.substring(0, 80));
+      }
+    }
+
+    // Throttle to avoid spamming during rapid updates
+    var throttleTimer = null;
+    var lastCheckTime = 0;
+    function throttledCheck() {
+      var now = Date.now();
+      if (now - lastCheckTime > 150) {
+        lastCheckTime = now;
+        checkAndSend();
+      } else {
+        clearTimeout(throttleTimer);
+        throttleTimer = setTimeout(checkAndSend, 150);
+      }
+    }
+
+    domObserver = new MutationObserver(function (mutations) {
+      for (var i = 0; i < mutations.length; i++) {
+        var m = mutations[i];
+        // Text content changes in caption segments
+        if (m.type === 'characterData') {
+          var parent = m.target.parentElement;
+          if (parent && (parent.classList.contains('ytp-caption-segment') ||
+              (parent.closest && parent.closest('.caption-window')))) {
+            throttledCheck();
+            return;
+          }
+        }
+        // New nodes added
+        for (var j = 0; j < m.addedNodes.length; j++) {
+          var node = m.addedNodes[j];
+          if (node.nodeType !== 1) continue;
+          if (node.classList && (node.classList.contains('caption-window') ||
+              node.classList.contains('ytp-caption-segment'))) {
+            throttledCheck();
+            return;
+          }
+          if (node.querySelectorAll) {
+            var segs = node.querySelectorAll('.ytp-caption-segment, .caption-window');
+            if (segs.length > 0) {
+              throttledCheck();
+              return;
+            }
+          }
+        }
+      }
+    });
+
+    domObserver.observe(player, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+
+    // Initial check
+    setTimeout(checkAndSend, 500);
+    console.log('[AI翻译] DOM 字幕观察器已启动');
+    return true;
+  }
+
+  function stopDOMSubtitleObserver() {
+    if (domObserver) {
+      domObserver.disconnect();
+      domObserver = null;
+    }
+    lastDOMSubtitle = '';
+    subtitleMode = false;
+    console.log('[AI翻译] DOM 字幕观察器已停止');
+  }
+
+
   // ─── Subtitle Extraction ───────────────────────────────────────────
   // Content scripts run in ISOLATED world by default, so we can't read
   // window.ytInitialPlayerResponse / __INITIAL_STATE__ directly.
@@ -346,79 +464,118 @@
     return null;
   }
 
-  async function extractYouTubeSubs() {
-    var ytData = readPageVar('ytInitialPlayerResponse');
-    if (!ytData || !ytData.captions) {
-      console.warn('[AI翻译] YouTube: ytInitialPlayerResponse.captions not found');
-      return null;
-    }
-    var tracks = ytData.captions.playerCaptionsTracklistRenderer?.captionTracks;
-    if (!tracks || tracks.length === 0) {
-      console.warn('[AI翻译] YouTube: no caption tracks');
-      return null;
-    }
+	  async function extractYouTubeSubs() {
+	    var ytData = readPageVar('ytInitialPlayerResponse');
+	    if (!ytData || !ytData.captions) {
+	      console.warn('[AI翻译] YouTube: ytInitialPlayerResponse.captions not found');
+	      return null;
+	    }
+	    var tracks = ytData.captions.playerCaptionsTracklistRenderer?.captionTracks;
+	    if (!tracks || tracks.length === 0) {
+	      console.warn('[AI翻译] YouTube: no caption tracks');
+	      return null;
+	    }
 
-    var track = tracks.find(function (t) { return t.kind === 'asr'; }) || tracks[0];
-    console.log('[AI翻译] YouTube: selected track kind=%s lang=%s', track.kind, track.languageCode);
-    if (!track || !track.baseUrl) return null;
+	    // Prefer ASR (auto-generated), fall back to manual
+	    var track = tracks.find(function (t) { return t.kind === 'asr'; }) || tracks[0];
+	    var lang = track.languageCode || 'en';
 
-    try {
-      // Fetch timedtext via background script → MAIN world (bypasses CSP/credential issues)
-      var json3Url = track.baseUrl + '&fmt=json3';
-      if (json3Url.indexOf('//') === 0) json3Url = 'https:' + json3Url;
-      console.log('[AI翻译] YouTube: fetching via MAIN world relay: %s...', json3Url.substring(0, 100));
+	    // Build minimal timedtext URLs.
+	    // The baseUrl from ytInitialPlayerResponse includes ip/signature/expire
+	    // params that cause empty responses from extension context.
+	    var videoId = '';
+	    var m = location.search.match(/[?&]v=([^&]+)/);
+	    if (m) videoId = m[1];
+	    if (!videoId) {
+	      m = location.pathname.match(/\/video\/([^/?]+)/);
+	      if (m) videoId = m[1];
+	    }
 
-      var result = await new Promise(function (resolve) {
-        chrome.runtime.sendMessage({ type: 'fetchInMain', url: json3Url }, resolve);
-      });
+	    // Several URL variants to try (simplest first, no signature needed)
+	    var urls = [];
+	    if (videoId) {
+	      urls.push('https://www.youtube.com/api/timedtext?v=' + videoId + '&lang=' + lang + '&fmt=vtt');
+	      urls.push('https://www.youtube.com/api/timedtext?v=' + videoId + '&lang=' + lang + '&fmt=srv3');
+	      urls.push('https://www.youtube.com/api/timedtext?v=' + videoId + '&lang=' + lang);
+	    }
+	    // Also try the baseUrl with fmt=vtt appended
+	    if (track.baseUrl) {
+	      var raw = track.baseUrl;
+	      if (raw.indexOf('//') === 0) raw = 'https:' + raw;
+	      urls.push(raw + '&fmt=vtt');
+	      urls.push(raw);
+	    }
 
-      if (!result || !result.ok || !result.text) {
-        console.warn('[AI翻译] YouTube: fetchInMain failed: %o', result);
-        return null;
-      }
+	    var subs = null;
+	    for (var ui = 0; ui < urls.length; ui++) {
+	      console.log('[AI翻译] YouTube try[%d]: %s', ui, urls[ui].substring(0, 120));
+	      subs = await tryFetchTimedtext(urls[ui]);
+	      if (subs) break;
+	      subs = await tryFetchTimedtextViaMain(urls[ui]);
+	      if (subs) break;
+	    }
 
-      var raw = result.text;
-      console.log('[AI翻译] YouTube: got response len=%d, preview: %s', raw.length, raw.substring(0, 200));
+	    if (subs) {
+	      console.log('[AI翻译] YouTube: 提取到 %d 条字幕', subs.length);
+	      return subs;
+	    }
+	    console.warn('[AI翻译] YouTube: 所有方式都无法提取字幕');
+	    return null;
+	  }
 
-      var subs = [];
-      try {
-        var json = JSON.parse(raw);
-        var events = json.events || [];
-        for (var i = 0; i < events.length; i++) {
-          var ev = events[i];
-          if (!ev.segs) continue;
-          var txt = '';
-          for (var j = 0; j < ev.segs.length; j++) {
-            txt += (ev.segs[j].utf8 || '');
-          }
-          txt = txt.replace(/<[^>]*>/g, '').trim();
-          if (txt.length >= 2) {
-            subs.push({ text: txt, start: ev.tStartMs / 1000, end: (ev.tStartMs + ev.dDurationMs) / 1000 });
-          }
-        }
-        console.log('[AI翻译] YouTube json3: 提取到 %d 条字幕', subs.length);
-      } catch (_) {
-        console.log('[AI翻译] YouTube: json3 parse failed, trying XML');
-        var regex = /<text start="([\d.]+)" dur="([\d.]+)">([^<]*)<\/text>/g;
-        var match;
-        while ((match = regex.exec(raw)) !== null) {
-          var start = parseFloat(match[1]);
-          var dur = parseFloat(match[2]);
-          var t = match[3].replace(/&#39;/g, "'").replace(/&amp;/g, '&')
-            .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').trim();
-          if (t.length >= 2) {
-            subs.push({ text: t, start: start, end: start + dur });
-          }
-        }
-        console.log('[AI翻译] YouTube XML: 提取到 %d 条字幕', subs.length);
-      }
-      return subs.length > 0 ? subs : null;
-    } catch (e) {
-      console.warn('[AI翻译] YouTube 字幕下载失败:', e);
-      return null;
-    }
-  }
+	  async function tryFetchTimedtext(url) {
+	    try {
+	      var resp = await fetch(url);
+	      console.log('[AI翻译] tryFetchTimedtext: status=%d content-type=%s', resp.status, resp.headers.get('content-type'));
+	      if (!resp.ok) { console.warn('[AI翻译] tryFetchTimedtext: bad status'); return null; }
+	      var text = await resp.text();
+	      console.log('[AI翻译] tryFetchTimedtext: bodyLen=%d preview=%s', text.length, text.substring(0, 120));
+	      if (!text || text.length < 20) { console.warn('[AI翻译] tryFetchTimedtext: body too short'); return null; }
+	      var subs = parseTimedtextXML(text);
+	      console.log('[AI翻译] tryFetchTimedtext: parsed %d subs', subs ? subs.length : 0);
+	      return subs;
+	    } catch (e) {
+	      console.warn('[AI翻译] tryFetchTimedtext: exception %s', e.message);
+	      return null;
+	    }
+	  }
 
+	  function parseTimedtextXML(raw) {
+	    var subs = [];
+	    var re = /<text start="([\d.]+)" dur="([\d.]+)">([^<]*)<\/text>/g;
+	    var m;
+	    while ((m = re.exec(raw)) !== null) {
+	      var start = parseFloat(m[1]);
+	      var dur = parseFloat(m[2]);
+	      var txt = document.createElement('textarea');
+	      txt.innerHTML = m[3];
+	      var text = txt.value.trim();
+	      if (text.length >= 2) {
+	        subs.push({ text: text, start: start, end: start + dur });
+	      }
+	    }
+	    return subs.length > 0 ? subs : null;
+	  }
+
+	  async function tryFetchTimedtextViaMain(url) {
+	    try {
+	      console.log('[AI翻译] tryFetchTimedtextViaMain: url=%s', url.substring(0, 120));
+	      var result = await new Promise(function (resolve) {
+	        chrome.runtime.sendMessage({ type: 'fetchInMain', url: url }, resolve);
+	      });
+	      console.log('[AI翻译] tryFetchTimedtextViaMain: ok=%s textLen=%d error=%s',
+	        result && result.ok, result && result.text ? result.text.length : 0, result && result.error);
+	      if (!result) { console.warn('[AI翻译] tryFetchTimedtextViaMain: no result'); return null; }
+	      if (!result.ok) { console.warn('[AI翻译] tryFetchTimedtextViaMain: not ok, error=%s', result.error); return null; }
+	      if (!result.text || result.text.length < 20) { console.warn('[AI翻译] tryFetchTimedtextViaMain: text too short'); return null; }
+	      var subs = parseTimedtextXML(result.text);
+	      console.log('[AI翻译] tryFetchTimedtextViaMain: parsed %d subs', subs ? subs.length : 0);
+	      return subs;
+	    } catch (e) {
+	      console.warn('[AI翻译] tryFetchTimedtextViaMain: exception %s', e.message);
+	      return null;
+	    }
+	  }
   async function extractBilibiliSubs() {
     // Step 1: try reading subtitle URL from page's __INITIAL_STATE__
     var s = readPageVar('__INITIAL_STATE__');
@@ -639,10 +796,10 @@
       console.log('[AI翻译] WebSocket 断开:', event.code, event.reason);
       ws = null;
       if (isRunning) {
-        if (syncMode) {
-          // Reconnection in sync mode doesn't make sense — fall back to ASR
-          console.log('[AI翻译] 同步模式断开，回退到 ASR');
+        if (syncMode || subtitleMode) {
+          console.log('[AI翻译] 字幕模式断开');
           stopSyncPlayback();
+          stopDOMSubtitleObserver();
           isRunning = false;
           finishWarmup();
           sendStatus('error', '连接断开，请重试');
@@ -748,18 +905,30 @@
           if (preheatActive) {
             preheatPhase2();
           } else if (!startSent && !syncMode) {
-            startAudioCapture().then(ok => {
-              if (ok) {
-                startSent = true;
-                console.log('[AI翻译] ▷ start');
-                ws.send(JSON.stringify({ type: 'start' }));
-                chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
-              } else {
-                isRunning = false;
-                finishWarmup();
-              }
-            });
+            console.log('[AI翻译] ready handler: startSent=%s syncMode=%s subtitleMode=%s', startSent, syncMode, subtitleMode);
+            if (subtitleMode) {
+              // DOM subtitle mode: no audio capture, just activate
+              startSent = true;
+              console.log('[AI翻译] ▷ start (DOM subtitle mode)');
+              ws.send(JSON.stringify({ type: 'start' }));
+              chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
+            } else {
+              startAudioCapture().then(ok => {
+                if (ok) {
+                  startSent = true;
+                  console.log('[AI翻译] ▷ start');
+                  ws.send(JSON.stringify({ type: 'start' }));
+                  chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
+                } else {
+                  isRunning = false;
+                  finishWarmup();
+                }
+              });
+            }
           }
+        } else if (msg.status === "listening" && subtitleMode && !domObserver) {
+          startDOMSubtitleObserver();
+          sendStatus(msg.status);
         } else {
           sendStatus(msg.status);
         }
@@ -1031,10 +1200,22 @@
     warmupDone = false;
     startSent = false;
     syncMode = false;
+    subtitleMode = false;
     pendingSubs = null;
 
     console.log('[AI翻译] 启动翻译...');
     sendStatus('starting', '连接中...');
+
+    // Kill preheat BEFORE any async work to prevent race conditions
+    stopAudioCapture();
+    stopDOMSubtitleObserver();
+    preheatReady = false;
+    preheatActive = false;
+    if (ws) {
+      ws.onclose = null;
+      try { ws.close(); } catch (_) {}
+      ws = null;
+    }
 
     muteCurrentVideo();
     showLoading();
@@ -1066,7 +1247,23 @@
       return;
     }
 
-    // No subtitles found — use ASR mode
+    // API extraction failed — try DOM subtitle observer for YouTube
+    subtitleMode = canObserveDOMSubtitles();
+    if (subtitleMode) {
+      console.log('[AI翻译] 使用 DOM 字幕观察模式');
+      // Connect WS if needed (same flow as sync mode)
+      if (ws) {
+        ws.onclose = null;
+        try { ws.close(); } catch (_) {}
+        ws = null;
+      }
+      preheatReady = false;
+      preheatActive = false;
+      connectWebSocket();
+      return;
+    }
+
+    // No subtitles at all — use ASR mode
     console.log('[AI翻译] 未检测到字幕，使用 ASR 模式');
 
     // If preheat fully ready, activate instantly
@@ -1098,6 +1295,9 @@
 
     if (syncMode) {
       stopSyncPlayback();
+    }
+    if (subtitleMode) {
+      stopDOMSubtitleObserver();
     }
 
     disconnectWebSocket();

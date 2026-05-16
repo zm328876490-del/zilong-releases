@@ -5,12 +5,16 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"html"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -82,6 +86,7 @@ type InMsg struct {
 	BaiduAppID  string     `json:"baiduAppID,omitempty"`
 	BaiduSecret string     `json:"baiduSecret,omitempty"`
 	Subs        []Subtitle `json:"subs,omitempty"` // preprocess mode
+	Text        string     `json:"text,omitempty"` // DOM subtitle text
 }
 
 func (c *Client) sendJSON(msg OutMsg) error {
@@ -167,6 +172,28 @@ func (c *Client) generateAndSendTTS(text string, speechRate float64) {
 }
 
 // ─── Preprocess (subtitle hijacking mode) ─────────────────────────────
+
+// handleDOMSubtitle translates a single DOM-captured subtitle and generates TTS.
+func (c *Client) handleDOMSubtitle(text string) {
+	if c.translator == nil || c.targetLang == "" {
+		return
+	}
+	translated, err := c.translator.Translate(text, c.sourceLang, c.targetLang)
+	if err != nil {
+		log.Printf("dom subtitle translate error: %v", err)
+		c.sendJSON(OutMsg{Type: "error", Message: fmt.Sprintf("Translation error: %v", err)})
+		return
+	}
+	if translated == "" {
+		return
+	}
+	c.sendJSON(OutMsg{
+		Type:        "result",
+		Original:    text,
+		Translation: translated,
+	})
+	go c.generateAndSendTTS(translated, 5.0)
+}
 
 // handlePreprocess runs concurrent translation + TTS synthesis for all subtitles
 // and streams results back to the client.
@@ -353,6 +380,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				client.active = false
 				client.sendJSON(OutMsg{Type: "status", Status: "stopped"})
 
+			case "subtitle":
+				go client.handleDOMSubtitle(msg.Text)
+
 			case "preprocess":
 				go client.handlePreprocess(msg.Subs)
 
@@ -463,6 +493,54 @@ func waitForServer(url string, timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for whisper-server")
 }
 
+// handleFetchSubtitles fetches a YouTube timedtext URL server-side,
+// parses the XML, and returns [{text, start, end}, ...] as JSON.
+func handleFetchSubtitles(w http.ResponseWriter, r *http.Request) {
+	url := r.URL.Query().Get("url")
+	if url == "" {
+		http.Error(w, `{"error":"missing url param"}`, http.StatusBadRequest)
+		return
+	}
+
+	resp, err := http.Get(url)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"fetch: %s"}`, err.Error()), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"read: %s"}`, err.Error()), http.StatusBadGateway)
+		return
+	}
+
+	subs := parseTimedTextXML(string(body))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(subs)
+}
+
+// parseTimedTextXML parses YouTube's XML timedtext format.
+func parseTimedTextXML(raw string) []Subtitle {
+	re := regexp.MustCompile(`<text start="([\d.]+)" dur="([\d.]+)">([^<]*)</text>`)
+	matches := re.FindAllStringSubmatch(raw, -1)
+	var subs []Subtitle
+	for _, m := range matches {
+		if len(m) < 4 {
+			continue
+		}
+		start, _ := strconv.ParseFloat(m[1], 64)
+		dur, _ := strconv.ParseFloat(m[2], 64)
+		text := html.UnescapeString(m[3])
+		text = strings.TrimSpace(text)
+		if len([]rune(text)) >= 2 {
+			subs = append(subs, Subtitle{Text: text, Start: start, End: start + dur})
+		}
+	}
+	return subs
+}
+
 func main() {
 	cfg := config.Load()
 
@@ -479,6 +557,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", handleWebSocket)
 
+	mux.HandleFunc("/fetch-subtitles", handleFetchSubtitles)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := map[string]interface{}{
