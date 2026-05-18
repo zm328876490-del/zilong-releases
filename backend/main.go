@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -53,6 +55,45 @@ type Subtitle struct {
 	End   float64 `json:"end"`
 }
 
+// Pending translations for async Google Translate via browser
+type pendingItem struct {
+	result chan string
+	errCh  chan error
+}
+
+var pendingMu sync.Mutex
+var pendingMap = make(map[string]*pendingItem)
+
+func newID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func (c *Client) translateViaBrowser(text, from, to string) (string, error) {
+	id := newID()
+	ch := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	pendingMu.Lock()
+	pendingMap[id] = &pendingItem{result: ch, errCh: errCh}
+	pendingMu.Unlock()
+
+	c.sendJSON(OutMsg{Type: "translate_request", ID: id, Text: text, TargetLang: to})
+
+	select {
+	case result := <-ch:
+		return result, nil
+	case err := <-errCh:
+		return "", err
+	case <-time.After(10 * time.Second):
+		pendingMu.Lock()
+		delete(pendingMap, id)
+		pendingMu.Unlock()
+		return "", fmt.Errorf("Google 翻译超时")
+	}
+}
+
 // PreprocessResult is one pre-translated + pre-synthesized subtitle.
 type PreprocessResult struct {
 	Index       int     `json:"index"`
@@ -65,6 +106,8 @@ type PreprocessResult struct {
 
 type OutMsg struct {
 	Type        string             `json:"type"`
+	ID          string             `json:"id,omitempty"`        // translate_request correlation
+	TargetLang  string             `json:"targetLang,omitempty"` // translate_request target
 	Text        string             `json:"text,omitempty"`
 	Original    string             `json:"original,omitempty"`
 	Translation string             `json:"translation,omitempty"`
@@ -73,24 +116,27 @@ type OutMsg struct {
 	Audio       string             `json:"audio,omitempty"`
 	AudioMime   string             `json:"audioMime,omitempty"`
 	SpeechRate  float64            `json:"speechRate,omitempty"`
-	Duration    float64            `json:"duration,omitempty"` // original speech duration (sec)
-	Speaker     string             `json:"speaker,omitempty"`  // speaker label (A, B, C, ...)
-	Partial     bool               `json:"partial,omitempty"`  // true for streaming ASR preview
-	Index       int                `json:"index,omitempty"`    // audio chunk sequence number (-1 = end)
-	Items       []PreprocessResult `json:"items,omitempty"`    // batch preprocess results
-	Total       int                `json:"total,omitempty"`    // total subtitle count
+	Duration    float64            `json:"duration,omitempty"`
+	Speaker     string             `json:"speaker,omitempty"`
+	Partial     bool               `json:"partial,omitempty"`
+	Index       int                `json:"index,omitempty"`
+	Items       []PreprocessResult `json:"items,omitempty"`
+	Total       int                `json:"total,omitempty"`
 }
 
 type InMsg struct {
 	Type        string     `json:"type"`
+	ID          string     `json:"id,omitempty"`          // translate_response correlation
 	SourceLang  string     `json:"sourceLang,omitempty"`
 	TargetLang  string     `json:"targetLang,omitempty"`
 	APIKey      string     `json:"apiKey,omitempty"`
 	Region      string     `json:"region,omitempty"`
 	Engine      string     `json:"engine,omitempty"`
 	TTSVoice    string     `json:"ttsVoice,omitempty"`
-	Subs        []Subtitle `json:"subs,omitempty"` // preprocess mode
-	Text        string     `json:"text,omitempty"` // DOM subtitle text
+	Translation string     `json:"translation,omitempty"` // translate_response result
+	Error       string     `json:"error,omitempty"`       // translate_response error
+	Subs        []Subtitle `json:"subs,omitempty"`
+	Text        string     `json:"text,omitempty"`
 }
 
 func (c *Client) sendJSON(msg OutMsg) error {
@@ -350,6 +396,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					client.translator = translate.New(msg.APIKey, msg.Region)
 				}
 				client.translator.SetEngine(msg.Engine)
+				if msg.Engine == "google" {
+					client.translator.SetAsyncFn(client.translateViaBrowser)
+				}
 				if client.audioBuf == nil {
 					client.audioBuf = asr.NewAudioBuffer(
 					whisperServerURL,
@@ -362,6 +411,19 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			case "voice":
 				if msg.TTSVoice != "" {
 					client.ttsVoice = msg.TTSVoice
+				}
+
+			case "translate_response":
+				pendingMu.Lock()
+				pi, ok := pendingMap[msg.ID]
+				delete(pendingMap, msg.ID)
+				pendingMu.Unlock()
+				if ok {
+					if msg.Error != "" {
+						pi.errCh <- fmt.Errorf("Google 翻译失败: %s", msg.Error)
+					} else {
+						pi.result <- msg.Translation
+					}
 				}
 
 			case "warmup":

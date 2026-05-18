@@ -15,6 +15,7 @@ import (
 // Translator supports multiple backends. Engine can be set to "microsoft" or "google".
 type Translator struct {
 	engine      string // "microsoft" or "google"; empty = auto (microsoft first, then google)
+	asyncFn     func(text, from, to string) (string, error)
 	msToken     string
 	msTokenAt   time.Time
 	msTokenMu   sync.Mutex
@@ -53,6 +54,14 @@ func (t *Translator) SetEngine(engine string) {
 	t.engine = engine
 }
 
+func (t *Translator) SetAsyncFn(fn func(text, from, to string) (string, error)) {
+	t.asyncFn = fn
+}
+
+func (t *Translator) Engine() string {
+	return t.engine
+}
+
 func (t *Translator) Translate(text, from, to string) (string, error) {
 	if text == "" {
 		return "", nil
@@ -74,7 +83,14 @@ func (t *Translator) Translate(text, from, to string) (string, error) {
 			t.cachePut(cacheKey, result)
 		}
 		return result, err
-	case "google":
+case "google":
+		if t.asyncFn != nil {
+			result, err := t.asyncFn(text, from, to)
+			if err == nil {
+				t.cachePut(cacheKey, result)
+			}
+			return result, err
+		}
 		result, err := t.translateGoogle(text, from, to)
 		if err == nil {
 			t.cachePut(cacheKey, result)
@@ -205,7 +221,7 @@ func (t *Translator) translateGoogle(text, from, to string) (string, error) {
 
 	resp, err := t.client.Get(apiURL)
 	if err != nil {
-		return "", fmt.Errorf("google request: %w", err)
+		return "", fmt.Errorf("Google 翻译不可用（需代理访问）: %w", err)
 	}
 	defer resp.Body.Close()
 

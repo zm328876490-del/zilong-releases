@@ -315,6 +315,53 @@
     finishWarmup();
   }
 
+  // ─── Google Translate via browser fetch ───────────────────────────
+
+  function mapGoogleLang(lang) {
+    const m = {
+      'zh-Hans': 'zh-CN', 'zh-Hant': 'zh-TW', 'zh': 'zh-CN',
+      'en': 'en', 'ja': 'ja', 'ko': 'ko', 'fr': 'fr', 'de': 'de',
+      'es': 'es', 'pt': 'pt', 'ru': 'ru', 'ar': 'ar', 'th': 'th', 'vi': 'vi',
+    };
+    return m[lang] || lang;
+  }
+
+  async function handleTranslateRequest(msg) {
+    const tl = mapGoogleLang(msg.targetLang || settings.targetLang);
+    const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&dt=t&tl='
+      + encodeURIComponent(tl) + '&q=' + encodeURIComponent(msg.text || '');
+
+    try {
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const data = await resp.json();
+        let translation = '';
+        if (Array.isArray(data) && Array.isArray(data[0])) {
+          translation = data[0].map(function (seg) {
+            return Array.isArray(seg) ? (seg[0] || '') : '';
+          }).join('');
+        }
+        ws.send(JSON.stringify({
+          type: 'translate_response',
+          id: msg.id,
+          translation: translation,
+        }));
+      } else {
+        ws.send(JSON.stringify({
+          type: 'translate_response',
+          id: msg.id,
+          error: 'HTTP ' + resp.status,
+        }));
+      }
+    } catch (e) {
+      ws.send(JSON.stringify({
+        type: 'translate_response',
+        id: msg.id,
+        error: e.message,
+      }));
+    }
+  }
+
   // ─── Audio Capture ────────────────────────────────────────────────
   function findVideoElement() {
     // Prefer the largest playing video
@@ -829,6 +876,10 @@
         } else {
           sendStatus(msg.status);
         }
+        break;
+
+      case 'translate_request':
+        handleTranslateRequest(msg);
         break;
 
       case 'error':
