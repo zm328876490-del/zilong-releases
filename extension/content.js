@@ -43,7 +43,7 @@
   let subtitleMode = false;       // true = DOM caption extraction mode
   let domObserver = null;         // MutationObserver for caption elements
   let ccObserver = null;          // MutationObserver for CC button (prevents user turning off)
-  let captionStyleEl = null;      // injected <style> to hide native YouTube captions
+  let captionStyleEl = null;      // (unused, kept for compat)
   let lastDOMSubtitle = '';       // deduplicate consecutive identical captions
 
   // ─── Loading Overlay (shown during warmup, auto-hides on first TTS) ──
@@ -367,11 +367,7 @@
       });
     }
 
-    // Hide YouTube native caption display so the user sees our overlay instead
-    captionStyleEl = document.createElement('style');
-    captionStyleEl.id = '__ai_caption_hider__';
-    captionStyleEl.textContent = '.caption-window { opacity: 0 !important; }';
-    document.head.appendChild(captionStyleEl);
+    // Native captions remain visible — overlay sits below the video
 
     function getCurrentCaptionText() {
       // YouTube caption segments
@@ -462,10 +458,6 @@
     if (ccObserver) {
       ccObserver.disconnect();
       ccObserver = null;
-    }
-    if (captionStyleEl) {
-      captionStyleEl.remove();
-      captionStyleEl = null;
     }
     lastDOMSubtitle = '';
     subtitleMode = false;
