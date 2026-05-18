@@ -125,44 +125,15 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 				Speaker:     speaker,
 			})
 
-			// Generate TTS in background (doesn't block next ASR result)
-			var cancel <-chan struct{}
-			if duration <= 0.5 {
-				// Streaming path: cancel any previous streaming TTS
-				c.ttsCancelMu.Lock()
-				if c.ttsCancel != nil {
-					close(c.ttsCancel)
-				}
-				c.ttsCancel = make(chan struct{})
-				cancel = c.ttsCancel
-				c.ttsCancelMu.Unlock()
-			}
-			go c.generateAndSendTTS(translated, speechRate, duration, cancel)
+			go c.generateAndSendTTS(translated, speechRate)
 		}
 	}
 }
 
-func (c *Client) generateAndSendTTS(text string, speechRate float64, originalDuration float64, cancel <-chan struct{}) {
+func (c *Client) generateAndSendTTS(text string, speechRate float64) {
 	voice := tts.VoiceForLang(c.targetLang)
 
-	// Lip-sync path: stretch TTS to match original speech duration
-	if originalDuration > 0.5 {
-		audioB64, err := tts.SynthesizeStretched(text, voice, originalDuration)
-		if err != nil {
-			return
-		}
-		c.sendJSON(OutMsg{
-			Type:       "audio",
-			Original:   text,
-			Audio:      audioB64,
-			AudioMime:  "audio/mpeg",
-			SpeechRate: speechRate,
-			Duration:   originalDuration,
-		})
-		return
-	}
-
-	// Streaming path (no duration info, e.g. DOM subtitles or partial)
+	// Streaming TTS with cancellation support
 	c.sendJSON(OutMsg{
 		Type:       "audio_start",
 		Original:   text,
@@ -186,12 +157,6 @@ func (c *Client) generateAndSendTTS(text string, speechRate float64, originalDur
 		buf = buf[:0]
 	}
 	err := tts.SynthesizeStream(text, voice, func(ch tts.AudioChunk) {
-		// Check for cancellation before processing each chunk
-		select {
-		case <-cancel:
-			return
-		default:
-		}
 		if ch.Final {
 			flush(false)
 			c.sendJSON(OutMsg{Type: "audio_end", Original: text, Index: -1, SpeechRate: speechRate})
@@ -203,12 +168,6 @@ func (c *Client) generateAndSendTTS(text string, speechRate float64, originalDur
 		}
 	})
 	if err != nil {
-		// Check cancellation before sending error end
-		select {
-		case <-cancel:
-			return
-		default:
-		}
 		c.sendJSON(OutMsg{Type: "audio_end", Original: text, Index: -1, SpeechRate: speechRate})
 	}
 }
@@ -234,16 +193,7 @@ func (c *Client) handleDOMSubtitle(text string) {
 		Translation: translated,
 	})
 
-	// Cancel any in-flight streaming TTS before starting a new one
-	c.ttsCancelMu.Lock()
-	if c.ttsCancel != nil {
-		close(c.ttsCancel)
-	}
-	c.ttsCancel = make(chan struct{})
-	cancel := c.ttsCancel
-	c.ttsCancelMu.Unlock()
-
-	go c.generateAndSendTTS(translated, 5.0, 0, cancel)
+	go c.generateAndSendTTS(translated, 5.0)
 }
 
 // handlePreprocess runs concurrent translation + TTS synthesis for all subtitles

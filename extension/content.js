@@ -37,7 +37,7 @@
   let syncRafId = null;           // requestAnimationFrame ID
   let lastSyncTime = 0;           // last video.currentTime
   let syncVideo = null;           // the video element being synced to
-  let currentSyncAudio = null;    // currently playing TTS audio (to stop before next)
+  let currentSyncAudio = null;    // (managed by queue, kept for backward compat)
 
   // DOM subtitle observer state
   let subtitleMode = false;       // true = DOM caption extraction mode
@@ -105,7 +105,8 @@
         padding: 10px 22px !important;
         border-radius: 10px !important;
         display: inline-block !important;
-        animation: __fadeIn__ 0.25s ease-out !important;
+        opacity: 1 !important;
+	        transition: opacity 0.2s ease-out !important;
       }
       #__ai_subtitle_overlay__ .subtitle-line {
         color: #fff !important;
@@ -135,10 +136,6 @@
         letter-spacing: 0.5px !important;
         margin-bottom: 2px !important;
       }
-      @keyframes __fadeIn__ {
-        from { opacity: 0; transform: translateY(6px); }
-        to   { opacity: 1; transform: translateY(0); }
-      }
     </style>
     <div id="__subtitle_content__"></div>
   `;
@@ -146,30 +143,59 @@
 
   const contentDiv = overlay.querySelector('#__subtitle_content__');
 
+  // Persistent DOM elements (reused, not recreated)
+  let speakerEl = null;
+  let subtitleBox = null;
+  let originalLine = null;
+  let translationLine = null;
   let lastSpeaker = '';
 
+  function ensureElements() {
+    if (subtitleBox) return;
+    speakerEl = document.createElement('div');
+    speakerEl.className = 'subtitle-speaker';
+    speakerEl.style.display = 'none';
+    subtitleBox = document.createElement('div');
+    subtitleBox.className = 'subtitle-box';
+    subtitleBox.style.opacity = '0';
+    originalLine = document.createElement('div');
+    originalLine.className = 'subtitle-line subtitle-original';
+    translationLine = document.createElement('div');
+    translationLine.className = 'subtitle-line subtitle-translation';
+    subtitleBox.appendChild(originalLine);
+    subtitleBox.appendChild(translationLine);
+    contentDiv.appendChild(speakerEl);
+    contentDiv.appendChild(subtitleBox);
+  }
+
   function showSubtitle(original, translation, speaker) {
-    let html = '';
+    ensureElements();
+
+    // Update speaker
     if (speaker && speaker !== lastSpeaker) {
       lastSpeaker = speaker;
-      html += `<div class="subtitle-speaker">Speaker ${escapeHTML(speaker)}</div>`;
+      speakerEl.textContent = 'Speaker ' + speaker;
+      speakerEl.style.display = 'inline-block';
+    } else if (!speaker) {
+      speakerEl.style.display = 'none';
     }
-    if (original || translation) {
-      html += '<div class="subtitle-box">';
-      if (original) {
-        html += `<div class="subtitle-line subtitle-original">${escapeHTML(original)}</div>`;
-      }
-      if (translation) {
-        html += `<div class="subtitle-line subtitle-translation">${escapeHTML(translation)}</div>`;
-      }
-      html += '</div>';
-    }
-    contentDiv.innerHTML = html;
 
-    // Auto-clear after 5 seconds of no updates
+    // Update text content (no DOM rebuild, no animation replay)
+    const hasContent = original || translation;
+    if (hasContent) {
+      originalLine.textContent = original || '';
+      translationLine.textContent = translation || '';
+      subtitleBox.style.display = 'inline-block';
+      subtitleBox.style.opacity = '1';
+    } else {
+      subtitleBox.style.opacity = '0';
+    }
+
+    // Auto-clear after 5 seconds (fade out via transition)
     clearTimeout(contentDiv._clearTimer);
     contentDiv._clearTimer = setTimeout(() => {
-      contentDiv.innerHTML = '';
+      subtitleBox.style.opacity = '0';
+      speakerEl.style.display = 'none';
       lastSpeaker = '';
     }, 5000);
   }
@@ -180,169 +206,109 @@
     return div.innerHTML;
   }
 
-  // ─── TTS (streaming Edge TTS via MSE, with fallback) ────────────────
+  // ─── TTS (queue-based playback, no cutting) ──────────────────────
   let lastSpokenText = '';
   let ttsAudio = null;
-  let ttsAudioUrl = null;    // blob URL for revocation on stop
+  let ttsAudioUrl = null;
 
-  // Speech rate smoothing: 3-sentence moving average
-  const rateHistory = [];
-  const RATE_SMOOTH_WINDOW = 3;
-  const RATE_REFERENCE = 5.0;   // ~5 chars/sec = normal speaking speed
-  const RATE_MIN = 0.9;
-  const RATE_MAX = 1.5;
+  const TTS_RATE = 1.3;  // fixed playback speed
 
-  // Streaming TTS state
-  let ttsMediaSource = null;
-  let ttsSourceBuffer = null;
-  let ttsPendingBuffers = [];
-  let ttsMSEWorks = true;       // set to false if MSE fails for MP3
-  let ttsFallbackChunks = [];   // accumulate chunks for non-MSE fallback
-  let ttsFallbackRate = 1.2;
+  // TTS chunk accumulation (for streaming TTS via handleAudioStart/Chunk/End)
+  let ttsFallbackChunks = [];
 
-  function smoothSpeechRate(rawRate) {
-    if (!rawRate || rawRate <= 0) return 1.2; // default
-    rateHistory.push(rawRate);
-    if (rateHistory.length > RATE_SMOOTH_WINDOW) rateHistory.shift();
-    const avg = rateHistory.reduce((a, b) => a + b, 0) / rateHistory.length;
-    return Math.max(RATE_MIN, Math.min(RATE_MAX, avg / RATE_REFERENCE));
+  // Playback queue — sequential, no cutting
+  let ttsQueue = [];
+  let ttsPlaying = false;
+
+  function playNextInQueue() {
+    if (ttsQueue.length === 0) {
+      ttsPlaying = false;
+      ttsAudio = null;
+      ttsAudioUrl = null;
+      return;
+    }
+    ttsPlaying = true;
+    const item = ttsQueue.shift();
+    ttsAudio = item.audio;
+    ttsAudioUrl = item.url;
+    item.audio.onended = () => {
+      URL.revokeObjectURL(item.url);
+      playNextInQueue();
+    };
+    item.audio.play().catch(() => {
+      URL.revokeObjectURL(item.url);
+      playNextInQueue();
+    });
+  }
+
+  function enqueueAudio(audio, url) {
+    // Limit queue depth to prevent unbounded lag
+    while (ttsQueue.length >= 2) {
+      const old = ttsQueue.shift();
+      URL.revokeObjectURL(old.url);
+    }
+    ttsQueue.push({ audio, url });
+    if (!ttsPlaying) {
+      playNextInQueue();
+    }
   }
 
   function playTTSAudio(base64, mimeType, text, speechRate) {
     if (!base64 || text === lastSpokenText) return;
     lastSpokenText = text;
-    stopTTS();
-
     const url = `data:${mimeType};base64,${base64}`;
-    ttsAudio = new Audio(url);
-    ttsAudioUrl = url;
-    ttsAudio.volume = 0.9;
-    ttsAudio.playbackRate = smoothSpeechRate(speechRate);
-    ttsAudio.play().catch(() => {});
+    const audio = new Audio(url);
+    audio.volume = 0.9;
+    audio.playbackRate = TTS_RATE;
+    enqueueAudio(audio, url);
   }
 
   function stopTTS() {
+    // Stop currently playing audio
     if (ttsAudio) {
-      // Detach source to kill any buffered playback immediately
+      ttsAudio.onended = null;
       try { ttsAudio.src = ''; } catch (_) {}
       try { ttsAudio.pause(); } catch (_) {}
       ttsAudio = null;
     }
-    // Revoke old blob URL to prevent memory leaks
     if (ttsAudioUrl) {
       try { URL.revokeObjectURL(ttsAudioUrl); } catch (_) {}
       ttsAudioUrl = null;
     }
-    // Clean up MSE — end the stream regardless of readyState
-    if (ttsMediaSource) {
-      try {
-        if (ttsMediaSource.readyState === 'open') {
-          ttsMediaSource.endOfStream();
-        }
-      } catch (_) {}
-      // Detach any pending sourceopen callback by clearing onsourceopen
-      ttsMediaSource.onsourceopen = null;
-      ttsMediaSource = null;
+    // Clear queued items
+    for (const item of ttsQueue) {
+      URL.revokeObjectURL(item.url);
     }
-    ttsSourceBuffer = null;
-    ttsPendingBuffers = [];
+    ttsQueue = [];
+    ttsPlaying = false;
+    ttsFallbackChunks = [];
   }
 
-  // ─── Streaming TTS (MSE-based, Chrome only) ────────────────────────
+  // ─── Streaming TTS handlers (queue-based, no MSE) ─────────────────
 
   function handleAudioStart(msg) {
     lastSpokenText = msg.original;
-    stopTTS();
     ttsFallbackChunks = [];
-    ttsFallbackRate = smoothSpeechRate(msg.speechRate);
-
-    if (!ttsMSEWorks) return; // will play via fallback when audio_end arrives
-
-    try {
-      ttsMediaSource = new MediaSource();
-      const url = URL.createObjectURL(ttsMediaSource);
-      ttsAudioUrl = url;
-      ttsAudio = new Audio(url);
-      ttsAudio.volume = 0.9;
-      ttsAudio.playbackRate = ttsFallbackRate;
-
-      ttsMediaSource.onsourceopen = () => {
-        try {
-          ttsSourceBuffer = ttsMediaSource.addSourceBuffer('audio/mpeg');
-          ttsSourceBuffer.mode = 'sequence';
-          ttsSourceBuffer.onupdateend = drainTTSQueue;
-          drainTTSQueue();
-        } catch (e) {
-          ttsMSEWorks = false;
-          ttsMediaSource = null;
-          ttsSourceBuffer = null;
-        }
-      };
-
-      ttsAudio.play().catch(() => {});
-    } catch (e) {
-      ttsMSEWorks = false;
-    }
   }
 
   function handleAudioChunk(msg) {
     if (!msg.audio) return;
-    // Discard stale chunks from a previous (now-cancelled) TTS utterance
     if (msg.original && msg.original !== lastSpokenText) return;
     const binary = atob(msg.audio);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-    // Always accumulate for fallback
     ttsFallbackChunks.push(bytes);
-
-    if (ttsMSEWorks && ttsSourceBuffer) {
-      if (!ttsSourceBuffer.updating) {
-        try {
-          ttsSourceBuffer.appendBuffer(bytes.buffer);
-        } catch (_) {
-          ttsPendingBuffers.push(bytes.buffer);
-        }
-      } else {
-        ttsPendingBuffers.push(bytes.buffer);
-      }
-    }
-  }
-
-  function drainTTSQueue() {
-    if (ttsSourceBuffer && !ttsSourceBuffer.updating && ttsPendingBuffers.length > 0) {
-      try {
-        ttsSourceBuffer.appendBuffer(ttsPendingBuffers.shift());
-      } catch (_) {}
-    }
   }
 
   function handleAudioEnd(msg) {
-    // Discard stale end marker from a previous (now-cancelled) TTS utterance
     if (msg.original && msg.original !== lastSpokenText) return;
-    if (ttsMSEWorks && ttsMediaSource) {
-      const finalize = () => {
-        drainTTSQueue();
-        if (ttsPendingBuffers.length > 0) {
-          setTimeout(finalize, 80);
-        } else if (ttsMediaSource && ttsMediaSource.readyState === 'open') {
-          try { ttsMediaSource.endOfStream(); } catch (_) {}
-        }
-        finishWarmup();
-      };
-      finalize();
-      return;
-    }
-
-    // Fallback: play accumulated chunks as a single Audio
     if (ttsFallbackChunks.length > 0) {
       const blob = new Blob(ttsFallbackChunks, { type: 'audio/mpeg' });
       const url = URL.createObjectURL(blob);
-      ttsAudioUrl = url;
-      ttsAudio = new Audio(url);
-      ttsAudio.volume = 0.9;
-      ttsAudio.playbackRate = ttsFallbackRate;
-      ttsAudio.play().catch(() => {});
+      const audio = new Audio(url);
+      audio.volume = 0.9;
+      audio.playbackRate = TTS_RATE;
+      enqueueAudio(audio, url);
     }
     ttsFallbackChunks = [];
     finishWarmup();
@@ -987,7 +953,7 @@
         try {
           item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
           item.audioEl.volume = 0.9;
-          item.audioEl.playbackRate = syncVideo.playbackRate || 1.0;
+          item.audioEl.playbackRate = TTS_RATE;
         } catch (e) {
         }
       }
@@ -1021,17 +987,16 @@
         item.played = true;
         showSubtitle(item.original, item.translation);
         if (item.audioEl) {
-          if (currentSyncAudio && !currentSyncAudio.paused) {
-            currentSyncAudio.pause();
-          }
-          currentSyncAudio = item.audioEl;
-          item.audioEl.play().catch(() => {});
+          enqueueAudio(item.audioEl, item.audioEl.src);
+          item.audioEl = null;  // prevent re-enqueue on next frames
         }
       }
     }
   }
 
   function reSync(currentTime) {
+    // Clear queue and stop current audio on seek
+    stopTTS();
     // Mark all items before currentTime as played, find current one
     let foundCurrent = false;
     for (const item of preprocessedItems) {
@@ -1059,9 +1024,8 @@
   }
 
   function onVideoRateChange() {
-    const rate = syncVideo.playbackRate || 1.0;
     for (const item of preprocessedItems) {
-      if (item.audioEl) item.audioEl.playbackRate = rate;
+      if (item.audioEl) item.audioEl.playbackRate = TTS_RATE;
     }
   }
 
@@ -1074,10 +1038,8 @@
       syncVideo.removeEventListener('ratechange', onVideoRateChange);
       syncVideo = null;
     }
-    if (currentSyncAudio) {
-      try { currentSyncAudio.pause(); } catch (_) {}
-      currentSyncAudio = null;
-    }
+    // stopTTS() handles current audio + queue cleanup
+    stopTTS();
     for (const item of preprocessedItems) {
       if (item.audioEl) {
         try { item.audioEl.pause(); } catch (_) {}
