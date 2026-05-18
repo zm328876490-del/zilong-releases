@@ -26,13 +26,97 @@
     ttsVoice: 'default',
   };
 
+  // Language-specific TTS voices. "default" resolves to VoiceForLang(targetLang) on backend.
+  const VOICE_MAP = {
+    'zh-Hans': [
+      { value: 'default', label: '默认女声 (晓晓)' },
+      { value: 'xiaoxiao', label: '晓晓 (女·温柔)' },
+      { value: 'yunxi', label: '云希 (男)' },
+      { value: 'xiaoyi', label: '晓伊 (女·活泼)' },
+      { value: 'yunyang', label: '云扬 (男·新闻)' },
+    ],
+    en: [
+      { value: 'default', label: 'Default (Jenny)' },
+      { value: 'jenny', label: 'Jenny (Female)' },
+      { value: 'guy', label: 'Guy (Male)' },
+      { value: 'aria', label: 'Aria (Female)' },
+    ],
+    ja: [
+      { value: 'default', label: 'デフォルト (Nanami)' },
+      { value: 'nanami', label: 'Nanami (Female)' },
+      { value: 'keita', label: 'Keita (Male)' },
+    ],
+    ko: [
+      { value: 'default', label: '기본 (SunHi)' },
+      { value: 'sunhi', label: 'SunHi (Female)' },
+      { value: 'injoon', label: 'InJoon (Male)' },
+    ],
+    fr: [
+      { value: 'default', label: 'Défaut (Denise)' },
+      { value: 'denise', label: 'Denise (Female)' },
+      { value: 'henri', label: 'Henri (Male)' },
+    ],
+    de: [
+      { value: 'default', label: 'Standard (Katja)' },
+      { value: 'katja', label: 'Katja (Female)' },
+      { value: 'conrad', label: 'Conrad (Male)' },
+    ],
+    es: [
+      { value: 'default', label: 'Predeterminado (Elvira)' },
+      { value: 'elvira', label: 'Elvira (Female)' },
+      { value: 'alvaro', label: 'Álvaro (Male)' },
+    ],
+    pt: [
+      { value: 'default', label: 'Padrão (Francisca)' },
+      { value: 'francisca', label: 'Francisca (Female)' },
+      { value: 'antonio', label: 'Antônio (Male)' },
+    ],
+    ru: [
+      { value: 'default', label: 'По умолчанию (Svetlana)' },
+      { value: 'svetlana', label: 'Svetlana (Female)' },
+      { value: 'dmitry', label: 'Dmitry (Male)' },
+    ],
+    th: [
+      { value: 'default', label: 'ค่าเริ่มต้น (Premwadee)' },
+      { value: 'premwadee', label: 'Premwadee (Female)' },
+      { value: 'niwat', label: 'Niwat (Male)' },
+    ],
+    vi: [
+      { value: 'default', label: 'Mặc định (HoaiMy)' },
+      { value: 'hoaimy', label: 'HoaiMy (Female)' },
+      { value: 'namminh', label: 'NamMinh (Male)' },
+    ],
+  };
+
+  function populateTTSVoices(lang) {
+    const voices = VOICE_MAP[lang] || VOICE_MAP['en'];
+    const prev = ttsVoiceSelect.value;
+    ttsVoiceSelect.innerHTML = '';
+    voices.forEach(function (v) {
+      var opt = document.createElement('option');
+      opt.value = v.value;
+      opt.textContent = v.label;
+      ttsVoiceSelect.appendChild(opt);
+    });
+    // Restore previous value if still valid, otherwise fall to first (default)
+    var found = voices.some(function (v) { return v.value === prev; });
+    ttsVoiceSelect.value = found ? prev : voices[0].value;
+  }
+
+  function onTargetLangChange() {
+    populateTTSVoices(targetLangSelect.value);
+    saveSettings();
+  }
+
   async function loadSettings() {
     const result = await chrome.storage.local.get('translationSettings');
     const settings = result.translationSettings || DEFAULT_SETTINGS;
+    const targetLang = settings.targetLang || DEFAULT_SETTINGS.targetLang;
     sourceLangSelect.value = settings.sourceLang || DEFAULT_SETTINGS.sourceLang;
-    targetLangSelect.value = settings.targetLang || DEFAULT_SETTINGS.targetLang;
+    targetLangSelect.value = targetLang;
     translateEngineSelect.value = settings.engine || DEFAULT_SETTINGS.engine;
-    ttsVoiceSelect.value = settings.ttsVoice || DEFAULT_SETTINGS.ttsVoice;
+    populateTTSVoices(targetLang);
+    ttsVoiceSelect.value = settings.ttsVoice || 'default';
     return settings;
   }
 
@@ -189,8 +273,11 @@
     }
   });
 
+  // Target language change: rebuild TTS voices first, then save
+  targetLangSelect.addEventListener('change', onTargetLangChange);
+
   // Auto-save on input change
-  [sourceLangSelect, targetLangSelect, translateEngineSelect, ttsVoiceSelect].forEach(
+  [sourceLangSelect, translateEngineSelect, ttsVoiceSelect].forEach(
     (el) => {
       el.addEventListener('change', saveSettings);
       el.addEventListener('input', saveSettings);
