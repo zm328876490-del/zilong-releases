@@ -46,6 +46,7 @@ type Client struct {
 	active          bool
 	ttsCancel       chan struct{} // cancels the previous streaming TTS goroutine
 	ttsCancelMu     sync.Mutex    // guards ttsCancel
+	lastTtsTime     time.Time     // last time a TTS goroutine was started (for throttling)
 }
 
 // Subtitle is a single subtitle cue extracted from a video platform.
@@ -123,6 +124,8 @@ type OutMsg struct {
 	Index       int                `json:"index,omitempty"`
 	Items       []PreprocessResult `json:"items,omitempty"`
 	Total       int                `json:"total,omitempty"`
+	UtteranceId string             `json:"utteranceId,omitempty"` // ties audio_start/chunk/end to a specific utterance
+	TtsPartial   bool               `json:"ttsPartial,omitempty"`   // true = fast partial TTS, false = final
 }
 
 type InMsg struct {
@@ -153,62 +156,117 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 	}
 	c.sendJSON(OutMsg{Type: "original", Text: text, Partial: isPartial, Speaker: speaker, Duration: duration})
 
-	// Partial results are streaming previews — don't translate or TTS yet
-	if isPartial {
+	if c.translator == nil || c.targetLang == "" {
 		return
 	}
 
-	if c.translator != nil && c.targetLang != "" {
-		translated, err := c.translator.Translate(text, c.sourceLang, c.targetLang)
-		if err != nil {
+	translated, err := c.translator.Translate(text, c.sourceLang, c.targetLang)
+	if err != nil {
+		if !isPartial {
 			c.sendJSON(OutMsg{Type: "error", Message: fmt.Sprintf("Translation error: %v", err)})
-			return
 		}
-		if translated != "" {
-			c.sendJSON(OutMsg{
-				Type:        "result",
-				Original:    text,
-				Translation: translated,
-				SpeechRate:  speechRate,
-				Duration:    duration,
-				Speaker:     speaker,
-			})
-
-			go c.generateAndSendTTS(translated, speechRate)
-		}
+		return
 	}
+	if translated == "" {
+		return
+	}
+
+	utterId := newID()
+
+	if !isPartial {
+		c.sendJSON(OutMsg{
+			Type:        "result",
+			Original:    text,
+			Translation: translated,
+			SpeechRate:  speechRate,
+			Duration:    duration,
+			Speaker:     speaker,
+		})
+	}
+
+	// Throttle TTS for partials: skip if TTS already running or started recently.
+	// Finals always proceed (cancel current TTS first).
+	c.ttsCancelMu.Lock()
+	ttsRunning := c.ttsCancel != nil
+	c.ttsCancelMu.Unlock()
+
+	if isPartial && (ttsRunning || time.Since(c.lastTtsTime) < 600*time.Millisecond) {
+		return
+	}
+
+	c.lastTtsTime = time.Now()
+
+	// Cancel previous TTS goroutine before starting new one
+	c.ttsCancelMu.Lock()
+	if c.ttsCancel != nil {
+		close(c.ttsCancel)
+	}
+	c.ttsCancel = make(chan struct{})
+	cancelCh := c.ttsCancel
+	c.ttsCancelMu.Unlock()
+
+	go c.generateAndSendTTS(translated, utterId, speechRate, isPartial, cancelCh)
 }
 
-func (c *Client) generateAndSendTTS(text string, speechRate float64) {
+func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, isPartial bool, cancel <-chan struct{}) {
+	// Clear ttsCancel on exit so throttler knows TTS is done
+	defer func() {
+		c.ttsCancelMu.Lock()
+		if c.ttsCancel == cancel {
+			c.ttsCancel = nil
+		}
+		c.ttsCancelMu.Unlock()
+	}()
+
 	voice := tts.ResolveVoice(c.ttsVoice, c.targetLang)
 
-	// Streaming TTS with cancellation support
+	// Check cancellation before sending audio_start
+	select {
+	case <-cancel:
+		return
+	default:
+	}
+
 	c.sendJSON(OutMsg{
-		Type:       "audio_start",
-		Original:   text,
-		SpeechRate: speechRate,
+		Type:        "audio_start",
+		Original:    text,
+		UtteranceId: utterId,
+		SpeechRate:  speechRate,
+		TtsPartial:  isPartial,
 	})
 
 	idx := 0
-	batchSize := 3072 // buffer ~500ms of mp3 before sending to avoid SourceBuffer starvation
+	batchSize := 1024 // buffer ~170ms of mp3 before sending (lower = less latency)
 	var buf []byte
 	flush := func(final bool) {
 		if len(buf) == 0 && !final {
 			return
 		}
+		select {
+		case <-cancel:
+			return
+		default:
+		}
 		c.sendJSON(OutMsg{
-			Type:    "audio_chunk",
-			Original: text,
-			Audio:   base64.StdEncoding.EncodeToString(buf),
-			Index:   idx,
+			Type:        "audio_chunk",
+			Original:    text,
+			Audio:       base64.StdEncoding.EncodeToString(buf),
+			Index:       idx,
+			UtteranceId: utterId,
 		})
 		idx++
 		buf = buf[:0]
 	}
 	err := tts.SynthesizeStream(text, voice, func(ch tts.AudioChunk) {
+		// Check cancellation before processing each chunk
+		select {
+		case <-cancel:
+			return
+		default:
+		}
 		if ch.Final {
 			flush(false)
-			c.sendJSON(OutMsg{Type: "audio_end", Original: text, Index: -1, SpeechRate: speechRate})
+			c.sendJSON(OutMsg{Type: "audio_end", Original: text, UtteranceId: utterId, Index: -1, SpeechRate: speechRate})
 		} else {
 			buf = append(buf, ch.Data...)
 			if len(buf) >= batchSize {
@@ -217,7 +275,12 @@ func (c *Client) generateAndSendTTS(text string, speechRate float64) {
 		}
 	})
 	if err != nil {
-		c.sendJSON(OutMsg{Type: "audio_end", Original: text, Index: -1, SpeechRate: speechRate})
+		select {
+		case <-cancel:
+			return
+		default:
+		}
+		c.sendJSON(OutMsg{Type: "audio_end", Original: text, UtteranceId: utterId, Index: -1, SpeechRate: speechRate})
 	}
 }
 
@@ -248,7 +311,7 @@ func (c *Client) handleDOMSubtitle(text string, skipTranslate bool) {
 		Translation: translated,
 	})
 
-	go c.generateAndSendTTS(translated, 5.0)
+	go c.generateAndSendTTS(translated, newID(), 5.0, false, nil)
 }
 
 // handlePreprocess runs concurrent translation + TTS synthesis for all subtitles

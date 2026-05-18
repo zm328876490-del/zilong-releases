@@ -315,8 +315,13 @@
   }
   let ttsAudio = null;
   let ttsAudioUrl = null;
+  let currentUtteranceId = ''; // tracks which utterance's TTS stream is active
+  let currentTtsPartial = false; // true = fast partial TTS, false = final
 
-  const TTS_RATE = 1.3;  // fixed playback speed
+  const TTS_RATE_PARTIAL = 1.5;   // fast rate for partials (will be interrupted)
+  const TTS_RATE_FINAL = 1.0;     // natural rate for finals
+  const TTS_RATE_MAX = 1.5;       // max playback rate
+  let currentSpeechRate = 5;      // original speaker chars/sec, updated by audio_start
 
   // TTS chunk accumulation (for streaming TTS via handleAudioStart/Chunk/End)
   let ttsFallbackChunks = [];
@@ -366,40 +371,40 @@
     const url = `data:${mimeType};base64,${base64}`;
     const audio = new Audio(url);
     audio.volume = settings.ttsVolume / 100;
-    audio.playbackRate = TTS_RATE;
+    audio.playbackRate = Math.min(TTS_RATE_MAX, Math.max(1.0, (speechRate || 5) / 5));
     enqueueAudio(audio, url);
   }
 
   function stopTTS() {
-    // Stop currently playing audio
-    if (ttsAudio) {
-      ttsAudio.onended = null;
-      try { ttsAudio.src = ''; } catch (_) {}
-      try { ttsAudio.pause(); } catch (_) {}
-      ttsAudio = null;
-    }
-    if (ttsAudioUrl) {
-      try { URL.revokeObjectURL(ttsAudioUrl); } catch (_) {}
-      ttsAudioUrl = null;
-    }
-    // Clear queued items
+    // Only clear queued items, leave currently playing audio alone.
+    // The current utterance's audio will finish naturally and playNextInQueue
+    // will pick up the next queued item (from the new utterance).
     for (const item of ttsQueue) {
       URL.revokeObjectURL(item.url);
     }
     ttsQueue = [];
-    ttsPlaying = false;
     ttsFallbackChunks = [];
   }
 
   // ─── Streaming TTS handlers (queue-based, no MSE) ─────────────────
 
   function handleAudioStart(msg) {
+    // New utterance — interrupt any in-progress TTS from the previous one
+    var isNewUtterance = msg.utteranceId && msg.utteranceId !== currentUtteranceId;
+    if (isNewUtterance) {
+      stopTTS();
+    }
+    currentUtteranceId = msg.utteranceId || '';
+    currentTtsPartial = msg.ttsPartial === true;
+    currentSpeechRate = msg.speechRate || 5;
     lastSpokenText = msg.original;
     ttsFallbackChunks = [];
   }
 
   function handleAudioChunk(msg) {
     if (!msg.audio) return;
+    // Discard chunks from stale (cancelled) utterances
+    if (msg.utteranceId && msg.utteranceId !== currentUtteranceId) return;
     if (!isShortVideo() && msg.original && msg.original !== lastSpokenText) return;
     const binary = atob(msg.audio);
     const bytes = new Uint8Array(binary.length);
@@ -408,13 +413,15 @@
   }
 
   function handleAudioEnd(msg) {
+    // Discard stale utterance endings
+    if (msg.utteranceId && msg.utteranceId !== currentUtteranceId) return;
     if (!isShortVideo() && msg.original && msg.original !== lastSpokenText) return;
     if (ttsFallbackChunks.length > 0) {
       const blob = new Blob(ttsFallbackChunks, { type: 'audio/mpeg' });
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       audio.volume = settings.ttsVolume / 100;
-      audio.playbackRate = TTS_RATE;
+      audio.playbackRate = currentTtsPartial ? TTS_RATE_PARTIAL : Math.min(TTS_RATE_MAX, Math.max(1.0, (currentSpeechRate || 5) / 5));
       enqueueAudio(audio, url);
     }
     // Short videos: clear dedup after TTS so looped replays re-speak
@@ -1302,7 +1309,7 @@
         try {
           item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
           item.audioEl.volume = settings.ttsVolume / 100;
-          item.audioEl.playbackRate = TTS_RATE;
+          item.audioEl.playbackRate = TTS_RATE_FINAL;
         } catch (e) {
         }
       }
@@ -1374,7 +1381,7 @@
 
   function onVideoRateChange() {
     for (const item of preprocessedItems) {
-      if (item.audioEl) item.audioEl.playbackRate = TTS_RATE;
+      if (item.audioEl) item.audioEl.playbackRate = TTS_RATE_FINAL;
     }
   }
 

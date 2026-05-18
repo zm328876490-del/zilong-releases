@@ -19,12 +19,12 @@ const (
 	bitsPerSample  = 16
 	numChannels    = 1
 	silenceThresh  = 0.005 // RMS threshold for silence
-	silenceTimeout = 200   // ms of silence before cutting
-	minSpeechLen   = 180   // ms minimum speech segment length
-	maxSpeechLen   = 5000  // ms maximum speech segment length (force cut)
+	silenceTimeout = 300   // ms of silence before cutting
+	minSpeechLen   = 100   // ms minimum speech segment length
+	maxSpeechLen   = 3000  // ms maximum speech segment length (force cut)
 
-	streamFlushInterval = 800 // ms between streaming partial ASR flushes
-	streamMinWindow     = 1500 // ms minimum speech before first streaming flush
+	streamFlushInterval = 300 // ms between streaming partial ASR flushes
+	streamMinWindow     = 500 // ms minimum speech before first streaming flush
 )
 
 // AudioBuffer accumulates PCM audio and detects speech segments.
