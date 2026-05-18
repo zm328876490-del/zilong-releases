@@ -44,6 +44,7 @@
   let domObserver = null;         // MutationObserver for caption elements
   let ccClickHandler = null;      // capture-phase click handler on CC button
   let ccClickTarget = null;       // CC button element the handler is attached to
+  let ccAttrObserver = null;      // watches aria-pressed, re-enables CC if YouTube resets it
   let captionStyleEl = null;      // (unused, kept for compat)
   let lastDOMSubtitle = '';       // deduplicate consecutive identical captions
 
@@ -170,6 +171,10 @@
   }
 
   function showSubtitle(original, translation, speaker) {
+    // Filter YouTube CC track-name announcements from display
+    if (original && isCCAnnouncement(original)) original = '';
+    if (translation && isCCAnnouncement(translation)) translation = '';
+
     ensureElements();
 
     // Update speaker
@@ -205,6 +210,14 @@
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+  }
+
+  // YouTube CC track-name accessibility announcements that slip through ASR
+  function isCCAnnouncement(text) {
+    if (!text) return false;
+    // Match patterns like "英语（自动生成）点击 查看设置" or "English (auto-generated)..."
+    return /(?:自动生成|auto.generated|字幕.*设置|字幕.*点击|查看设置|cc.*settings)/i.test(text)
+        && text.length < 50;
   }
 
   // ─── TTS (queue-based playback, no cutting) ──────────────────────
@@ -256,6 +269,7 @@
 
   function playTTSAudio(base64, mimeType, text, speechRate) {
     if (!base64 || text === lastSpokenText) return;
+    if (isCCAnnouncement(text)) return;
     lastSpokenText = text;
     const url = `data:${mimeType};base64,${base64}`;
     const audio = new Audio(url);
@@ -388,6 +402,15 @@
     return !!player;
   }
 
+  function silentClickCC(btn) {
+    var synth = window.speechSynthesis;
+    synth.cancel();
+    var orig = synth.speak;
+    synth.speak = function () {};
+    btn.click();
+    setTimeout(function () { synth.speak = orig; }, 800);
+  }
+
   function startDOMSubtitleObserver() {
     var player = document.querySelector('#movie_player') ||
                  document.querySelector('.html5-video-player');
@@ -395,10 +418,10 @@
       return false;
     }
 
-    // Force YouTube CC on — the DOM nodes we observe only exist when CC is active
+    // Force CC on
     var ccBtn = player.querySelector('.ytp-subtitles-button');
     if (ccBtn && ccBtn.getAttribute('aria-pressed') === 'false') {
-      ccBtn.click();
+      silentClickCC(ccBtn);
     }
 
     // Prevent user from turning CC off during translation.
@@ -414,6 +437,24 @@
       };
       ccClickTarget = ccBtn;
       ccBtn.addEventListener('click', ccClickHandler, true);
+    }
+
+    // Watch CC button state — YouTube may reset it after ads or player rebinds.
+    // Re-enable silently whenever it flips off.
+    if (ccBtn) {
+      if (ccAttrObserver) ccAttrObserver.disconnect();
+      ccAttrObserver = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          var m = mutations[i];
+          if (m.type === 'attributes' && m.attributeName === 'aria-pressed') {
+            var b = m.target;
+            if (b.getAttribute('aria-pressed') === 'false' && subtitleMode && isRunning) {
+              silentClickCC(b);
+            }
+          }
+        }
+      });
+      ccAttrObserver.observe(ccBtn, { attributes: true, attributeFilter: ['aria-pressed'] });
     }
 
     // Native captions remain visible — overlay sits below the video
@@ -435,6 +476,7 @@
     function checkAndSend() {
       if (!isRunning || !ws || ws.readyState !== WebSocket.OPEN) return;
       var text = getCurrentCaptionText();
+      if (isCCAnnouncement(text)) return;
       if (text && text !== lastDOMSubtitle && text.length >= 2) {
         lastDOMSubtitle = text;
         showSubtitle(text, null);
@@ -508,6 +550,10 @@
       ccClickTarget.removeEventListener('click', ccClickHandler, true);
       ccClickHandler = null;
       ccClickTarget = null;
+    }
+    if (ccAttrObserver) {
+      ccAttrObserver.disconnect();
+      ccAttrObserver = null;
     }
     lastDOMSubtitle = '';
     subtitleMode = false;
@@ -1327,6 +1373,39 @@
 
   // Start background preheat as soon as a video is detected
   tryPreheat();
+
+  // YouTube SPA navigation: re-enable CC on the new player
+  document.addEventListener('yt-navigate-finish', function () {
+    if (!isRunning) return;
+
+    // Detach old observer (old player is destroyed)
+    if (domObserver) { domObserver.disconnect(); domObserver = null; }
+    if (ccClickHandler && ccClickTarget) {
+      ccClickTarget.removeEventListener('click', ccClickHandler, true);
+      ccClickHandler = null;
+      ccClickTarget = null;
+    }
+    if (ccAttrObserver) { ccAttrObserver.disconnect(); ccAttrObserver = null; }
+    lastDOMSubtitle = '';
+
+    if (syncMode) {
+      stopSyncPlayback();
+    }
+
+    // Poll for the new player, then re-enable
+    var navWait = 0;
+    var navTimer = setInterval(function () {
+      navWait++;
+      var p = document.querySelector('#movie_player') || document.querySelector('.html5-video-player');
+      if (p && p.querySelector('.ytp-subtitles-button')) {
+        clearInterval(navTimer);
+        // Restart DOM subtitle observer on new player
+        if (subtitleMode) startDOMSubtitleObserver();
+      } else if (navWait > 40) {
+        clearInterval(navTimer);
+      }
+    }, 250);
+  });
 
   // Notify that content script is ready
   chrome.runtime.sendMessage({ type: 'contentReady' }).catch(() => {});
