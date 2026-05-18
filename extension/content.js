@@ -229,6 +229,11 @@
     original = stripCCAnnouncement(original);
     translation = stripCCAnnouncement(translation);
 
+    // When original === translation (skip-translate), show single line
+    if (original && translation && original === translation) {
+      original = null;
+    }
+
     ensureElements();
 
     // Update speaker
@@ -273,6 +278,23 @@
       .replace(/英语[（(]自动生成[）)]\s*点击\s*查看设置/g, '')
       .replace(/English\s*\(auto.generated\)\s*click\s*view\s*settings/gi, '')
       .trim();
+  }
+
+  // Detect if text is already in the target language (character-range heuristic)
+  function isTargetLanguage(text, targetLang) {
+    if (!text || !targetLang) return false;
+    var hasCJK = /[一-鿿]/.test(text);
+    var hasKana = /[぀-ヿ]/.test(text);
+    var hasHangul = /[가-힯]/.test(text);
+    var asciiRatio = (text.match(/[\x00-\x7f]/g) || []).length / text.length;
+
+    switch (targetLang) {
+      case 'zh-Hans': case 'zh-Hant': case 'zh': return hasCJK;
+      case 'ja': return hasKana;
+      case 'ko': return hasHangul;
+      case 'en': return asciiRatio >= 0.95;
+      default:  return false; // conservative: only auto-skip for known lang pairs
+    }
   }
 
   // ─── TTS (queue-based playback, no cutting) ──────────────────────
@@ -551,8 +573,9 @@
       if (!text) return;
       if (text !== lastDOMSubtitle && text.length >= 2) {
         lastDOMSubtitle = text;
-        showSubtitle(text, null);
-        ws.send(JSON.stringify({ type: 'subtitle', text: text }));
+        var skip = isTargetLanguage(text, settings.targetLang);
+        showSubtitle(skip ? null : text, skip ? text : null);
+        ws.send(JSON.stringify({ type: 'subtitle', text: text, skipTranslate: skip }));
       }
     }
 
@@ -1244,6 +1267,9 @@
 
   function startASRMode() {
     syncMode = false;
+    subtitleMode = false;
+    startSent = false;
+    warmupDone = false;
     if (preheatReady && ws && ws.readyState === WebSocket.OPEN) {
       preheatReady = false;
       activatePipeline();
@@ -1257,6 +1283,9 @@
       try { ws.close(); } catch (_) {}
       ws = null;
     }
+    // Re-duck audio and show loading for ASR warmup
+    duckVideoAudio();
+    showLoading();
     connectWebSocket();
   }
 

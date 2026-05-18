@@ -50,9 +50,10 @@ type Client struct {
 
 // Subtitle is a single subtitle cue extracted from a video platform.
 type Subtitle struct {
-	Text  string  `json:"text"`
-	Start float64 `json:"start"`
-	End   float64 `json:"end"`
+	Text          string  `json:"text"`
+	Start         float64 `json:"start"`
+	End           float64 `json:"end"`
+	SkipTranslate bool    `json:"skipTranslate,omitempty"`
 }
 
 // Pending translations for async Google Translate via browser
@@ -134,9 +135,10 @@ type InMsg struct {
 	Engine      string     `json:"engine,omitempty"`
 	TTSVoice    string     `json:"ttsVoice,omitempty"`
 	Translation string     `json:"translation,omitempty"` // translate_response result
-	Error       string     `json:"error,omitempty"`       // translate_response error
-	Subs        []Subtitle `json:"subs,omitempty"`
-	Text        string     `json:"text,omitempty"`
+	Error         string     `json:"error,omitempty"`       // translate_response error
+	SkipTranslate bool       `json:"skipTranslate,omitempty"`
+	Subs          []Subtitle `json:"subs,omitempty"`
+	Text          string     `json:"text,omitempty"`
 }
 
 func (c *Client) sendJSON(msg OutMsg) error {
@@ -222,14 +224,20 @@ func (c *Client) generateAndSendTTS(text string, speechRate float64) {
 // ─── Preprocess (subtitle hijacking mode) ─────────────────────────────
 
 // handleDOMSubtitle translates a single DOM-captured subtitle and generates TTS.
-func (c *Client) handleDOMSubtitle(text string) {
+func (c *Client) handleDOMSubtitle(text string, skipTranslate bool) {
 	if c.translator == nil || c.targetLang == "" {
 		return
 	}
-	translated, err := c.translator.Translate(text, c.sourceLang, c.targetLang)
-	if err != nil {
-		c.sendJSON(OutMsg{Type: "error", Message: fmt.Sprintf("Translation error: %v", err)})
-		return
+	var translated string
+	var err error
+	if skipTranslate {
+		translated = text
+	} else {
+		translated, err = c.translator.Translate(text, c.sourceLang, c.targetLang)
+		if err != nil {
+			c.sendJSON(OutMsg{Type: "error", Message: fmt.Sprintf("Translation error: %v", err)})
+			return
+		}
 	}
 	if translated == "" {
 		return
@@ -269,6 +277,10 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 	sem := make(chan struct{}, 5)
 
 	for i, sub := range subs {
+		if sub.SkipTranslate {
+			translated[i] = sub.Text
+			continue
+		}
 		wg.Add(1)
 		go func(idx int, text string) {
 			defer wg.Done()
@@ -444,7 +456,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				client.sendJSON(OutMsg{Type: "status", Status: "stopped"})
 
 			case "subtitle":
-				go client.handleDOMSubtitle(msg.Text)
+				go client.handleDOMSubtitle(msg.Text, msg.SkipTranslate)
 
 			case "preprocess":
 				go client.handlePreprocess(msg.Subs)
