@@ -4,11 +4,10 @@
   'use strict';
 
   // ─── DOM elements ────────────────────────────────────────────────
-  const wsUrlInput = document.getElementById('wsUrl');
   const sourceLangSelect = document.getElementById('sourceLang');
   const targetLangSelect = document.getElementById('targetLang');
-  const baiduAppIDInput = document.getElementById('baiduAppID');
-  const baiduSecretInput = document.getElementById('baiduSecret');
+  const translateEngineSelect = document.getElementById('translateEngine');
+  const ttsVoiceSelect = document.getElementById('ttsVoice');
   const toggleBtn = document.getElementById('toggleBtn');
   const toggleIcon = document.getElementById('toggleIcon');
   const toggleText = document.getElementById('toggleText');
@@ -23,28 +22,27 @@
     wsUrl: 'ws://localhost:9527/ws',
     sourceLang: 'auto',
     targetLang: 'zh-Hans',
-    baiduAppID: '',
-    baiduSecret: '',
+    engine: 'microsoft',
+    ttsVoice: 'default',
   };
 
   async function loadSettings() {
     const result = await chrome.storage.local.get('translationSettings');
     const settings = result.translationSettings || DEFAULT_SETTINGS;
-    wsUrlInput.value = settings.wsUrl || DEFAULT_SETTINGS.wsUrl;
     sourceLangSelect.value = settings.sourceLang || DEFAULT_SETTINGS.sourceLang;
     targetLangSelect.value = settings.targetLang || DEFAULT_SETTINGS.targetLang;
-    baiduAppIDInput.value = settings.baiduAppID || '';
-    baiduSecretInput.value = settings.baiduSecret || '';
+    translateEngineSelect.value = settings.engine || DEFAULT_SETTINGS.engine;
+    ttsVoiceSelect.value = settings.ttsVoice || DEFAULT_SETTINGS.ttsVoice;
     return settings;
   }
 
   async function saveSettings() {
     const settings = {
-      wsUrl: wsUrlInput.value.trim(),
+      wsUrl: DEFAULT_SETTINGS.wsUrl,
       sourceLang: sourceLangSelect.value,
       targetLang: targetLangSelect.value,
-      baiduAppID: baiduAppIDInput.value.trim(),
-      baiduSecret: baiduSecretInput.value.trim(),
+      engine: translateEngineSelect.value,
+      ttsVoice: ttsVoiceSelect.value,
     };
     await chrome.storage.local.set({ translationSettings: settings });
     return settings;
@@ -178,7 +176,7 @@
   });
 
   // Auto-save on input change
-  [wsUrlInput, sourceLangSelect, targetLangSelect, baiduAppIDInput, baiduSecretInput].forEach(
+  [sourceLangSelect, targetLangSelect, translateEngineSelect, ttsVoiceSelect].forEach(
     (el) => {
       el.addEventListener('change', saveSettings);
       el.addEventListener('input', saveSettings);

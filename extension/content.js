@@ -26,8 +26,8 @@
     targetLang: 'zh-Hans',
     apiKey: '',
     region: 'eastasia',
-    baiduAppID: '',
-    baiduSecret: '',
+    engine: 'microsoft',
+    ttsVoice: 'default',
   };
 
   // ─── Sync mode state (subtitle hijacking) ───────────────────────────
@@ -681,8 +681,8 @@
         targetLang: settings.targetLang,
         apiKey: settings.apiKey,
         region: settings.region,
-        baiduAppID: settings.baiduAppID,
-        baiduSecret: settings.baiduSecret,
+        engine: settings.engine,
+        ttsVoice: settings.ttsVoice,
       }));
 
       // In sync mode: send preprocess right after config (server processes sequentially)
@@ -1204,8 +1204,8 @@
         targetLang: settings.targetLang,
         apiKey: settings.apiKey,
         region: settings.region,
-        baiduAppID: settings.baiduAppID,
-        baiduSecret: settings.baiduSecret,
+        engine: settings.engine,
+        ttsVoice: settings.ttsVoice,
       }));
     }
   }

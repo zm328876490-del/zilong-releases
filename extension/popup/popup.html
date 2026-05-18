@@ -17,11 +17,6 @@
     </header>
 
     <main>
-      <div class="form-group">
-        <label for="wsUrl">后端地址</label>
-        <input type="text" id="wsUrl" value="ws://localhost:9527/ws" placeholder="ws://localhost:9527/ws">
-      </div>
-
       <div class="form-row">
         <div class="form-group">
           <label for="sourceLang">源语言</label>
@@ -58,21 +53,24 @@
         </div>
       </div>
 
-      <fieldset class="translate-section">
-        <legend>百度翻译 <span class="optional">(可选·国内备用)</span></legend>
-        <div class="form-group">
-          <label for="baiduAppID">APP ID</label>
-          <input type="text" id="baiduAppID" placeholder="百度翻译开放平台 APP ID">
-        </div>
-        <div class="form-group">
-          <label for="baiduSecret">密钥 (Secret)</label>
-          <input type="password" id="baiduSecret" placeholder="百度翻译 Secret Key">
-        </div>
-        <a href="https://fanyi-api.baidu.com/" target="_blank" class="hint">免费注册 (1M 字符/月) → 获取 APP ID 和密钥</a>
-      </fieldset>
+      <div class="form-group">
+        <label for="translateEngine">翻译引擎</label>
+        <select id="translateEngine">
+          <option value="microsoft">微软翻译</option>
+          <option value="google">Google 翻译</option>
+        </select>
+      </div>
 
-      <div class="fallback-hint">
-        默认使用微软翻译（免费·国内可用），无需配置即可使用
+      <div class="form-group">
+        <label for="ttsVoice">TTS 音色</label>
+        <select id="ttsVoice">
+          <option value="default">默认女声</option>
+          <option value="xiaoxiao">晓晓 (女·温柔)</option>
+          <option value="yunxi">云希 (男)</option>
+          <option value="xiaoyi">晓伊 (女·活泼)</option>
+          <option value="yunyang">云扬 (男·新闻)</option>
+          <option value="xiaochen">晓辰 (女·亲切)</option>
+        </select>
       </div>
 
       <button id="toggleBtn" class="btn-start">
