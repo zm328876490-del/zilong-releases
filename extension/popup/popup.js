@@ -45,6 +45,20 @@
       ttsVoice: ttsVoiceSelect.value,
     };
     await chrome.storage.local.set({ translationSettings: settings });
+
+    // Push to active tab immediately for real-time effect
+    if (isRunning) {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab) {
+          await chrome.tabs.sendMessage(tab.id, {
+            type: 'updateSettings',
+            settings: settings,
+          }).catch(() => {});
+        }
+      } catch (_) {}
+    }
+
     return settings;
   }
 

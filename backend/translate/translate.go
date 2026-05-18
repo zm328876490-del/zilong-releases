@@ -1,28 +1,23 @@
 package translate
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Translator supports multiple backends. Priority: Microsoft (free Edge token) → Baidu → Google.
+// Translator supports multiple backends. Engine can be set to "microsoft" or "google".
 type Translator struct {
-	msToken    string
-	msTokenAt  time.Time
-	msTokenMu  sync.Mutex
-	baiduAppID  string
-	baiduSecret string
+	engine      string // "microsoft" or "google"; empty = auto (microsoft first, then google)
+	msToken     string
+	msTokenAt   time.Time
+	msTokenMu   sync.Mutex
 	client      *http.Client
 	cache       map[string]string
 	cacheKeys   []string
@@ -54,9 +49,8 @@ func New(apiKey, region string) *Translator {
 	}
 }
 
-func (t *Translator) SetBaiduCredentials(appID, secret string) {
-	t.baiduAppID = appID
-	t.baiduSecret = secret
+func (t *Translator) SetEngine(engine string) {
+	t.engine = engine
 }
 
 func (t *Translator) Translate(text, from, to string) (string, error) {
@@ -72,26 +66,33 @@ func (t *Translator) Translate(text, from, to string) (string, error) {
 	}
 	t.cacheMu.RUnlock()
 
-	// Priority: Microsoft Edge (free) → Baidu (China) → Google
-	result, err := t.translateMicrosoft(text, from, to)
-	if err == nil {
-		t.cachePut(cacheKey, result)
-		return result, nil
-	}
-
-	if t.baiduAppID != "" {
-		result, err := t.translateBaidu(text, from, to)
+	// Engine selection: "microsoft" | "google" | "" (auto = microsoft first, then google)
+	switch t.engine {
+	case "microsoft":
+		result, err := t.translateMicrosoft(text, from, to)
+		if err == nil {
+			t.cachePut(cacheKey, result)
+		}
+		return result, err
+	case "google":
+		result, err := t.translateGoogle(text, from, to)
+		if err == nil {
+			t.cachePut(cacheKey, result)
+		}
+		return result, err
+	default:
+		// Auto: Microsoft first, then Google fallback
+		result, err := t.translateMicrosoft(text, from, to)
 		if err == nil {
 			t.cachePut(cacheKey, result)
 			return result, nil
 		}
+		result, err = t.translateGoogle(text, from, to)
+		if err == nil {
+			t.cachePut(cacheKey, result)
+		}
+		return result, err
 	}
-
-	result, err = t.translateGoogle(text, from, to)
-	if err == nil {
-		t.cachePut(cacheKey, result)
-	}
-	return result, err
 }
 
 func (t *Translator) cachePut(key, value string) {
@@ -191,55 +192,6 @@ func mapLangMicrosoft(lang string) string {
 	return lang
 }
 
-// ─── Baidu Translate ────────────────────────────────────────────────────
-
-func (t *Translator) translateBaidu(text, from, to string) (string, error) {
-	if from == "auto" {
-		from = "auto"
-	}
-	baiduTo := strings.Replace(to, "zh-Hans", "zh", 1)
-	baiduTo = strings.Replace(baiduTo, "zh-Hant", "cht", 1)
-
-	salt := strconv.Itoa(rand.Intn(1000000000))
-	signStr := t.baiduAppID + text + salt + t.baiduSecret
-	sign := md5Hex(signStr)
-
-	apiURL := fmt.Sprintf(
-		"https://fanyi-api.baidu.com/api/trans/vip/translate?q=%s&from=%s&to=%s&appid=%s&salt=%s&sign=%s",
-		url.QueryEscape(text), from, baiduTo, t.baiduAppID, salt, sign,
-	)
-
-	resp, err := t.client.Get(apiURL)
-	if err != nil {
-		return "", fmt.Errorf("baidu request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	var result struct {
-		ErrorCode string `json:"error_code"`
-		ErrorMsg  string `json:"error_msg"`
-		Trans     []struct {
-			Src string `json:"src"`
-			Dst string `json:"dst"`
-		} `json:"trans_result"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("baidu parse: %w", err)
-	}
-
-	if result.ErrorCode != "" && result.ErrorCode != "0" {
-		return "", fmt.Errorf("baidu error %s: %s", result.ErrorCode, result.ErrorMsg)
-	}
-
-	if len(result.Trans) == 0 {
-		return "", fmt.Errorf("baidu returned empty translation")
-	}
-
-	return strings.TrimSpace(result.Trans[0].Dst), nil
-}
-
 // ─── Google Translate ──────────────────────────────────────────────────
 
 func (t *Translator) translateGoogle(text, from, to string) (string, error) {
@@ -301,7 +253,3 @@ func mapLangGoogle(lang string) string {
 	return lang
 }
 
-func md5Hex(s string) string {
-	h := md5.Sum([]byte(s))
-	return hex.EncodeToString(h[:])
-}

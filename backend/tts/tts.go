@@ -71,6 +71,27 @@ func VoiceForLang(lang string) string {
 	return "zh-CN-XiaoxiaoNeural"
 }
 
+// voiceShortNames maps frontend short voice names to Edge TTS voice names.
+var voiceShortNames = map[string]string{
+	"default":   "",
+	"xiaoxiao":  "zh-CN-XiaoxiaoNeural",
+	"yunxi":     "zh-CN-YunxiNeural",
+	"xiaoyi":    "zh-CN-XiaoyiNeural",
+	"yunyang":   "zh-CN-YunyangNeural",
+	"xiaochen":  "zh-TW-HsiaoChenNeural",
+}
+
+// ResolveVoice returns the Edge TTS voice name from a user-selected short name.
+// Falls back to the language default if voice is empty or "default".
+func ResolveVoice(voice, lang string) string {
+	if voice != "" && voice != "default" {
+		if v, ok := voiceShortNames[voice]; ok && v != "" {
+			return v
+		}
+	}
+	return VoiceForLang(lang)
+}
+
 // SynthesizeStream connects to Edge TTS via WebSocket and calls onChunk for
 // each received audio chunk.
 func SynthesizeStream(text, voice string, onChunk func(AudioChunk)) error {

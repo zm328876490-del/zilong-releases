@@ -40,6 +40,7 @@ type Client struct {
 	translator      *translate.Translator
 	sourceLang      string
 	targetLang      string
+	ttsVoice        string // user-selected TTS voice name (short form)
 	active          bool
 	ttsCancel       chan struct{} // cancels the previous streaming TTS goroutine
 	ttsCancelMu     sync.Mutex    // guards ttsCancel
@@ -86,8 +87,8 @@ type InMsg struct {
 	TargetLang  string     `json:"targetLang,omitempty"`
 	APIKey      string     `json:"apiKey,omitempty"`
 	Region      string     `json:"region,omitempty"`
-	BaiduAppID  string     `json:"baiduAppID,omitempty"`
-	BaiduSecret string     `json:"baiduSecret,omitempty"`
+	Engine      string     `json:"engine,omitempty"`
+	TTSVoice    string     `json:"ttsVoice,omitempty"`
 	Subs        []Subtitle `json:"subs,omitempty"` // preprocess mode
 	Text        string     `json:"text,omitempty"` // DOM subtitle text
 }
@@ -131,7 +132,7 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 }
 
 func (c *Client) generateAndSendTTS(text string, speechRate float64) {
-	voice := tts.VoiceForLang(c.targetLang)
+	voice := tts.ResolveVoice(c.ttsVoice, c.targetLang)
 
 	// Streaming TTS with cancellation support
 	c.sendJSON(OutMsg{
@@ -212,7 +213,7 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 
 	c.sendJSON(OutMsg{Type: "preprocess_start", Total: len(subs)})
 
-	voice := tts.VoiceForLang(c.targetLang)
+	voice := tts.ResolveVoice(c.ttsVoice, c.targetLang)
 	from := c.sourceLang
 	to := c.targetLang
 
@@ -344,23 +345,31 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			case "config":
 				client.sourceLang = msg.SourceLang
 				client.targetLang = msg.TargetLang
-				client.translator = translate.New(msg.APIKey, msg.Region)
-				if msg.BaiduAppID != "" {
-					client.translator.SetBaiduCredentials(msg.BaiduAppID, msg.BaiduSecret)
+				client.ttsVoice = msg.TTSVoice
+				if client.translator == nil {
+					client.translator = translate.New(msg.APIKey, msg.Region)
 				}
-				client.audioBuf = asr.NewAudioBuffer(
+				client.translator.SetEngine(msg.Engine)
+				if client.audioBuf == nil {
+					client.audioBuf = asr.NewAudioBuffer(
 					whisperServerURL,
 					client.sourceLang,
 					client.onASRResult,
 				)
+				}
 				client.sendJSON(OutMsg{Type: "status", Status: "configured"})
+
+			case "voice":
+				if msg.TTSVoice != "" {
+					client.ttsVoice = msg.TTSVoice
+				}
 
 			case "warmup":
 				go func() {
 					// Translate warmup
 					client.translator.Translate("hello", client.sourceLang, client.targetLang)
 					// TTS warmup (fire-and-forget via Go-native Edge TTS)
-					tts.Warmup(tts.VoiceForLang(client.targetLang))
+					tts.Warmup(tts.ResolveVoice(client.ttsVoice, client.targetLang))
 					client.sendJSON(OutMsg{Type: "status", Status: "ready"})
 				}()
 

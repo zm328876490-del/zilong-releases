@@ -1189,6 +1189,10 @@
     stopAudioCapture();
     stopTTS();
     contentDiv.innerHTML = '';
+    subtitleBox = null;
+    speakerEl = null;
+    originalLine = null;
+    translationLine = null;
     finishWarmup();
 
     chrome.runtime.sendMessage({ type: 'stopped' }).catch(() => {});
@@ -1237,6 +1241,38 @@
   });
 
   // ─── Initialization ───────────────────────────────────────────────
+
+  // Watch for settings changes from popup (works even when popup is closed)
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !changes.translationSettings) return;
+    const newSettings = changes.translationSettings.newValue;
+    if (!newSettings) return;
+
+    if (newSettings.ttsVoice !== undefined && newSettings.ttsVoice !== settings.ttsVoice) {
+      settings.ttsVoice = newSettings.ttsVoice;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'voice', ttsVoice: newSettings.ttsVoice }));
+      }
+    }
+
+    if (newSettings.engine !== undefined && newSettings.engine !== settings.engine) {
+      settings.engine = newSettings.engine;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'config',
+          sourceLang: settings.sourceLang,
+          targetLang: settings.targetLang,
+          apiKey: settings.apiKey,
+          region: settings.region,
+          engine: newSettings.engine,
+          ttsVoice: settings.ttsVoice,
+        }));
+      }
+    }
+
+    if (newSettings.sourceLang !== undefined) settings.sourceLang = newSettings.sourceLang;
+    if (newSettings.targetLang !== undefined) settings.targetLang = newSettings.targetLang;
+  });
 
   // Start background preheat as soon as a video is detected
   tryPreheat();
