@@ -233,3 +233,105 @@ fieldset.translate-section legend {
   text-align: center;
   margin: 4px 0 8px;
 }
+
+/* ─── Toggle Switch ──────────────────────── */
+.toggle-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.toggle-row > label:first-child {
+  margin-bottom: 0;
+}
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch .slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #d1d5db;
+  transition: 0.25s;
+  border-radius: 24px;
+}
+
+.switch .slider:before {
+  content: "";
+  position: absolute;
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: #fff;
+  transition: 0.25s;
+  border-radius: 50%;
+}
+
+.switch input:checked + .slider {
+  background-color: #6366f1;
+}
+
+.switch input:checked + .slider:before {
+  transform: translateX(20px);
+}
+
+/* ─── Range Sliders ──────────────────────── */
+.slider-row label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.slider-row label span {
+  font-weight: 400;
+  color: #6366f1;
+  font-size: 12px;
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: #e2e5ee;
+  outline: none;
+  padding: 0;
+  margin-top: 6px;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #6366f1;
+  cursor: pointer;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  background: #4f46e5;
+}
+
+input[type="range"]:focus {
+  box-shadow: none;
+}

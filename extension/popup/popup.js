@@ -8,6 +8,13 @@
   const targetLangSelect = document.getElementById('targetLang');
   const translateEngineSelect = document.getElementById('translateEngine');
   const ttsVoiceSelect = document.getElementById('ttsVoice');
+  const subtitleToggle = document.getElementById('subtitleToggle');
+  const subtitleSizeSlider = document.getElementById('subtitleSize');
+  const subtitleSizeVal = document.getElementById('subtitleSizeVal');
+  const originalVolumeSlider = document.getElementById('originalVolume');
+  const originalVolumeVal = document.getElementById('originalVolumeVal');
+  const ttsVolumeSlider = document.getElementById('ttsVolume');
+  const ttsVolumeVal = document.getElementById('ttsVolumeVal');
   const toggleBtn = document.getElementById('toggleBtn');
   const toggleIcon = document.getElementById('toggleIcon');
   const toggleText = document.getElementById('toggleText');
@@ -24,6 +31,10 @@
     targetLang: 'zh-Hans',
     engine: 'microsoft',
     ttsVoice: 'default',
+    subtitleEnabled: true,
+    subtitleSize: 50,
+    originalVolume: 30,
+    ttsVolume: 100,
   };
 
   // Language-specific TTS voices. "default" resolves to VoiceForLang(targetLang) on backend.
@@ -117,6 +128,13 @@
     translateEngineSelect.value = settings.engine || DEFAULT_SETTINGS.engine;
     populateTTSVoices(targetLang);
     ttsVoiceSelect.value = settings.ttsVoice || 'default';
+    subtitleToggle.checked = settings.subtitleEnabled !== false;
+    subtitleSizeSlider.value = settings.subtitleSize || 50;
+    subtitleSizeVal.textContent = subtitleSizeSlider.value + '%';
+    originalVolumeSlider.value = settings.originalVolume || 30;
+    originalVolumeVal.textContent = originalVolumeSlider.value + '%';
+    ttsVolumeSlider.value = settings.ttsVolume || 100;
+    ttsVolumeVal.textContent = ttsVolumeSlider.value + '%';
     return settings;
   }
 
@@ -127,6 +145,10 @@
       targetLang: targetLangSelect.value,
       engine: translateEngineSelect.value,
       ttsVoice: ttsVoiceSelect.value,
+      subtitleEnabled: subtitleToggle.checked,
+      subtitleSize: parseInt(subtitleSizeSlider.value, 10),
+      originalVolume: parseInt(originalVolumeSlider.value, 10),
+      ttsVolume: parseInt(ttsVolumeSlider.value, 10),
     };
     await chrome.storage.local.set({ translationSettings: settings });
 
@@ -283,6 +305,49 @@
       el.addEventListener('input', saveSettings);
     }
   );
+
+  // Subtitle toggle: save and push immediately
+  subtitleToggle.addEventListener('change', function () {
+    saveSettings();
+    pushDisplaySettings();
+  });
+
+  // Sliders: update label + save
+  subtitleSizeSlider.addEventListener('input', function () {
+    subtitleSizeVal.textContent = subtitleSizeSlider.value + '%';
+    saveSettings();
+    pushDisplaySettings();
+  });
+
+  originalVolumeSlider.addEventListener('input', function () {
+    originalVolumeVal.textContent = originalVolumeSlider.value + '%';
+    saveSettings();
+    pushDisplaySettings();
+  });
+
+  ttsVolumeSlider.addEventListener('input', function () {
+    ttsVolumeVal.textContent = ttsVolumeSlider.value + '%';
+    saveSettings();
+    pushDisplaySettings();
+  });
+
+  // Push display-related settings to content script in real-time
+  async function pushDisplaySettings() {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab) {
+        await chrome.tabs.sendMessage(tab.id, {
+          type: 'updateDisplaySettings',
+          settings: {
+            subtitleEnabled: subtitleToggle.checked,
+            subtitleSize: parseInt(subtitleSizeSlider.value, 10),
+            originalVolume: parseInt(originalVolumeSlider.value, 10),
+            ttsVolume: parseInt(ttsVolumeSlider.value, 10),
+          },
+        }).catch(() => {});
+      }
+    } catch (_) {}
+  }
 
   // ─── Listen for status updates from content script ────────────────
   chrome.runtime.onMessage.addListener((message) => {

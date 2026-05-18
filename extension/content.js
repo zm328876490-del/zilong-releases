@@ -28,6 +28,10 @@
     region: 'eastasia',
     engine: 'microsoft',
     ttsVoice: 'default',
+    subtitleEnabled: true,
+    subtitleSize: 50,
+    originalVolume: 30,
+    ttsVolume: 100,
   };
 
   // ─── Sync mode state (subtitle hijacking) ───────────────────────────
@@ -47,6 +51,7 @@
   let ccAttrObserver = null;      // watches aria-pressed, re-enables CC if YouTube resets it
   let captionStyleEl = null;      // (unused, kept for compat)
   let lastDOMSubtitle = '';       // deduplicate consecutive identical captions
+  let ccMuteUntil = 0;           // mute DOM capture for N ms after CC click
 
   // ─── Loading Overlay (shown during warmup, auto-hides on first TTS) ──
   const loadingOverlay = document.createElement('div');
@@ -145,6 +150,55 @@
 
   const contentDiv = overlay.querySelector('#__subtitle_content__');
 
+  // ─── Display Settings (applied in real-time) ──────────────────────
+  function applySubtitleEnabled(enabled) {
+    settings.subtitleEnabled = enabled;
+    overlay.style.setProperty('display', enabled ? '' : 'none', 'important');
+    if (!enabled) {
+      // Clear current subtitle immediately
+      if (subtitleBox) subtitleBox.style.opacity = '0';
+      if (speakerEl) speakerEl.style.display = 'none';
+    }
+  }
+
+  function applySubtitleSize(percentage) {
+    settings.subtitleSize = percentage;
+    const scale = percentage / 100;
+    let sizeStyle = document.getElementById('__ai_subtitle_size_style__');
+    if (!sizeStyle) {
+      sizeStyle = document.createElement('style');
+      sizeStyle.id = '__ai_subtitle_size_style__';
+      overlay.appendChild(sizeStyle);
+    }
+    sizeStyle.textContent = `
+      #__ai_subtitle_overlay__ .subtitle-original { font-size: ${Math.round(16 * scale)}px !important; }
+      #__ai_subtitle_overlay__ .subtitle-translation { font-size: ${Math.round(20 * scale)}px !important; }
+      #__ai_subtitle_overlay__ .subtitle-speaker { font-size: ${Math.round(12 * scale)}px !important; }
+    `;
+  }
+
+  function applyOriginalVolume(percentage) {
+    settings.originalVolume = percentage;
+    const video = duckedVideo || findVideoElement();
+    if (video) {
+      video.volume = percentage / 100;
+    }
+  }
+
+  function applyTtsVolume(percentage) {
+    settings.ttsVolume = percentage;
+    if (ttsAudio) {
+      ttsAudio.volume = percentage / 100;
+    }
+  }
+
+  function applyDisplaySettings(s) {
+    if (s.subtitleEnabled !== undefined) applySubtitleEnabled(s.subtitleEnabled);
+    if (s.subtitleSize !== undefined) applySubtitleSize(s.subtitleSize);
+    if (s.originalVolume !== undefined) applyOriginalVolume(s.originalVolume);
+    if (s.ttsVolume !== undefined) applyTtsVolume(s.ttsVolume);
+  }
+
   // Persistent DOM elements (reused, not recreated)
   let speakerEl = null;
   let subtitleBox = null;
@@ -171,9 +225,8 @@
   }
 
   function showSubtitle(original, translation, speaker) {
-    // Filter YouTube CC track-name announcements from display
-    if (original && isCCAnnouncement(original)) original = '';
-    if (translation && isCCAnnouncement(translation)) translation = '';
+    original = stripCCAnnouncement(original);
+    translation = stripCCAnnouncement(translation);
 
     ensureElements();
 
@@ -212,12 +265,13 @@
     return div.innerHTML;
   }
 
-  // YouTube CC track-name accessibility announcements that slip through ASR
-  function isCCAnnouncement(text) {
-    if (!text) return false;
-    // Match patterns like "英语（自动生成）点击 查看设置" or "English (auto-generated)..."
-    return /(?:自动生成|auto.generated|字幕.*设置|字幕.*点击|查看设置|cc.*settings)/i.test(text)
-        && text.length < 50;
+  // Strip YouTube CC track-name announcements from text before display/TTS
+  function stripCCAnnouncement(text) {
+    if (!text) return '';
+    return text
+      .replace(/英语[（(]自动生成[）)]\s*点击\s*查看设置/g, '')
+      .replace(/English\s*\(auto.generated\)\s*click\s*view\s*settings/gi, '')
+      .trim();
   }
 
   // ─── TTS (queue-based playback, no cutting) ──────────────────────
@@ -268,12 +322,12 @@
   }
 
   function playTTSAudio(base64, mimeType, text, speechRate) {
-    if (!base64 || text === lastSpokenText) return;
-    if (isCCAnnouncement(text)) return;
+    text = stripCCAnnouncement(text);
+    if (!base64 || !text || text === lastSpokenText) return;
     lastSpokenText = text;
     const url = `data:${mimeType};base64,${base64}`;
     const audio = new Audio(url);
-    audio.volume = 0.9;
+    audio.volume = settings.ttsVolume / 100;
     audio.playbackRate = TTS_RATE;
     enqueueAudio(audio, url);
   }
@@ -321,7 +375,7 @@
       const blob = new Blob(ttsFallbackChunks, { type: 'audio/mpeg' });
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      audio.volume = 0.9;
+      audio.volume = settings.ttsVolume / 100;
       audio.playbackRate = TTS_RATE;
       enqueueAudio(audio, url);
     }
@@ -409,7 +463,43 @@
     synth.speak = function () {};
     btn.click();
     setTimeout(function () { synth.speak = orig; }, 800);
+    // Mute DOM subtitle capture — YouTube may briefly flash the track
+    // name as caption text right after CC is enabled.
+    ccMuteUntil = Date.now() + 2000;
   }
+
+  // Set up CC button click interceptor + attribute watch on a found button.
+	  function setupCCButton(btn, player) {
+	    if (!btn) return;
+	    // Force CC on
+	    if (btn.getAttribute('aria-pressed') === 'false') {
+	      silentClickCC(btn);
+	    }
+	    // Intercept user clicks to prevent turning CC off
+	    ccClickHandler = function (e) {
+	      var b = player.querySelector('.ytp-subtitles-button');
+	      if (b && b.getAttribute('aria-pressed') === 'true') {
+	        e.stopImmediatePropagation();
+	        e.preventDefault();
+	      }
+	    };
+	    ccClickTarget = btn;
+	    btn.addEventListener('click', ccClickHandler, true);
+	    // Watch aria-pressed — YouTube may reset it after ads or rebinds
+	    if (ccAttrObserver) ccAttrObserver.disconnect();
+	    ccAttrObserver = new MutationObserver(function (mutations) {
+	      for (var i = 0; i < mutations.length; i++) {
+	        var m = mutations[i];
+	        if (m.type === 'attributes' && m.attributeName === 'aria-pressed') {
+	          var b = m.target;
+	          if (b.getAttribute('aria-pressed') === 'false' && subtitleMode && isRunning) {
+	            silentClickCC(b);
+	          }
+	        }
+	      }
+	    });
+	    ccAttrObserver.observe(btn, { attributes: true, attributeFilter: ['aria-pressed'] });
+	  }
 
   function startDOMSubtitleObserver() {
     var player = document.querySelector('#movie_player') ||
@@ -418,43 +508,22 @@
       return false;
     }
 
-    // Force CC on
     var ccBtn = player.querySelector('.ytp-subtitles-button');
-    if (ccBtn && ccBtn.getAttribute('aria-pressed') === 'false') {
-      silentClickCC(ccBtn);
-    }
-
-    // Prevent user from turning CC off during translation.
-    // Use capture-phase click interception so YouTube's native handler
-    // never fires — avoids the subtitle-track announcement entirely.
     if (ccBtn) {
-      ccClickHandler = function (e) {
+      setupCCButton(ccBtn, player);
+    } else {
+      // Player exists but CC button not rendered yet — poll until it appears
+      var ccPoll = 0;
+      var ccPollTimer = setInterval(function () {
+        ccPoll++;
         var btn = player.querySelector('.ytp-subtitles-button');
-        if (btn && btn.getAttribute('aria-pressed') === 'true') {
-          e.stopImmediatePropagation();
-          e.preventDefault();
+        if (btn) {
+          clearInterval(ccPollTimer);
+          setupCCButton(btn, player);
+        } else if (ccPoll > 30) {
+          clearInterval(ccPollTimer);
         }
-      };
-      ccClickTarget = ccBtn;
-      ccBtn.addEventListener('click', ccClickHandler, true);
-    }
-
-    // Watch CC button state — YouTube may reset it after ads or player rebinds.
-    // Re-enable silently whenever it flips off.
-    if (ccBtn) {
-      if (ccAttrObserver) ccAttrObserver.disconnect();
-      ccAttrObserver = new MutationObserver(function (mutations) {
-        for (var i = 0; i < mutations.length; i++) {
-          var m = mutations[i];
-          if (m.type === 'attributes' && m.attributeName === 'aria-pressed') {
-            var b = m.target;
-            if (b.getAttribute('aria-pressed') === 'false' && subtitleMode && isRunning) {
-              silentClickCC(b);
-            }
-          }
-        }
-      });
-      ccAttrObserver.observe(ccBtn, { attributes: true, attributeFilter: ['aria-pressed'] });
+      }, 300);
     }
 
     // Native captions remain visible — overlay sits below the video
@@ -475,9 +544,11 @@
 
     function checkAndSend() {
       if (!isRunning || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (Date.now() < ccMuteUntil) return;
       var text = getCurrentCaptionText();
-      if (isCCAnnouncement(text)) return;
-      if (text && text !== lastDOMSubtitle && text.length >= 2) {
+      text = stripCCAnnouncement(text);
+      if (!text) return;
+      if (text !== lastDOMSubtitle && text.length >= 2) {
         lastDOMSubtitle = text;
         showSubtitle(text, null);
         ws.send(JSON.stringify({ type: 'subtitle', text: text }));
@@ -835,6 +906,21 @@
   }
 
   function handleServerMessage(msg) {
+    // Strip CC announcement text from ASR results before any processing
+    if (msg.original) msg.original = stripCCAnnouncement(msg.original);
+    if (msg.text) msg.text = stripCCAnnouncement(msg.text);
+    if (msg.translation) msg.translation = stripCCAnnouncement(msg.translation);
+
+    // Skip entire audio utterance if original was completely the announcement.
+    // TTS audio is generated server-side from ASR text; the streaming path
+    // (audio_start/chunk/end) bypasses playTTSAudio(), so we must block here.
+    if (msg.original !== undefined && msg.original === '') {
+      var t = msg.type;
+      if (t === 'audio_start' || t === 'audio_chunk' || t === 'audio_end' || t === 'audio') {
+        return;
+      }
+    }
+
     switch (msg.type) {
       case 'original':
         showSubtitle(msg.text, null, msg.speaker);
@@ -949,7 +1035,6 @@
   // ─── Control ──────────────────────────────────────────────────────
   let duckedVideo = null;   // video whose audio is ducked (not muted)
   let savedVolume = 1;
-  const DUCK_VOLUME = 0.25; // video volume during TTS playback
   let warmupDone = false;
   let startSent = false;  // prevents duplicate 'start' messages
 
@@ -1044,7 +1129,7 @@
       if (item.audio) {
         try {
           item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
-          item.audioEl.volume = 0.9;
+          item.audioEl.volume = settings.ttsVolume / 100;
           item.audioEl.playbackRate = TTS_RATE;
         } catch (e) {
         }
@@ -1171,7 +1256,7 @@
     const video = findVideoElement();
     if (video) {
       savedVolume = video.volume;
-      video.volume = savedVolume * DUCK_VOLUME;
+      video.volume = settings.originalVolume / 100;
       duckedVideo = video;
     }
   }
@@ -1297,6 +1382,7 @@
 
   function updateSettings(newSettings) {
     Object.assign(settings, newSettings);
+    applyDisplaySettings(newSettings);
     // If already connected, send updated config
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
@@ -1331,6 +1417,11 @@
 
       case 'updateSettings':
         updateSettings(message.settings || {});
+        sendResponse({ success: true });
+        break;
+
+      case 'updateDisplaySettings':
+        applyDisplaySettings(message.settings || {});
         sendResponse({ success: true });
         break;
     }
@@ -1369,6 +1460,16 @@
 
     if (newSettings.sourceLang !== undefined) settings.sourceLang = newSettings.sourceLang;
     if (newSettings.targetLang !== undefined) settings.targetLang = newSettings.targetLang;
+
+    // Apply display settings in real-time
+    applyDisplaySettings(newSettings);
+  });
+
+  // Load saved settings from storage on init
+  chrome.storage.local.get('translationSettings', function (result) {
+    if (result.translationSettings) {
+      updateSettings(result.translationSettings);
+    }
   });
 
   // Start background preheat as soon as a video is detected
