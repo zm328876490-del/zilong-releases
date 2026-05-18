@@ -52,6 +52,7 @@
   let captionStyleEl = null;      // (unused, kept for compat)
   let lastDOMSubtitle = '';       // deduplicate consecutive identical captions
   let ccMuteUntil = 0;           // mute DOM capture for N ms after CC click
+  let subtitleModeTimer = null;  // timeout: fallback to ASR if no captions
 
   // ─── Loading Overlay (shown during warmup, auto-hides on first TTS) ──
   const loadingOverlay = document.createElement('div');
@@ -613,6 +614,8 @@
   }
 
   function stopDOMSubtitleObserver() {
+    clearTimeout(subtitleModeTimer);
+    subtitleModeTimer = null;
     if (domObserver) {
       domObserver.disconnect();
       domObserver = null;
@@ -873,9 +876,10 @@
         if (syncMode || subtitleMode) {
           stopSyncPlayback();
           stopDOMSubtitleObserver();
-          isRunning = false;
-          finishWarmup();
-          sendStatus('error', '连接断开，请重试');
+          syncMode = false;
+          subtitleMode = false;
+          sendStatus('error', '字幕通道断开，回退到 ASR 模式...');
+          scheduleReconnect();
         } else {
           scheduleReconnect();
         }
@@ -1003,8 +1007,12 @@
             }
           }
         } else if (msg.status === "listening" && subtitleMode && !domObserver) {
-          startDOMSubtitleObserver();
-          sendStatus(msg.status);
+          if (!startDOMSubtitleObserver()) {
+            sendStatus('error', '无法启用字幕捕获，回退到 ASR');
+            fallbackToASR();
+          } else {
+            sendStatus(msg.status);
+          }
         } else {
           sendStatus(msg.status);
         }
@@ -1321,6 +1329,14 @@
     // API extraction failed — try DOM subtitle observer for YouTube
     subtitleMode = canObserveDOMSubtitles();
     if (subtitleMode) {
+      // Timeout: if no captions after 12s, fall back to ASR
+      clearTimeout(subtitleModeTimer);
+      subtitleModeTimer = setTimeout(() => {
+        if (subtitleMode && isRunning && !lastDOMSubtitle) {
+          sendStatus('error', '字幕捕获超时，回退到 ASR');
+          fallbackToASR();
+        }
+      }, 12000);
       // Connect WS if needed (same flow as sync mode)
       if (ws) {
         ws.onclose = null;
