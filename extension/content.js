@@ -42,7 +42,8 @@
   // DOM subtitle observer state
   let subtitleMode = false;       // true = DOM caption extraction mode
   let domObserver = null;         // MutationObserver for caption elements
-  let ccObserver = null;          // MutationObserver for CC button (prevents user turning off)
+  let ccClickHandler = null;      // capture-phase click handler on CC button
+  let ccClickTarget = null;       // CC button element the handler is attached to
   let captionStyleEl = null;      // (unused, kept for compat)
   let lastDOMSubtitle = '';       // deduplicate consecutive identical captions
 
@@ -353,18 +354,19 @@
       ccBtn.click();
     }
 
-    // Prevent user from turning CC off during translation
+    // Prevent user from turning CC off during translation.
+    // Use capture-phase click interception so YouTube's native handler
+    // never fires — avoids the subtitle-track announcement entirely.
     if (ccBtn) {
-      ccObserver = new MutationObserver(function () {
+      ccClickHandler = function (e) {
         var btn = player.querySelector('.ytp-subtitles-button');
-        if (btn && btn.getAttribute('aria-pressed') === 'false') {
-          btn.click();
+        if (btn && btn.getAttribute('aria-pressed') === 'true') {
+          e.stopImmediatePropagation();
+          e.preventDefault();
         }
-      });
-      ccObserver.observe(ccBtn, {
-        attributes: true,
-        attributeFilter: ['aria-pressed'],
-      });
+      };
+      ccClickTarget = ccBtn;
+      ccBtn.addEventListener('click', ccClickHandler, true);
     }
 
     // Native captions remain visible — overlay sits below the video
@@ -455,9 +457,10 @@
       domObserver.disconnect();
       domObserver = null;
     }
-    if (ccObserver) {
-      ccObserver.disconnect();
-      ccObserver = null;
+    if (ccClickHandler && ccClickTarget) {
+      ccClickTarget.removeEventListener('click', ccClickHandler, true);
+      ccClickHandler = null;
+      ccClickTarget = null;
     }
     lastDOMSubtitle = '';
     subtitleMode = false;
