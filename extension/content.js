@@ -19,6 +19,15 @@
   let reconnectAttempts = 0;
   const MAX_RECONNECT = 5;
 
+  // ─── Persistent pipeline state ─────────────────────────────────────
+  // AudioContext, processorNode, and WS survive video changes.
+  // Only the source node (which video is captured) gets swapped.
+  let pipelineActive = false;    // AudioContext + processorNode created and live
+  let activeVideo = null;       // currently captured <video> element
+  let activeStream = null;      // current captureStream() MediaStream
+  let videoWatcher = null;      // persistent MutationObserver for video elements
+  let videoPollTimer = null;    // periodic check for video src changes / new videos
+
   // Settings (updated via popup messages)
   let settings = {
     wsUrl: 'ws://localhost:9527/ws',
@@ -299,6 +308,11 @@
 
   // ─── TTS (queue-based playback, no cutting) ──────────────────────
   let lastSpokenText = '';
+  const SHORT_VIDEO_DURATION = 60; // videos under 60s skip TTS dedup
+
+  function isShortVideo() {
+    return activeVideo && activeVideo.duration > 0 && activeVideo.duration < SHORT_VIDEO_DURATION;
+  }
   let ttsAudio = null;
   let ttsAudioUrl = null;
 
@@ -346,7 +360,8 @@
 
   function playTTSAudio(base64, mimeType, text, speechRate) {
     text = stripCCAnnouncement(text);
-    if (!base64 || !text || text === lastSpokenText) return;
+    if (!base64 || !text) return;
+    if (!isShortVideo() && text === lastSpokenText) return;
     lastSpokenText = text;
     const url = `data:${mimeType};base64,${base64}`;
     const audio = new Audio(url);
@@ -385,7 +400,7 @@
 
   function handleAudioChunk(msg) {
     if (!msg.audio) return;
-    if (msg.original && msg.original !== lastSpokenText) return;
+    if (!isShortVideo() && msg.original && msg.original !== lastSpokenText) return;
     const binary = atob(msg.audio);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -393,7 +408,7 @@
   }
 
   function handleAudioEnd(msg) {
-    if (msg.original && msg.original !== lastSpokenText) return;
+    if (!isShortVideo() && msg.original && msg.original !== lastSpokenText) return;
     if (ttsFallbackChunks.length > 0) {
       const blob = new Blob(ttsFallbackChunks, { type: 'audio/mpeg' });
       const url = URL.createObjectURL(blob);
@@ -402,6 +417,8 @@
       audio.playbackRate = TTS_RATE;
       enqueueAudio(audio, url);
     }
+    // Short videos: clear dedup after TTS so looped replays re-speak
+    if (isShortVideo()) lastSpokenText = '';
     ttsFallbackChunks = [];
     finishWarmup();
   }
@@ -753,36 +770,119 @@
     return subs.length > 0 ? subs : null;
   }
 
-  async function startAudioCapture() {
-    let video = findVideoElement();
-    // Fallback: video may be muted/hidden by our loading overlay
-    if (!video && duckedVideo) {
-      video = duckedVideo;
-    }
-    if (!video) {
-      sendStatus('error', '未找到正在播放的视频元素');
+  // ─── Persistent Audio Pipeline ─────────────────────────────────────
+  // AudioContext + processorNode are created ONCE and survive video swaps.
+  // Only the source node (MediaStreamSource) is swapped when video changes.
+
+  function ensureAudioContext() {
+    if (audioContext) return true;
+    try {
+      audioContext = new AudioContext({ sampleRate: 16000 });
+      if (audioContext.state === 'suspended') {
+        audioContext.resume();
+      }
+
+      processorNode = audioContext.createScriptProcessor(1024, 1, 1);
+      processorNode.onaudioprocess = (event) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const input = event.inputBuffer.getChannelData(0);
+        const pcm = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) {
+          const clamped = Math.max(-1, Math.min(1, input[i]));
+          pcm[i] = Math.round(clamped * 32767);
+        }
+        ws.send(pcm.buffer);
+      };
+
+      pipelineActive = true;
+      return true;
+    } catch (err) {
+      sendStatus('error', 'AudioContext 创建失败: ' + err.message);
       return false;
     }
+  }
 
+  function connectVideoStream(stream) {
+    if (!audioContext || !processorNode) return false;
+
+    // Disconnect and release old source
+    if (sourceNode) {
+      sourceNode.disconnect();
+      sourceNode = null;
+    }
+    if (activeStream) {
+      activeStream.getTracks().forEach(function (t) { t.stop(); });
+      activeStream = null;
+    }
+
+    activeStream = stream;
+    sourceNode = audioContext.createMediaStreamSource(stream);
+    sourceNode.connect(processorNode);
+    return true;
+  }
+
+  function disconnectVideoSource() {
+    if (sourceNode) {
+      sourceNode.disconnect();
+      sourceNode = null;
+    }
+    if (activeStream) {
+      activeStream.getTracks().forEach(function (t) { t.stop(); });
+      activeStream = null;
+    }
+    if (activeVideo) {
+      if (activeVideo._capturePlayHandler) {
+        activeVideo.removeEventListener('play', activeVideo._capturePlayHandler);
+        activeVideo._capturePlayHandler = null;
+      }
+      activeVideo = null;
+    }
+  }
+
+  function captureVideoAudio(video) {
+    if (!video) return false;
     try {
-      // Try video.captureStream() first
-      let stream;
+      var stream;
       try {
         stream = video.captureStream();
       } catch (e) {
-        // captureStream() might fail on some sites
         stream = video.captureStream(0);
       }
 
-      const audioTracks = stream.getAudioTracks();
+      var audioTracks = stream.getAudioTracks();
       if (audioTracks.length === 0) {
-        // Fallback: request tab capture via background
-        return await startTabCapture();
+        // Fallback: tabCapture not implemented; signal limitation
+        sendStatus('error', '此页面无法直接捕获视频音频，需 tabCapture 权限');
+        return false;
       }
 
-      // Use only the audio track
-      const audioStream = new MediaStream(audioTracks);
-      setupAudioProcessing(audioStream);
+      var audioStream = new MediaStream(audioTracks);
+
+      if (!ensureAudioContext()) return false;
+
+      connectVideoStream(audioStream);
+      activeVideo = video;
+      activeVideo._lastSrc = video.src;
+
+      // Re-capture on play to revive ended tracks when video loops
+      if (activeVideo._capturePlayHandler) {
+        activeVideo.removeEventListener('play', activeVideo._capturePlayHandler);
+      }
+      activeVideo._capturePlayHandler = function () {
+        if (activeVideo === video && activeStream) {
+          var tracks = activeStream.getAudioTracks();
+          if (tracks.length === 0 || tracks[0].readyState === 'ended') {
+            captureVideoAudio(video);
+          }
+        }
+      };
+      activeVideo.addEventListener('play', activeVideo._capturePlayHandler);
+
+      // Apply ducking if pipeline is active but warmup hasn't finished
+      if (isRunning && !warmupDone && duckedVideo !== video) {
+        video.volume = settings.originalVolume / 100;
+      }
+
       return true;
     } catch (err) {
       sendStatus('error', '音频捕获失败: ' + err.message);
@@ -790,48 +890,9 @@
     }
   }
 
-  async function startTabCapture() {
-    // This requires chrome.tabCapture permission
-    // For simplicity in MVP, we signal the popup about the limitation
-    sendStatus('error', '此页面无法直接捕获视频音频，需 tabCapture 权限');
-    return false;
-  }
+  function destroyPipeline() {
+    stopVideoWatcher();
 
-  function setupAudioProcessing(stream) {
-    audioContext = new AudioContext({ sampleRate: 16000 });
-
-    // Some browsers require resuming the context
-    if (audioContext.state === 'suspended') {
-      audioContext.resume();
-    }
-
-    sourceNode = audioContext.createMediaStreamSource(stream);
-
-    // Use ScriptProcessorNode for PCM extraction
-    // Buffer size 1024 = ~64ms at 16kHz (lower latency)
-    processorNode = audioContext.createScriptProcessor(1024, 1, 1);
-
-    processorNode.onaudioprocess = (event) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-      const input = event.inputBuffer.getChannelData(0);
-      const pcm = new Int16Array(input.length);
-      for (let i = 0; i < input.length; i++) {
-        const clamped = Math.max(-1, Math.min(1, input[i]));
-        pcm[i] = Math.round(clamped * 32767);
-      }
-      ws.send(pcm.buffer);
-    };
-
-    sourceNode.connect(processorNode);
-    // Connect to destination only when pipeline is activated (user clicks start).
-    // During preheat, audio is buffered server-side but results are suppressed.
-    if (!preheatActive) {
-      processorNode.connect(audioContext.destination);
-    }
-  }
-
-  function stopAudioCapture() {
     if (processorNode) {
       processorNode.disconnect();
       processorNode = null;
@@ -840,10 +901,100 @@
       sourceNode.disconnect();
       sourceNode = null;
     }
+    if (activeStream) {
+      activeStream.getTracks().forEach(function (t) { t.stop(); });
+      activeStream = null;
+    }
+    if (activeVideo) {
+      if (activeVideo._capturePlayHandler) {
+        activeVideo.removeEventListener('play', activeVideo._capturePlayHandler);
+        activeVideo._capturePlayHandler = null;
+      }
+      activeVideo = null;
+    }
     if (audioContext) {
-      audioContext.close().catch(() => {});
+      audioContext.close().catch(function () {});
       audioContext = null;
     }
+    pipelineActive = false;
+  }
+
+  // ─── Persistent Video Watcher ──────────────────────────────────────
+  // Watches for video elements added/removed and swaps capture source
+  // automatically so the pipeline stays live across video changes.
+
+  function startVideoWatcher() {
+    if (videoWatcher) return;
+
+    videoWatcher = new MutationObserver(function (mutations) {
+      for (var i = 0; i < mutations.length; i++) {
+        var m = mutations[i];
+
+        // Detect newly added video elements
+        for (var j = 0; j < m.addedNodes.length; j++) {
+          var node = m.addedNodes[j];
+          if (node.nodeType !== 1) continue;
+          var videos = [];
+          if (node.tagName === 'VIDEO') {
+            videos = [node];
+          } else if (node.querySelectorAll) {
+            videos = Array.from(node.querySelectorAll('video'));
+          }
+          for (var k = 0; k < videos.length; k++) {
+            var v = videos[k];
+            if (v.duration > 0 && !v.paused && v !== activeVideo) {
+              captureVideoAudio(v);
+              return;
+            }
+          }
+        }
+
+        // Detect removed video elements
+        for (var r = 0; r < m.removedNodes.length; r++) {
+          var removed = m.removedNodes[r];
+          if (removed.nodeType !== 1) continue;
+          if (removed === activeVideo || (removed.contains && removed.contains(activeVideo))) {
+            disconnectVideoSource();
+          }
+        }
+      }
+    });
+
+    videoWatcher.observe(document.body || document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+
+    // Periodic poll: catch src changes, loop replays (ended tracks), and videos
+    // that appeared without DOM mutation.
+    videoPollTimer = setInterval(function () {
+      if (!isRunning || !pipelineActive) return;
+      var video = findVideoElement();
+      if (!video) return;
+
+      if (!activeVideo) {
+        captureVideoAudio(video);
+      } else if (activeVideo !== video) {
+        captureVideoAudio(video);
+      } else if (activeVideo.src !== activeVideo._lastSrc) {
+        captureVideoAudio(video);
+      } else if (activeStream) {
+        // Detect ended tracks (video finished/looped) — re-capture to revive
+        var tracks = activeStream.getAudioTracks();
+        if (tracks.length === 0 || tracks[0].readyState === 'ended') {
+          captureVideoAudio(video);
+        }
+      }
+    }, 2000);
+  }
+
+  function stopVideoWatcher() {
+    if (videoWatcher) {
+      videoWatcher.disconnect();
+      videoWatcher = null;
+    }
+    clearInterval(videoPollTimer);
+    videoPollTimer = null;
   }
 
   // ─── WebSocket ────────────────────────────────────────────────────
@@ -896,16 +1047,7 @@
     ws.onclose = (event) => {
       ws = null;
       if (isRunning) {
-        if (syncMode || subtitleMode) {
-          stopSyncPlayback();
-          stopDOMSubtitleObserver();
-          syncMode = false;
-          subtitleMode = false;
-          sendStatus('error', '字幕通道断开，回退到 ASR 模式...');
-          scheduleReconnect();
-        } else {
-          scheduleReconnect();
-        }
+        scheduleReconnect();
       } else if (preheatActive) {
         preheatActive = false;
         setTimeout(() => tryPreheat(), 2000);
@@ -1017,16 +1159,14 @@
               ws.send(JSON.stringify({ type: 'start' }));
               chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
             } else {
-              startAudioCapture().then(ok => {
-                if (ok) {
-                  startSent = true;
-                  ws.send(JSON.stringify({ type: 'start' }));
-                  chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
-                } else {
-                  isRunning = false;
-                  finishWarmup();
-                }
-              });
+              var video = findVideoElement();
+              var ok = video ? captureVideoAudio(video) : false;
+              if (ok) {
+                activatePipeline();
+              } else {
+                isRunning = false;
+                finishWarmup();
+              }
             }
           }
         } else if (msg.status === "listening" && subtitleMode && !domObserver) {
@@ -1099,23 +1239,24 @@
   }
 
   function preheatPhase2() {
-    startAudioCapture().then(ok => {
-      if (ok) {
-        preheatActive = false;
-        preheatReady = true;
-      } else {
-        preheatActive = false;
-      }
-    });
+    var video = findVideoElement();
+    var ok = video ? captureVideoAudio(video) : false;
+    if (ok) {
+      preheatActive = false;
+      preheatReady = true;
+    } else {
+      preheatActive = false;
+    }
   }
 
   function activatePipeline() {
+    startVideoWatcher();
     if (processorNode) {
       processorNode.connect(audioContext.destination);
     }
     startSent = true;
     ws.send(JSON.stringify({ type: 'start' }));
-    chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'started' }).catch(function () {});
   }
 
   function sendStatus(status, message) {
@@ -1270,20 +1411,20 @@
     subtitleMode = false;
     startSent = false;
     warmupDone = false;
-    if (preheatReady && ws && ws.readyState === WebSocket.OPEN) {
-      preheatReady = false;
-      activatePipeline();
-      return;
-    }
-    // Full ASR flow
     preheatReady = false;
     preheatActive = false;
-    if (ws) {
-      ws.onclose = null;
-      try { ws.close(); } catch (_) {}
-      ws = null;
+
+    // Use persistent pipeline: keep existing WS and AudioContext alive
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      startVideoWatcher();
+      duckVideoAudio();
+      showLoading();
+      ws.send(JSON.stringify({ type: 'warmup' }));
+      return;
     }
-    // Re-duck audio and show loading for ASR warmup
+
+    // No live connection — do full connect
+    startVideoWatcher();
     duckVideoAudio();
     showLoading();
     connectWebSocket();
@@ -1316,36 +1457,38 @@
 
     sendStatus('starting', '连接中...');
 
-    // Kill preheat BEFORE any async work to prevent race conditions
-    stopAudioCapture();
+    // Kill preheat state (but keep audio pipeline alive if it exists)
     stopDOMSubtitleObserver();
     preheatReady = false;
-    preheatActive = false;
-    if (ws) {
+
+    // Stop preheat active — if there's a preheat WS in flight, kill it
+    // (but don't kill an already-established pipeline WS)
+    if (preheatActive && ws) {
       ws.onclose = null;
       try { ws.close(); } catch (_) {}
       ws = null;
     }
+    preheatActive = false;
 
     duckVideoAudio();
     showLoading();
 
     // Safety timeout
-    loadingOverlay._safetyTimer = setTimeout(() => {
+    loadingOverlay._safetyTimer = setTimeout(function () {
       if (!warmupDone) {
         finishWarmup();
       }
     }, 15000);
 
     // Try subtitle extraction for sync mode
-    const subs = await extractSubtitles();
+    var subs = await extractSubtitles();
     if (subs && subs.length > 0) {
       syncMode = true;
       pendingSubs = subs;
 
-      // Disconnect any existing WS (preheat) and reconnect fresh
+      // Sync mode needs fresh WS for preprocess pipeline
       if (ws) {
-        ws.onclose = null; // prevent onclose handler from running stopSyncPlayback
+        ws.onclose = null;
         try { ws.close(); } catch (_) {}
         ws = null;
       }
@@ -1358,15 +1501,14 @@
     // API extraction failed — try DOM subtitle observer for YouTube
     subtitleMode = canObserveDOMSubtitles();
     if (subtitleMode) {
-      // Timeout: if no captions after 12s, fall back to ASR
       clearTimeout(subtitleModeTimer);
-      subtitleModeTimer = setTimeout(() => {
+      subtitleModeTimer = setTimeout(function () {
         if (subtitleMode && isRunning && !lastDOMSubtitle) {
           sendStatus('error', '字幕捕获超时，回退到 ASR');
           fallbackToASR();
         }
       }, 12000);
-      // Connect WS if needed (same flow as sync mode)
+      // DOM subtitle mode needs fresh WS
       if (ws) {
         ws.onclose = null;
         try { ws.close(); } catch (_) {}
@@ -1378,32 +1520,14 @@
       return;
     }
 
-    // No subtitles at all — use ASR mode
-
-    // If preheat fully ready, activate instantly
-    if (preheatReady && ws && ws.readyState === WebSocket.OPEN) {
-      preheatReady = false;
-      activatePipeline();
-      return;
-    }
-
-    // Preheat may have completed but WS died — reset and go full flow
-    preheatReady = false;
-    preheatActive = false;
-    if (ws) {
-      try { ws.close(); } catch (_) {}
-      ws = null;
-    }
-
-    // Full flow: connect → config → warmup → ready → capture → start
-    connectWebSocket();
+    // No subtitles at all — use persistent ASR pipeline
+    startASRMode();
   }
 
   function stop() {
     if (!isRunning) return;
     isRunning = false;
     startSent = false;
-
 
     if (syncMode) {
       stopSyncPlayback();
@@ -1413,7 +1537,7 @@
     }
 
     disconnectWebSocket();
-    stopAudioCapture();
+    destroyPipeline();
     stopTTS();
     contentDiv.innerHTML = '';
     subtitleBox = null;
@@ -1422,7 +1546,7 @@
     translationLine = null;
     finishWarmup();
 
-    chrome.runtime.sendMessage({ type: 'stopped' }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'stopped' }).catch(function () {});
   }
 
   function updateSettings(newSettings) {
