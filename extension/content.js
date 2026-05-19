@@ -340,17 +340,6 @@
         font-size: 20px !important;
         font-weight: 500 !important;
       }
-      #__ai_subtitle_overlay__ .subtitle-speaker {
-        display: inline-block !important;
-        background: rgba(99, 102, 241, 0.85) !important;
-        color: #fff !important;
-        padding: 2px 10px !important;
-        border-radius: 12px !important;
-        font-size: 12px !important;
-        font-weight: 600 !important;
-        letter-spacing: 0.5px !important;
-        margin-bottom: 2px !important;
-      }
     </style>
     <div id="__subtitle_content__"></div>
   `;
@@ -376,7 +365,6 @@
     if (!enabled) {
       // Clear current subtitle immediately
       if (subtitleBox) subtitleBox.style.opacity = '0';
-      if (speakerEl) speakerEl.style.display = 'none';
     }
   }
 
@@ -392,7 +380,6 @@
     sizeStyle.textContent = `
       #__ai_subtitle_overlay__ .subtitle-original { font-size: ${Math.round(16 * scale)}px !important; }
       #__ai_subtitle_overlay__ .subtitle-translation { font-size: ${Math.round(20 * scale)}px !important; }
-      #__ai_subtitle_overlay__ .subtitle-speaker { font-size: ${Math.round(12 * scale)}px !important; }
     `;
   }
 
@@ -419,17 +406,12 @@
   }
 
   // Persistent DOM elements (reused, not recreated)
-  let speakerEl = null;
   let subtitleBox = null;
   let originalLine = null;
   let translationLine = null;
-  let lastSpeaker = '';
 
   function ensureElements() {
     if (subtitleBox) return;
-    speakerEl = document.createElement('div');
-    speakerEl.className = 'subtitle-speaker';
-    speakerEl.style.display = 'none';
     subtitleBox = document.createElement('div');
     subtitleBox.className = 'subtitle-box';
     subtitleBox.style.opacity = '0';
@@ -439,11 +421,10 @@
     translationLine.className = 'subtitle-line subtitle-translation';
     subtitleBox.appendChild(originalLine);
     subtitleBox.appendChild(translationLine);
-    contentDiv.appendChild(speakerEl);
     contentDiv.appendChild(subtitleBox);
   }
 
-  function showSubtitle(original, translation, speaker) {
+  function showSubtitle(original, translation) {
     original = stripCCAnnouncement(original);
     translation = stripCCAnnouncement(translation);
 
@@ -453,15 +434,6 @@
     }
 
     ensureElements();
-
-    // Update speaker
-    if (speaker && speaker !== lastSpeaker) {
-      lastSpeaker = speaker;
-      speakerEl.textContent = 'Speaker ' + speaker;
-      speakerEl.style.display = 'inline-block';
-    } else if (!speaker) {
-      speakerEl.style.display = 'none';
-    }
 
     // Update text content (no DOM rebuild, no animation replay)
     const hasContent = original || translation;
@@ -478,8 +450,6 @@
     clearTimeout(contentDiv._clearTimer);
     contentDiv._clearTimer = setTimeout(() => {
       subtitleBox.style.opacity = '0';
-      speakerEl.style.display = 'none';
-      lastSpeaker = '';
     }, 5000);
   }
 
@@ -1301,7 +1271,8 @@
 
       // Offline ASR: signal start of audio streaming
       if (offlineMode && offlineRecording) {
-        ws.send(JSON.stringify({ type: 'offline_asr_start', sampleRate: 16000, speed: OFFLINE_SPEED }));
+        var actualRate = (offlineAudioCtx && offlineAudioCtx.sampleRate) ? offlineAudioCtx.sampleRate : 48000;
+        ws.send(JSON.stringify({ type: 'offline_asr_start', sampleRate: actualRate, speed: OFFLINE_SPEED }));
       }
     };
 
@@ -1388,8 +1359,8 @@
 
       // ─── Preprocess messages (sync mode) ──────────────────────────
       case 'preprocess_start':
-        updateLoadingText('翻译+配音合成中...', '共 ' + msg.total + ' 条字幕');
-        sendStatus('preprocessing', '预处理 ' + msg.total + ' 条字幕...');
+        updateLoadingText('模型推理中...', '已处理 ' + msg.total + ' 个片段');
+        sendStatus('preprocessing', '处理 ' + msg.total + ' 个片段...');
         break;
 
       case 'preprocess_result':
@@ -1423,19 +1394,18 @@
           offlineAudioCtx = null;
           if (offlineStream) { offlineStream.getTracks().forEach(function(t) { t.stop(); }); offlineStream = null; }
           if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
-          updateLoadingText('翻译+配音合成中...', '共 ' + msg.subs.length + ' 条字幕');
-          sendStatus('preprocessing', '翻译+配音合成中...');
+          updateLoadingText('模型推理中...', '已处理 ' + msg.subs.length + ' 个片段');
+          sendStatus('preprocessing', '模型推理中...');
           ws.send(JSON.stringify({ type: 'preprocess', subs: msg.subs }));
         } else {
-          sendStatus('error', '离线 ASR 无结果，回退到实时 ASR');
+          sendStatus('error', '离线 ASR 未识别到字幕');
           cleanupOffline();
-          startASRMode();
         }
         break;
 
       case 'preprocess_error':
         sendStatus('error', msg.message);
-        fallbackToASR();
+        cleanupOffline();
         break;
 
       // ─── Status ────────────────────────────────────────────────────
@@ -1485,7 +1455,6 @@
         sendStatus('error', msg.message);
         if (offlineMode) {
           cleanupOffline();
-          startASRMode();
         } else {
           finishWarmup();
         }
@@ -1704,7 +1673,7 @@
   function startSyncPlayback() {
     syncVideo = findVideoElement();
     if (!syncVideo) {
-      fallbackToASR();
+      sendStatus('error', '未找到视频元素');
       return;
     }
 
@@ -1856,8 +1825,8 @@
       return;
     }
     if (wordIdx >= item.words.length) {
-      // All words spoken — show full text dimmed
-      originalLine.innerHTML = '<span style="opacity:0.55">' + escapeHTML(item.original) + '</span>';
+      // All words spoken but segment still active — keep text visible, don't dim
+      originalLine.textContent = item.original;
       return;
     }
     // Build highlighted HTML: split by word boundaries
@@ -1891,7 +1860,7 @@
     if (item.durationMs && item.end > item.start) {
       var segDurationMs = (item.end - item.start) * 1000;
       var rate = item.durationMs / segDurationMs;
-      rate = Math.min(2.0, Math.max(0.5, rate));
+      rate = Math.min(2.0, Math.max(0.80, rate));
       // Adjust for video playback rate
       if (syncVideo && syncVideo.playbackRate) {
         rate = rate * syncVideo.playbackRate;
@@ -2030,7 +1999,7 @@
       offlineVideo._offlineTimeUpdateHandler = null;
     }
 
-    updateLoadingText('ASR 识别中...', '正在将音频转为字幕');
+    updateLoadingText('神经网络处理中...', '正在提取特征向量');
 
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'offline_asr_end' }));
@@ -2053,7 +2022,7 @@
     var audioTrack = stream.getAudioTracks()[0];
     if (!audioTrack) {
       cleanupOffline();
-      startASRMode();
+      sendStatus('error', '未捕获到音频，可能站点限制');
       return;
     }
     var audioStream = new MediaStream([audioTrack]);
@@ -2062,7 +2031,7 @@
     // suspended-state issues and ensure correct sample rate.
     if (!ensureAudioContext()) {
       cleanupOffline();
-      startASRMode();
+      sendStatus('error', '无法初始化音频上下文');
       return;
     }
     offlineAudioCtx = audioContext;
@@ -2131,7 +2100,7 @@
 
     loadingTarget = video;
     showLoading();
-    updateLoadingText('正在录制音频...', '录制完成后将自动识别字幕');
+    updateLoadingText('数据采集中...', '帧同步处理');
     sendStatus('offline_recording');
 
     video.currentTime = 0;
@@ -2225,7 +2194,7 @@
           preprocessedItems = cached;
           offlineMode = true;
           offlineVideo = video;
-          updateLoadingText('缓存命中', '直接播放，跳过录制');
+          updateLoadingText('本地缓存匹配', '即时加载');
           sendStatus('playing');
           startVideoReplay(video);
         } else {
@@ -2269,7 +2238,6 @@
     stopTTS();
     contentDiv.innerHTML = '';
     subtitleBox = null;
-    speakerEl = null;
     originalLine = null;
     translationLine = null;
     finishWarmup();

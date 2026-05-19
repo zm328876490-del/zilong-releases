@@ -49,9 +49,10 @@ type Client struct {
 	lastTtsTime     time.Time     // last time a TTS goroutine was started (for throttling)
 
 	// offline ASR state
-	offlineASR   bool
-	offlineBuf   []int16
-	offlineSpeed float64 // playback speed during recording (for timestamp scaling)
+	offlineASR        bool
+	offlineBuf        []int16
+	offlineSpeed      float64 // playback speed during recording (for timestamp scaling)
+	offlineSampleRate int     // actual AudioContext sample rate from frontend
 }
 
 // Subtitle is a single subtitle cue extracted from a video platform.
@@ -297,7 +298,7 @@ func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, is
 
 // ─── Offline ASR ─────────────────────────────────────────────────────
 
-func (c *Client) processOfflineASR(samples []int16) {
+func (c *Client) processOfflineASR(samples []int16, sampleRate int) {
 	// Validate PCM: check for non-zero samples
 	var maxVal, sumAbs int64
 	nonZero := 0
@@ -322,7 +323,7 @@ func (c *Client) processOfflineASR(samples []int16) {
 		return
 	}
 
-	segs, err := asr.ProcessOfflineFull(samples, whisperServerURL, c.sourceLang)
+	segs, err := asr.ProcessOfflineFull(samples, whisperServerURL, c.sourceLang, sampleRate)
 	if err != nil {
 		c.sendJSON(OutMsg{Type: "error", Message: fmt.Sprintf("离线 ASR 失败: %v", err)})
 		return
@@ -616,6 +617,10 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				} else {
 					client.offlineSpeed = 1.0
 				}
+				client.offlineSampleRate = msg.SampleRate
+				if client.offlineSampleRate <= 0 {
+					client.offlineSampleRate = 48000
+				}
 				client.sendJSON(OutMsg{Type: "status", Status: "offline_recording"})
 
 			case "offline_asr_end":
@@ -629,7 +634,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 				client.offlineASR = false
 				client.sendJSON(OutMsg{Type: "status", Status: "offline_asr_processing"})
-				go client.processOfflineASR(client.offlineBuf)
+				go client.processOfflineASR(client.offlineBuf, client.offlineSampleRate)
 				client.offlineBuf = nil
 
 			default:

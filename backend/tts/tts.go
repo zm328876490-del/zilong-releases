@@ -445,13 +445,13 @@ func buildAtempoFilter(ratio float64) string {
 
 // Warmup performs a fire-and-forget warmup call.
 // EstimateMP3DurationFromBase64 estimates the duration in milliseconds
-// of a base64-encoded MP3 produced by Edge TTS (~24kbps).
+// of a base64-encoded MP3 produced by Edge TTS (48kbps: audio-24khz-48kbitrate-mono-mp3).
 func EstimateMP3DurationFromBase64(b64 string) int {
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
 		return 0
 	}
-	return len(raw) * 8 / 24
+	return len(raw) * 8 / 48
 }
 
 func Warmup(voice string) {

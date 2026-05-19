@@ -262,7 +262,7 @@ func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial
 		return
 	}
 
-	wavData, err := pcmToWav(samples)
+	wavData, err := pcmToWav(samples, sampleRate)
 	if err != nil {
 		return
 	}
@@ -359,15 +359,18 @@ type SubtitleSegment struct {
 
 // ProcessOfflineFull takes a complete PCM buffer, sends it as one WAV to
 // whisper-server with verbose_json output, and returns timestamped segments.
-func ProcessOfflineFull(samples []int16, serverURL, language string) ([]SubtitleSegment, error) {
+func ProcessOfflineFull(samples []int16, serverURL, language string, sampleRate int) ([]SubtitleSegment, error) {
 	if serverURL == "" {
 		return nil, fmt.Errorf("no whisper server URL")
 	}
 	if len(samples) == 0 {
 		return nil, fmt.Errorf("empty audio")
 	}
+	if sampleRate <= 0 {
+		sampleRate = 48000
+	}
 
-	wavData, err := pcmToWav(samples)
+	wavData, err := pcmToWav(samples, sampleRate)
 	if err != nil {
 		return nil, fmt.Errorf("wav encode: %w", err)
 	}
@@ -476,7 +479,7 @@ func parseVerboseJSON(raw string) ([]SubtitleSegment, error) {
 }
 
 // pcmToWav converts raw PCM int16 samples to a WAV byte slice.
-func pcmToWav(samples []int16) ([]byte, error) {
+func pcmToWav(samples []int16, sampleRate int) ([]byte, error) {
 	var buf bytes.Buffer
 
 	dataSize := len(samples) * 2
