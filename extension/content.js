@@ -118,6 +118,75 @@
     <div class="loading-sub" id="__ai_load_sub__">首次加载需要预热线，请稍候</div>
   `;
 
+  // ─── Bookmark Tab (right edge, like a bookmark peeking out) ─────────
+  const fab = document.createElement('div');
+  fab.id = '__ai_fab__';
+  fab.title = 'AI 翻译';
+  fab.innerHTML = `
+    <style>
+      #__ai_fab__ {
+        position: fixed !important;
+        top: 42% !important;
+        right: 0 !important;
+        z-index: 2147483647 !important;
+        width: 42px !important;
+        height: 62px !important;
+        border-radius: 12px 0 0 12px !important;
+        background: linear-gradient(180deg, #7c3aed 0%, #6d28d9 50%, #5b21b6 100%) !important;
+        box-shadow: -3px 0 14px rgba(124, 58, 237, 0.32), 0 0 24px rgba(139, 92, 246, 0.12) !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 6px !important;
+        cursor: pointer !important;
+        pointer-events: all !important;
+        transition: width 0.25s, box-shadow 0.25s, background 0.25s !important;
+        user-select: none !important;
+        overflow: hidden !important;
+      }
+      /* Bookmark fold notch */
+      #__ai_fab__::before {
+        content: '' !important;
+        position: absolute !important;
+        top: 0 !important; right: 0 !important;
+        width: 0 !important; height: 0 !important;
+        border-style: solid !important;
+        border-width: 0 14px 14px 0 !important;
+        border-color: transparent #1e1b2e transparent transparent !important;
+        transition: border-right-color 0.25s !important;
+      }
+      #__ai_fab__:hover {
+        width: 50px !important;
+        box-shadow: -6px 0 22px rgba(124, 58, 237, 0.48), 0 0 36px rgba(139, 92, 246, 0.22) !important;
+      }
+      #__ai_fab__:active { width: 38px !important; }
+      #__ai_fab__ svg { width: 20px; height: 20px; fill: #fff; flex-shrink: 0; }
+      #__ai_fab__ .fab-label {
+        color: rgba(255,255,255,0.85) !important;
+        font-size: 10px !important;
+        font-family: -apple-system, 'Microsoft YaHei', 'PingFang SC', sans-serif !important;
+        writing-mode: vertical-rl !important;
+        letter-spacing: 3px !important;
+        font-weight: 500 !important;
+      }
+      #__ai_fab__.running {
+        background: linear-gradient(180deg, #ef4444 0%, #dc2626 50%, #b91c1c 100%) !important;
+        box-shadow: -3px 0 14px rgba(239, 68, 68, 0.32), 0 0 24px rgba(248, 113, 113, 0.12) !important;
+      }
+      #__ai_fab__.running::before { border-right-color: #1e1b2e !important; }
+      #__ai_fab__.running svg.play-icon { display: none; }
+      #__ai_fab__:not(.running) svg.pause-icon { display: none; }
+      #__ai_fab__.loading {
+        pointer-events: none !important;
+        opacity: 0.55 !important;
+      }
+    </style>
+    <svg class="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+    <svg class="pause-icon" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+    <span class="fab-label">翻译</span>
+  `;
+
   // ─── Subtitle Overlay ─────────────────────────────────────────────
   const overlay = document.createElement('div');
   overlay.id = '__ai_subtitle_overlay__';
@@ -175,6 +244,17 @@
     <div id="__subtitle_content__"></div>
   `;
   document.body.appendChild(overlay);
+  document.body.appendChild(fab);
+
+  // FAB click handler
+  fab.addEventListener('click', function () {
+    if (fab.classList.contains('loading')) return;
+    if (isRunning) {
+      stop();
+    } else {
+      start();
+    }
+  });
 
   const contentDiv = overlay.querySelector('#__subtitle_content__');
 
@@ -1211,65 +1291,12 @@
 
       case 'preprocess_complete':
         sendStatus('playing');
+        // Save to IndexedDB cache for future page loads
+        if (offlineVideo) {
+          savePreprocessedToCache(offlineVideo, preprocessedItems);
+        }
         if (offlineMode && offlineVideo) {
-          // Offline mode: wait for seek to 0 before starting sync playback
-          syncMode = true;
-          syncVideo = offlineVideo;
-          offlineVideo.playbackRate = 1;
-          offlineVideo.muted = false;
-          offlineVideo.volume = settings.originalVolume / 100;
-
-          var seekTimeout = null;
-          function beginOfflineReplay() {
-            if (seekTimeout) { clearTimeout(seekTimeout); seekTimeout = null; }
-            offlineVideo.removeEventListener('seeked', beginOfflineReplay);
-            if (offlineVideo.paused) {
-              offlineVideo.play().catch(function () {});
-            }
-            // Verify we're actually near the start; if not, seek again
-            if (offlineVideo.currentTime > 1.0) {
-              offlineVideo.currentTime = 0;
-              // Last resort: start syncLoop after a short delay even without seeked
-              setTimeout(function () {
-                if (!warmupDone) startOfflineSync();
-              }, 200);
-              return;
-            }
-            startOfflineSync();
-          }
-
-          function startOfflineSync() {
-            // Create Audio elements for preprocessed items
-            for (var i = 0; i < preprocessedItems.length; i++) {
-              var item = preprocessedItems[i];
-              if (item.audio) {
-                try {
-                  item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
-                  item.audioEl.volume = settings.ttsVolume / 100;
-                  item.audioEl.playbackRate = calcLipSyncRate(item);
-                } catch (e) {}
-              }
-            }
-            offlineVideo.addEventListener('ratechange', onVideoRateChange);
-            lastSyncTime = offlineVideo.currentTime;
-            chrome.runtime.sendMessage({ type: 'started' }).catch(function () {});
-            finishWarmup();
-            syncLoop();
-          }
-
-          offlineVideo.addEventListener('seeked', beginOfflineReplay, { once: true });
-          // Fallback: if seeked doesn't fire within 500ms, start anyway
-          seekTimeout = setTimeout(function () {
-            offlineVideo.removeEventListener('seeked', beginOfflineReplay);
-            beginOfflineReplay();
-          }, 500);
-          offlineVideo.currentTime = 0;
-          offlineVideo.play().catch(function () {
-            // Autoplay blocked — start sync anyway (video might still be usable)
-            if (seekTimeout) { clearTimeout(seekTimeout); seekTimeout = null; }
-            offlineVideo.removeEventListener('seeked', beginOfflineReplay);
-            startOfflineSync();
-          });
+          startVideoReplay(offlineVideo);
         } else {
           startSyncPlayback();
         }
@@ -1424,6 +1451,7 @@
   }
 
   function showLoading() {
+    fab.classList.add('loading');
     if (!loadingOverlay.parentNode) {
       document.body.appendChild(loadingOverlay);
     }
@@ -1480,6 +1508,7 @@
   }
 
   function hideLoading() {
+    fab.classList.remove('loading');
     clearTimeout(loadingOverlay._safetyTimer);
     clearTimeout(loadingOverlay._resumeTimer);
     if (loadingRafId) {
@@ -1498,6 +1527,60 @@
   }
 
   // ─── Sync Playback Engine (subtitle hijacking mode) ──────────────────
+
+  function startVideoReplay(video) {
+    syncMode = true;
+    syncVideo = video;
+    video.playbackRate = 1;
+    video.muted = false;
+    video.volume = settings.originalVolume / 100;
+    duckedVideo = null;  // prevent unduck from overriding our volume
+
+    // Create Audio elements for preprocessed items
+    for (var i = 0; i < preprocessedItems.length; i++) {
+      var item = preprocessedItems[i];
+      if (item.audio && !item.audioEl) {
+        try {
+          item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
+          item.audioEl.volume = settings.ttsVolume / 100;
+          item.audioEl.playbackRate = calcLipSyncRate(item);
+        } catch (e) {}
+      }
+    }
+
+    function doReplay() {
+      video.removeEventListener('seeked', doReplay);
+      if (video.paused) {
+        video.play().catch(function () {});
+      }
+      if (video.currentTime > 1.0) {
+        video.currentTime = 0;
+        setTimeout(function () {
+          if (!warmupDone) finishWarmup();
+          if (!syncRafId) syncLoop();
+        }, 200);
+        return;
+      }
+      if (!warmupDone) finishWarmup();
+      video.addEventListener('ratechange', onVideoRateChange);
+      lastSyncTime = video.currentTime;
+      chrome.runtime.sendMessage({ type: 'started' }).catch(function () {});
+      syncLoop();
+    }
+
+    var seekTimeout = null;
+    video.addEventListener('seeked', doReplay, { once: true });
+    seekTimeout = setTimeout(function () {
+      video.removeEventListener('seeked', doReplay);
+      doReplay();
+    }, 500);
+    video.currentTime = 0;
+    video.play().catch(function () {
+      if (seekTimeout) { clearTimeout(seekTimeout); seekTimeout = null; }
+      video.removeEventListener('seeked', doReplay);
+      doReplay();
+    });
+  }
 
   function startSyncPlayback() {
     syncVideo = findVideoElement();
@@ -1578,14 +1661,27 @@
   }
 
   function reSync(currentTime) {
-    // Clear queue and stop current audio on seek
+    // Clear queue and stop ALL audio on seek/loop
     stopTTS();
+    if (ttsAudio) {
+      try { ttsAudio.pause(); } catch (_) {}
+      ttsAudio = null;
+      ttsPlaying = false;
+    }
     // Mark all items before currentTime as played, find current one
     let foundCurrent = false;
     for (const item of preprocessedItems) {
       item._wordIdx = -1;
       if (!foundCurrent && currentTime < item.end) {
         item.played = false; // re-trigger for display
+        // Re-create Audio element on loop (it was consumed and set to null)
+        if (!item.audioEl && item.audio) {
+          try {
+            item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
+            item.audioEl.volume = settings.ttsVolume / 100;
+            item.audioEl.playbackRate = calcLipSyncRate(item);
+          } catch (e) {}
+        }
         foundCurrent = true;
       } else {
         item.played = true;
@@ -1877,6 +1973,7 @@
   async function start() {
     if (isRunning) return;
     isRunning = true;
+    fab.classList.add('running');
     warmupDone = false;
     startSent = false;
     syncMode = false;
@@ -1953,16 +2050,29 @@
     // Not YouTube/Bilibili DOM — check VOD vs live
     var video = findVideoElement();
     if (video && !isLiveStream(video) && video.duration > 0) {
-      // VOD: offline full-audio ASR (record → ASR → preprocess → replay)
-      startOfflineRecording(video);
-      if (ws) {
-        ws.onclose = null;
-        try { ws.close(); } catch (_) {}
-        ws = null;
-      }
-      preheatReady = false;
-      preheatActive = false;
-      connectWebSocket();
+      // VOD: check IndexedDB cache first
+      loadPreprocessedFromCache(video).then(function (cached) {
+        if (cached && cached.length > 0) {
+          // Cache hit — skip recording + ASR + preprocessing
+          preprocessedItems = cached;
+          offlineMode = true;
+          offlineVideo = video;
+          updateLoadingText('缓存命中', '直接播放，跳过录制');
+          sendStatus('playing');
+          startVideoReplay(video);
+        } else {
+          // Cache miss — offline recording
+          startOfflineRecording(video);
+          if (ws) {
+            ws.onclose = null;
+            try { ws.close(); } catch (_) {}
+            ws = null;
+          }
+          preheatReady = false;
+          preheatActive = false;
+          connectWebSocket();
+        }
+      });
       return;
     }
 
@@ -1973,6 +2083,7 @@
   function stop() {
     if (!isRunning) return;
     isRunning = false;
+    fab.classList.remove('running');
     startSent = false;
 
     if (syncMode) {
@@ -2012,6 +2123,100 @@
         engine: settings.engine,
         ttsVoice: settings.ttsVoice,
       }));
+    }
+  }
+
+  // ─── IndexedDB cache for preprocessed results (max 10 videos) ──────
+  const IDB_NAME = 'AITranslationCache';
+  const IDB_VERSION = 1;
+  const IDB_STORE = 'preprocessed';
+  const IDB_MAX = 10;
+
+  function openIDB() {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = function (e) {
+        var db = e.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE, { keyPath: 'key' });
+        }
+      };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+
+  function getVideoKey(video) {
+    var src = (video.currentSrc || video.src || '').replace(/\?.*$/, '').replace(/#.*$/, '');
+    var hash = 0;
+    for (var i = 0; i < src.length; i++) {
+      hash = ((hash << 5) - hash) + src.charCodeAt(i);
+      hash |= 0;
+    }
+    return 'vid_' + Math.abs(hash);
+  }
+
+  async function savePreprocessedToCache(video, items) {
+    try {
+      var db = await openIDB();
+      var tx = db.transaction(IDB_STORE, 'readwrite');
+      var store = tx.objectStore(IDB_STORE);
+      var key = getVideoKey(video);
+
+      // LRU eviction: if at capacity, remove oldest
+      var allReq = store.getAll();
+      allReq.onsuccess = function () {
+        var all = allReq.result;
+        if (all.length >= IDB_MAX) {
+          all.sort(function (a, b) { return (a.lastAccess || 0) - (b.lastAccess || 0); });
+          var toDelete = all.length - IDB_MAX + 1;
+          for (var d = 0; d < toDelete && d < all.length; d++) {
+            store.delete(all[d].key);
+          }
+        }
+      };
+
+      var entry = {
+        key: key,
+        src: video.currentSrc || video.src,
+        items: items.map(function (item) { return {
+          original: item.original,
+          translation: item.translation,
+          audio: item.audio,
+          start: item.start,
+          end: item.end,
+          durationMs: item.durationMs,
+          words: item.words
+        }; }),
+        createdAt: Date.now(),
+        lastAccess: Date.now()
+      };
+      store.put(entry);
+      return new Promise(function (resolve) { tx.oncomplete = resolve; });
+    } catch (e) {
+      // Cache is optional — never fail the main flow
+    }
+  }
+
+  async function loadPreprocessedFromCache(video) {
+    try {
+      var db = await openIDB();
+      var entry = await new Promise(function (resolve, reject) {
+        var tx = db.transaction(IDB_STORE, 'readonly');
+        var store = tx.objectStore(IDB_STORE);
+        var req = store.get(getVideoKey(video));
+        req.onsuccess = function () { resolve(req.result); };
+        req.onerror = function () { reject(req.error); };
+      });
+      if (!entry) return null;
+      // Update lastAccess (write-back, fire-and-forget)
+      var writeTx = db.transaction(IDB_STORE, 'readwrite');
+      var writeStore = writeTx.objectStore(IDB_STORE);
+      entry.lastAccess = Date.now();
+      writeStore.put(entry);
+      return entry.items;
+    } catch (e) {
+      return null;
     }
   }
 
