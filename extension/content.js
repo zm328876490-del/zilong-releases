@@ -50,6 +50,7 @@
   let syncRafId = null;           // requestAnimationFrame ID
   let lastSyncTime = 0;           // last video.currentTime
   let syncVideo = null;           // the video element being synced to
+  let wasPaused = false;          // track pause→play transitions
   let currentSyncAudio = null;    // (managed by queue, kept for backward compat)
 
   // DOM subtitle observer state
@@ -1536,6 +1537,7 @@
   // ─── Sync Playback Engine (subtitle hijacking mode) ──────────────────
 
   function startVideoReplay(video) {
+    wasPaused = false;
     syncMode = true;
     syncVideo = video;
     video.playbackRate = 1;
@@ -1620,9 +1622,34 @@
   function syncLoop() {
     syncRafId = requestAnimationFrame(syncLoop);
 
-    if (!syncVideo || syncVideo.paused) return;
+    if (!syncVideo) return;
 
-    const currentTime = syncVideo.currentTime;
+    var now = syncVideo.currentTime;
+    var paused = syncVideo.paused;
+
+    // Video paused — pause TTS, keep position
+    if (paused && !wasPaused) {
+      wasPaused = true;
+      stopTTS(); // clear queue
+      if (ttsAudio) {
+        try { ttsAudio.pause(); } catch (_) {}
+      }
+      return;
+    }
+
+    // Video resumed — resume TTS from where it paused
+    if (!paused && wasPaused) {
+      wasPaused = false;
+      if (ttsAudio && ttsAudio.paused) {
+        try { ttsAudio.play().catch(function () {}); } catch (_) {}
+      }
+      lastSyncTime = now;
+      return;
+    }
+
+    if (paused) return;
+
+    const currentTime = now;
 
     // Detect seeking (jump > 1 second)
     if (Math.abs(currentTime - lastSyncTime) > 1.0) {
@@ -1668,6 +1695,7 @@
   }
 
   function reSync(currentTime) {
+    wasPaused = false;
     // Clear queue and stop ALL audio on seek/loop
     stopTTS();
     if (ttsAudio) {
