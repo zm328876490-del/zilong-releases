@@ -504,61 +504,78 @@
     return !!player;
   }
 
-  function silentClickCC(btn) {
-    var synth = window.speechSynthesis;
-    synth.cancel();
-    var orig = synth.speak;
-    synth.speak = function () {};
-    btn.click();
-    setTimeout(function () { synth.speak = orig; }, 800);
-    // Mute DOM subtitle capture — YouTube may briefly flash the track
-    // name as caption text right after CC is enabled.
+  // Dispatch a full MouseEvent on the CC button. Using dispatchEvent
+  // instead of .click() is more compatible with YouTube's React handlers.
+  function clickCCButton(btn) {
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     ccMuteUntil = Date.now() + 2000;
   }
 
-  // Set up CC button click interceptor + attribute watch on a found button.
-	  function setupCCButton(btn, player) {
-	    if (!btn) return;
-	    // Force CC on
-	    if (btn.getAttribute('aria-pressed') === 'false') {
-	      silentClickCC(btn);
-	    }
-	    // Intercept user clicks to prevent turning CC off
-	    ccClickHandler = function (e) {
-	      var b = player.querySelector('.ytp-subtitles-button');
-	      if (b && b.getAttribute('aria-pressed') === 'true') {
-	        e.stopImmediatePropagation();
-	        e.preventDefault();
-	      }
-	    };
-	    ccClickTarget = btn;
-	    btn.addEventListener('click', ccClickHandler, true);
-	    btn.addEventListener('click', ccClickHandler, true);
-		    // Block 'c' keyboard shortcut (YouTube CC toggle)
-		    ccKeyHandler = function (e) {
-		      var tag = (e.target.tagName || '').toLowerCase();
-		      if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
-		      if (e.key === 'c' || e.key === 'C') {
-		        e.stopImmediatePropagation();
-		        e.preventDefault();
-		      }
-		    };
-		    document.addEventListener('keydown', ccKeyHandler, true);
-	    // Watch aria-pressed — YouTube may reset it after ads or rebinds
-	    if (ccAttrObserver) ccAttrObserver.disconnect();
-	    ccAttrObserver = new MutationObserver(function (mutations) {
-	      for (var i = 0; i < mutations.length; i++) {
-	        var m = mutations[i];
-	        if (m.type === 'attributes' && m.attributeName === 'aria-pressed') {
-	          var b = m.target;
-	          if (b.getAttribute('aria-pressed') === 'false' && subtitleMode && isRunning) {
-	            silentClickCC(b);
-	          }
-	        }
-	      }
-	    });
-	    ccAttrObserver.observe(btn, { attributes: true, attributeFilter: ['aria-pressed'] });
-	  }
+  // Try to force CC on, with retry. Returns true once aria-pressed is 'true'.
+  function forceEnableCC(btn, player) {
+    if (!btn) return false;
+    if (btn.getAttribute('aria-pressed') === 'true') return true;
+
+    var tries = 0;
+    function attempt() {
+      if (!subtitleMode || !isRunning) return;
+      var b = player.querySelector('.ytp-subtitles-button');
+      if (!b) return;
+      if (b.getAttribute('aria-pressed') === 'true') return;
+      tries++;
+      clickCCButton(b);
+      if (tries < 5) {
+        setTimeout(function () {
+          if (b.getAttribute('aria-pressed') !== 'true') attempt();
+        }, 600);
+      }
+    }
+    attempt();
+    return false; // async, result not immediately known
+  }
+
+  function setupCCButton(btn, player) {
+    if (!btn) return;
+    forceEnableCC(btn, player);
+
+    // Intercept user clicks to prevent turning CC off
+    ccClickHandler = function (e) {
+      var b = player.querySelector('.ytp-subtitles-button');
+      if (b && b.getAttribute('aria-pressed') === 'true') {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+      }
+    };
+    ccClickTarget = btn;
+    btn.addEventListener('click', ccClickHandler, true);
+
+    // Block 'c' keyboard shortcut (YouTube CC toggle) — allow programmatic events
+    ccKeyHandler = function (e) {
+      if (!e.isTrusted) return;
+      var tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+      if (e.key === 'c' || e.key === 'C') {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+      }
+    };
+    document.addEventListener('keydown', ccKeyHandler, true);
+
+    // Watch aria-pressed — YouTube may reset it after ads or rebinds
+    if (ccAttrObserver) ccAttrObserver.disconnect();
+    ccAttrObserver = new MutationObserver(function (mutations) {
+      for (var i = 0; i < mutations.length; i++) {
+        var m = mutations[i];
+        if (m.type === 'attributes' && m.attributeName === 'aria-pressed') {
+          var b = m.target;
+          if (b.getAttribute('aria-pressed') === 'false' && subtitleMode && isRunning) {
+            forceEnableCC(b, player);
+          }
+        }
+      }
+    });
+    ccAttrObserver.observe(btn, { attributes: true, attributeFilter: ['aria-pressed'] });
+  }
 
   function startDOMSubtitleObserver() {
     // Clean up any previous observers (safe to call multiple times)
@@ -591,9 +608,7 @@
           var btn = node.classList && node.classList.contains('ytp-subtitles-button')
             ? node : node.querySelector && node.querySelector('.ytp-subtitles-button');
           if (btn && btn.getAttribute('aria-pressed') === 'false') {
-            silentClickCC(btn);
             setupCCButton(btn, player);
-            // Once CC is on, no need to keep watching
             ccBtnWatcher.disconnect();
             return;
           }
