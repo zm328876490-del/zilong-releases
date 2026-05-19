@@ -87,36 +87,146 @@
       #__ai_loading_overlay__ {
         position: fixed !important;
         z-index: 2147483646 !important;
-        background: rgba(0, 0, 0, 0.78) !important;
+        background: #0a0a1a !important;
         display: flex !important;
         flex-direction: column !important;
         align-items: center !important;
         justify-content: center !important;
         font-family: -apple-system, 'Microsoft YaHei', 'PingFang SC', sans-serif !important;
         pointer-events: all !important;
-        border-radius: 8px !important;
         overflow: hidden !important;
         transition: opacity 0.3s !important;
       }
-      #__ai_loading_overlay__ .spinner {
-        width: 48px; height: 48px;
-        border: 4px solid rgba(255,255,255,0.2);
-        border-top-color: #6366f1;
-        border-radius: 50%;
-        animation: __spin__ 0.8s linear infinite;
+      /* Mesh gradient background */
+      #__ai_loading_overlay__::before {
+        content: '' !important;
+        position: absolute !important;
+        inset: 0 !important;
+        background:
+          radial-gradient(ellipse 60% 50% at 30% 30%, rgba(99,102,241,0.25), transparent),
+          radial-gradient(ellipse 50% 60% at 70% 60%, rgba(168,85,247,0.2), transparent),
+          radial-gradient(ellipse 40% 40% at 50% 50%, rgba(59,130,246,0.15), transparent) !important;
+        animation: __mesh_pulse__ 4s ease-in-out infinite !important;
       }
-      @keyframes __spin__ { to { transform: rotate(360deg); } }
+      @keyframes __mesh_pulse__ {
+        0%, 100% { opacity: 0.7; }
+        50% { opacity: 1; }
+      }
+      /* Scanning line */
+      #__ai_loading_overlay__::after {
+        content: '' !important;
+        position: absolute !important;
+        left: 0 !important; right: 0 !important;
+        height: 2px !important;
+        background: linear-gradient(90deg, transparent, rgba(99,102,241,0.6), rgba(168,85,247,0.6), transparent) !important;
+        animation: __scan__ 2.5s linear infinite !important;
+        pointer-events: none !important;
+      }
+      @keyframes __scan__ {
+        0% { top: -2px; }
+        100% { top: 100%; }
+      }
+      /* Pulsing ring */
+      .__ai_ring__ {
+        position: absolute !important;
+        width: 120px; height: 120px;
+        border-radius: 50% !important;
+        border: 1px solid rgba(99,102,241,0.4) !important;
+        animation: __ring__ 2s ease-out infinite !important;
+        pointer-events: none !important;
+      }
+      .__ai_ring__:nth-child(2) { animation-delay: 0.6s; }
+      .__ai_ring__:nth-child(3) { animation-delay: 1.2s; }
+      @keyframes __ring__ {
+        0% { transform: scale(0.6); opacity: 0.8; }
+        100% { transform: scale(2.0); opacity: 0; }
+      }
+      /* Equalizer bars */
+      .__ai_eq__ {
+        position: absolute !important;
+        bottom: 40% !important;
+        display: flex !important;
+        align-items: flex-end !important;
+        gap: 4px !important;
+        height: 48px !important;
+        pointer-events: none !important;
+      }
+      .__ai_eq__ span {
+        width: 5px !important;
+        border-radius: 3px !important;
+        background: linear-gradient(180deg, #a855f7, #6366f1) !important;
+        animation: __eq__ 0.9s ease-in-out infinite !important;
+      }
+      .__ai_eq__ span:nth-child(1) { height: 18px; animation-delay: 0s; }
+      .__ai_eq__ span:nth-child(2) { height: 38px; animation-delay: 0.1s; }
+      .__ai_eq__ span:nth-child(3) { height: 25px; animation-delay: 0.2s; }
+      .__ai_eq__ span:nth-child(4) { height: 48px; animation-delay: 0.3s; }
+      .__ai_eq__ span:nth-child(5) { height: 32px; animation-delay: 0.4s; }
+      .__ai_eq__ span:nth-child(6) { height: 22px; animation-delay: 0.5s; }
+      .__ai_eq__ span:nth-child(7) { height: 42px; animation-delay: 0.6s; }
+      .__ai_eq__ span:nth-child(8) { height: 28px; animation-delay: 0.7s; }
+      @keyframes __eq__ {
+        0%, 100% { transform: scaleY(0.5); opacity: 0.5; }
+        50% { transform: scaleY(1); opacity: 1; }
+      }
+      .__ai_content__ {
+        position: relative !important;
+        z-index: 1 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+      }
+      .__ai_logo__ {
+        width: 56px; height: 56px;
+        border-radius: 16px !important;
+        background: linear-gradient(135deg, #6366f1, #a855f7) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        margin-bottom: 20px !important;
+        box-shadow: 0 0 32px rgba(99,102,241,0.4) !important;
+      }
+      .__ai_logo__ svg { width: 28px; height: 28px; fill: #fff; }
       #__ai_loading_overlay__ .loading-text {
-        color: #fff; font-size: 15px; margin-top: 16px;
-        font-weight: 500; letter-spacing: 0.5px;
+        position: relative !important;
+        z-index: 1 !important;
+        color: #e2e8f0 !important;
+        font-size: 15px !important;
+        font-weight: 600 !important;
+        letter-spacing: 1px !important;
       }
       #__ai_loading_overlay__ .loading-sub {
-        color: rgba(255,255,255,0.5); font-size: 12px; margin-top: 6px;
+        position: relative !important;
+        z-index: 1 !important;
+        color: rgba(148,163,184,0.8) !important;
+        font-size: 12px !important;
+        margin-top: 8px !important;
+        letter-spacing: 0.5px !important;
       }
+      /* Corner accents */
+      .__ai_corner__ {
+        position: absolute !important;
+        width: 40px; height: 40px;
+        pointer-events: none !important;
+        border-color: rgba(99,102,241,0.5) !important;
+        border-style: solid !important;
+      }
+      .__ai_corner__.tl { top: 12px; left: 12px; border-width: 2px 0 0 2px; border-radius: 4px 0 0 0; }
+      .__ai_corner__.tr { top: 12px; right: 12px; border-width: 2px 2px 0 0; border-radius: 0 4px 0 0; }
+      .__ai_corner__.bl { bottom: 12px; left: 12px; border-width: 0 0 2px 2px; border-radius: 0 0 0 4px; }
+      .__ai_corner__.br { bottom: 12px; right: 12px; border-width: 0 2px 2px 0; border-radius: 0 0 4px 0; }
     </style>
-    <div class="spinner"></div>
-    <div class="loading-text" id="__ai_load_title__">AI 翻译准备中...</div>
-    <div class="loading-sub" id="__ai_load_sub__">首次加载需要预热线，请稍候</div>
+    <div class="__ai_corner__ tl"></div><div class="__ai_corner__ tr"></div>
+    <div class="__ai_corner__ bl"></div><div class="__ai_corner__ br"></div>
+    <div class="__ai_ring__"></div><div class="__ai_ring__"></div><div class="__ai_ring__"></div>
+    <div class="__ai_eq__"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+    <div class="__ai_content__">
+      <div class="__ai_logo__">
+        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+      </div>
+      <div class="loading-text" id="__ai_load_title__">AI 翻译引擎启动</div>
+      <div class="loading-sub" id="__ai_load_sub__">正在分析音频流...</div>
+    </div>
   `;
 
   // ─── Bookmark Tab (right edge, like a bookmark peeking out) ─────────
