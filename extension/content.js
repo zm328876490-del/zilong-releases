@@ -993,6 +993,8 @@
   function captureVideoAudio(video) {
     if (!video) return false;
     try {
+      // Unmute before capture — some sites (TikTok) mute on page load
+      video.muted = false;
       var stream;
       try {
         stream = video.captureStream();
@@ -1370,7 +1372,12 @@
 
       case 'error':
         sendStatus('error', msg.message);
-        finishWarmup();
+        if (offlineMode) {
+          cleanupOffline();
+          startASRMode();
+        } else {
+          finishWarmup();
+        }
         break;
     }
   }
@@ -1899,8 +1906,9 @@
     offlineSavedRate = video.playbackRate;
     offlineSavedVolume = video.volume;
 
+    // Unmute before captureStream — TikTok etc. mute on page load
+    video.muted = false;
     var stream = video.captureStream();
-    video.volume = 0;  // use volume=0 instead of muted=true to avoid muting captured stream
     video.playbackRate = OFFLINE_SPEED;
     offlineStream = stream;
     var audioTrack = stream.getAudioTracks()[0];
@@ -1921,17 +1929,38 @@
     offlineAudioCtx = audioContext;
     sendStatus('offline_recording', 'AudioContext sampleRate: ' + offlineAudioCtx.sampleRate);
 
+    var silentChunks = 0;
+    var maxSilentChunks = Math.ceil(3000 / (4096 / (offlineAudioCtx.sampleRate || 48000) * 1000)); // ~3s worth
+    var totalChunks = 0;
+
     offlineProcessor = offlineAudioCtx.createScriptProcessor(4096, 1, 1);
     offlineProcessor.onaudioprocess = function (e) {
       if (!offlineRecording) return;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       var input = e.inputBuffer.getChannelData(0);
       var pcm = new Int16Array(input.length);
+      var maxAbs = 0;
       for (var i = 0; i < input.length; i++) {
         var clamped = Math.max(-1, Math.min(1, input[i]));
-        pcm[i] = Math.round(clamped * 32767);
+        var val = Math.round(clamped * 32767);
+        pcm[i] = val;
+        if (Math.abs(val) > maxAbs) maxAbs = Math.abs(val);
       }
       ws.send(pcm.buffer);
+
+      // PCM silence monitor: detect captureStream() returning silent audio
+      totalChunks++;
+      if (maxAbs < 50) {
+        silentChunks++;
+        if (silentChunks >= maxSilentChunks) {
+          offlineRecording = false;
+          sendStatus('error', '未捕获到音频，可能站点限制');
+          cleanupOffline();
+          finishWarmup();
+        }
+      } else {
+        silentChunks = 0; // reset on real audio
+      }
     };
 
     // Disconnect any existing source and connect this stream for recording

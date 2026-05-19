@@ -317,6 +317,11 @@ func (c *Client) processOfflineASR(samples []int16) {
 	log.Printf("[offline-asr] PCM stats: samples=%d max=%d avg_abs=%d nonZero=%d/%d",
 		len(samples), maxVal, sumAbs/int64(len(samples)), nonZero, len(samples))
 
+	if maxVal < 50 {
+		c.sendJSON(OutMsg{Type: "error", Message: "捕获音频静音，请检查站点是否允许音频捕获"})
+		return
+	}
+
 	segs, err := asr.ProcessOfflineFull(samples, whisperServerURL, c.sourceLang)
 	if err != nil {
 		c.sendJSON(OutMsg{Type: "error", Message: fmt.Sprintf("离线 ASR 失败: %v", err)})
@@ -614,8 +619,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				client.sendJSON(OutMsg{Type: "status", Status: "offline_recording"})
 
 			case "offline_asr_end":
-				if !client.offlineASR || len(client.offlineBuf) == 0 {
+				if !client.offlineASR {
+					continue
+				}
+				if len(client.offlineBuf) == 0 {
 					client.offlineASR = false
+					client.sendJSON(OutMsg{Type: "error", Message: "未收到音频数据，请检查页面音频权限"})
 					continue
 				}
 				client.offlineASR = false
