@@ -441,7 +441,12 @@
       originalLine.textContent = original || '';
       translationLine.textContent = translation || '';
       subtitleBox.style.display = 'inline-block';
+      subtitleBox.style.transition = 'none';
       subtitleBox.style.opacity = '1';
+      // Re-enable transition after paint for future auto-clear fade-out
+      requestAnimationFrame(function () {
+        subtitleBox.style.transition = '';
+      });
     } else {
       subtitleBox.style.opacity = '0';
     }
@@ -1176,19 +1181,22 @@
           }
           for (var k = 0; k < videos.length; k++) {
             var v = videos[k];
-            if (v.duration > 0 && !v.paused && v !== activeVideo) {
+            if (v.duration > 0 && !v.paused && v !== activeVideo && isRunning) {
               captureVideoAudio(v);
               return;
             }
           }
         }
 
-        // Detect removed video elements
+        // Detect removed video elements — stop translation on swipe/scroll
         for (var r = 0; r < m.removedNodes.length; r++) {
           var removed = m.removedNodes[r];
           if (removed.nodeType !== 1) continue;
-          if (removed === activeVideo || (removed.contains && removed.contains(activeVideo))) {
-            disconnectVideoSource();
+          if (removed === activeVideo || (removed.contains && removed.contains(activeVideo)) ||
+              removed === syncVideo || (removed.contains && removed.contains(syncVideo)) ||
+              removed === offlineVideo || (removed.contains && removed.contains(offlineVideo))) {
+            stop();
+            return;
           }
         }
       }
@@ -1477,6 +1485,7 @@
   let duckedVideo = null;   // video whose audio is ducked (not muted)
   let savedVolume = 1;
   let warmupDone = false;
+  let syncLoadingHidden = false;  // separate from warmupDone: hide loading only when first subtitle renders
   let startSent = false;  // prevents duplicate 'start' messages
 
   // ─── Preheat system (auto-warm on page load) ───────────────────────
@@ -1610,6 +1619,8 @@
     if (warmupDone) return;
     warmupDone = true;
     unduckVideoAudio();
+    // In offline/sync mode, keep loading until first subtitle renders
+    if (offlineMode || syncMode) return;
     hideLoading();
   }
 
@@ -1644,12 +1655,12 @@
       if (video.currentTime > 1.0) {
         video.currentTime = 0;
         setTimeout(function () {
-          if (!warmupDone) finishWarmup();
+          unduckVideoAudio();
           if (!syncRafId) syncLoop();
         }, 200);
         return;
       }
-      if (!warmupDone) finishWarmup();
+      unduckVideoAudio();
       video.addEventListener('ratechange', onVideoRateChange);
       lastSyncTime = video.currentTime;
       chrome.runtime.sendMessage({ type: 'started' }).catch(function () {});
@@ -1694,7 +1705,7 @@
 
     lastSyncTime = syncVideo.currentTime;
     chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
-    finishWarmup();
+    unduckVideoAudio();
     syncLoop();
   }
 
@@ -1744,6 +1755,7 @@
         if (!item.played) {
           item.played = true;
           showSubtitle(item.original, item.translation);
+          if (!syncLoadingHidden) { syncLoadingHidden = true; unduckVideoAudio(); hideLoading(); }
           if (item.audioEl) {
             enqueueAudio(item.audioEl, item.audioEl.src);
             item.audioEl = null;
@@ -1905,6 +1917,7 @@
     // the existing domObserver will pick them up automatically.
     startSent = false;
     warmupDone = false;
+    syncLoadingHidden = false;
     preheatReady = false;
     preheatActive = false;
 
@@ -1927,6 +1940,7 @@
     subtitleMode = false;
     startSent = false;
     warmupDone = false;
+    syncLoadingHidden = false;
     preheatReady = false;
     preheatActive = false;
 
@@ -2016,7 +2030,6 @@
     // Unmute before captureStream — TikTok etc. mute on page load
     video.muted = false;
     var stream = video.captureStream();
-    video.volume = 0.02; // 2% — barely audible, keeps captured stream intact
     video.playbackRate = OFFLINE_SPEED;
     offlineStream = stream;
     var audioTrack = stream.getAudioTracks()[0];
@@ -2112,6 +2125,7 @@
     isRunning = true;
     fab.classList.add('running');
     warmupDone = false;
+    syncLoadingHidden = false;
     startSent = false;
     syncMode = false;
     subtitleMode = false;
