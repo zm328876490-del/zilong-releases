@@ -47,14 +47,20 @@ type Client struct {
 	ttsCancel       chan struct{} // cancels the previous streaming TTS goroutine
 	ttsCancelMu     sync.Mutex    // guards ttsCancel
 	lastTtsTime     time.Time     // last time a TTS goroutine was started (for throttling)
+
+	// offline ASR state
+	offlineASR   bool
+	offlineBuf   []int16
+	offlineSpeed float64 // playback speed during recording (for timestamp scaling)
 }
 
 // Subtitle is a single subtitle cue extracted from a video platform.
 type Subtitle struct {
-	Text          string  `json:"text"`
-	Start         float64 `json:"start"`
-	End           float64 `json:"end"`
-	SkipTranslate bool    `json:"skipTranslate,omitempty"`
+	Text          string             `json:"text"`
+	Start         float64            `json:"start"`
+	End           float64            `json:"end"`
+	SkipTranslate bool               `json:"skipTranslate,omitempty"`
+	Words         []asr.WordTimestamp `json:"words,omitempty"`
 }
 
 // Pending translations for async Google Translate via browser
@@ -98,12 +104,14 @@ func (c *Client) translateViaBrowser(text, from, to string) (string, error) {
 
 // PreprocessResult is one pre-translated + pre-synthesized subtitle.
 type PreprocessResult struct {
-	Index       int     `json:"index"`
-	Original    string  `json:"original"`
-	Translation string  `json:"translation"`
-	Audio       string  `json:"audio,omitempty"`
-	Start       float64 `json:"start"`
-	End         float64 `json:"end"`
+	Index       int                `json:"index"`
+	Original    string             `json:"original"`
+	Translation string             `json:"translation"`
+	Audio       string             `json:"audio,omitempty"`
+	Start       float64            `json:"start"`
+	End         float64            `json:"end"`
+	DurationMs  int                `json:"durationMs,omitempty"` // TTS audio duration (ms), for time-stretch sync
+	Words       []asr.WordTimestamp `json:"words,omitempty"`     // per-word timestamps from whisper
 }
 
 type OutMsg struct {
@@ -123,6 +131,7 @@ type OutMsg struct {
 	Partial     bool               `json:"partial,omitempty"`
 	Index       int                `json:"index,omitempty"`
 	Items       []PreprocessResult `json:"items,omitempty"`
+	Subs        []Subtitle         `json:"subs,omitempty"`
 	Total       int                `json:"total,omitempty"`
 	UtteranceId string             `json:"utteranceId,omitempty"` // ties audio_start/chunk/end to a specific utterance
 	TtsPartial   bool               `json:"ttsPartial,omitempty"`   // true = fast partial TTS, false = final
@@ -142,6 +151,8 @@ type InMsg struct {
 	SkipTranslate bool       `json:"skipTranslate,omitempty"`
 	Subs          []Subtitle `json:"subs,omitempty"`
 	Text          string     `json:"text,omitempty"`
+	SampleRate    int        `json:"sampleRate,omitempty"`
+	Speed         float64    `json:"speed,omitempty"`
 }
 
 func (c *Client) sendJSON(msg OutMsg) error {
@@ -284,6 +295,64 @@ func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, is
 	}
 }
 
+// ─── Offline ASR ─────────────────────────────────────────────────────
+
+func (c *Client) processOfflineASR(samples []int16) {
+	// Validate PCM: check for non-zero samples
+	var maxVal, sumAbs int64
+	nonZero := 0
+	for _, s := range samples {
+		abs := int64(s)
+		if abs < 0 {
+			abs = -abs
+		}
+		sumAbs += abs
+		if abs > maxVal {
+			maxVal = abs
+		}
+		if abs > 10 {
+			nonZero++
+		}
+	}
+	log.Printf("[offline-asr] PCM stats: samples=%d max=%d avg_abs=%d nonZero=%d/%d",
+		len(samples), maxVal, sumAbs/int64(len(samples)), nonZero, len(samples))
+
+	segs, err := asr.ProcessOfflineFull(samples, whisperServerURL, c.sourceLang)
+	if err != nil {
+		c.sendJSON(OutMsg{Type: "error", Message: fmt.Sprintf("离线 ASR 失败: %v", err)})
+		return
+	}
+	if len(segs) == 0 {
+		c.sendJSON(OutMsg{Type: "error", Message: "离线 ASR 未识别到字幕"})
+		return
+	}
+
+	log.Printf("[offline-asr] whisper returned %d segments", len(segs))
+	for i, s := range segs {
+		if i < 5 {
+			log.Printf("[offline-asr]   seg[%d]: [%.1f-%.1f] %q", i, s.Start, s.End, s.Text)
+		}
+	}
+
+	// Convert to Subtitle format, scaling timestamps to compensate for
+	// accelerated playback during recording (e.g. 1.5x speed → multiply by 1.5).
+	speed := c.offlineSpeed
+	if speed <= 0 {
+		speed = 1.0
+	}
+	subs := make([]Subtitle, len(segs))
+	for i, s := range segs {
+		// Scale word timestamps too
+		words := make([]asr.WordTimestamp, len(s.Words))
+		for j, w := range s.Words {
+			words[j] = asr.WordTimestamp{Word: w.Word, Start: w.Start * speed, End: w.End * speed}
+		}
+		subs[i] = Subtitle{Text: s.Text, Start: s.Start * speed, End: s.End * speed, Words: words}
+	}
+	log.Printf("[offline-asr] speed=%.1fx, sending %d subs to frontend", speed, len(subs))
+	c.sendJSON(OutMsg{Type: "offline_asr_result", Subs: subs})
+}
+
 // ─── Preprocess (subtitle hijacking mode) ─────────────────────────────
 
 // handleDOMSubtitle translates a single DOM-captured subtitle and generates TTS.
@@ -328,6 +397,7 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 		return
 	}
 
+	log.Printf("[preprocess] %d subtitles after merge", len(subs))
 	c.sendJSON(OutMsg{Type: "preprocess_start", Total: len(subs)})
 
 	voice := tts.ResolveVoice(c.ttsVoice, c.targetLang)
@@ -383,6 +453,8 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 				Audio:       audio,
 				Start:       subs[idx].Start,
 				End:         subs[idx].End,
+				DurationMs:  tts.EstimateMP3DurationFromBase64(audio),
+				Words:       subs[idx].Words,
 			}
 			mu.Lock()
 			batch = append(batch, item)
@@ -400,6 +472,13 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 		c.sendJSON(OutMsg{Type: "preprocess_result", Items: batch})
 	}
 
+	transCount := 0
+	for _, t := range translated {
+		if t != "" {
+			transCount++
+		}
+	}
+	log.Printf("[preprocess] done: %d subtitles, %d translated, %d items with audio/TTS", len(subs), transCount, total)
 	c.sendJSON(OutMsg{Type: "preprocess_complete"})
 }
 
@@ -524,19 +603,44 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			case "preprocess":
 				go client.handlePreprocess(msg.Subs)
 
+			case "offline_asr_start":
+				client.offlineASR = true
+				client.offlineBuf = make([]int16, 0, 16000*3600) // up to 1hr
+				if msg.Speed > 0 {
+					client.offlineSpeed = msg.Speed
+				} else {
+					client.offlineSpeed = 1.0
+				}
+				client.sendJSON(OutMsg{Type: "status", Status: "offline_recording"})
+
+			case "offline_asr_end":
+				if !client.offlineASR || len(client.offlineBuf) == 0 {
+					client.offlineASR = false
+					continue
+				}
+				client.offlineASR = false
+				client.sendJSON(OutMsg{Type: "status", Status: "offline_asr_processing"})
+				go client.processOfflineASR(client.offlineBuf)
+				client.offlineBuf = nil
+
 			default:
 			}
 
 		case websocket.BinaryMessage:
-			if client.audioBuf == nil {
-				continue
-			}
 			sampleCount := len(data) / 2
 			samples := make([]int16, sampleCount)
 			for i := 0; i < sampleCount; i++ {
 				samples[i] = int16(binary.LittleEndian.Uint16(data[i*2 : (i+1)*2]))
 			}
 
+			if client.offlineASR {
+				client.offlineBuf = append(client.offlineBuf, samples...)
+				continue
+			}
+
+			if client.audioBuf == nil {
+				continue
+			}
 			client.audioBuf.Append(samples)
 		}
 	}
@@ -579,7 +683,6 @@ func startWhisperServer(cfg *config.Config) (*exec.Cmd, error) {
 		"-l", "auto",
 		"--port", whisperPort,
 		"--host", "127.0.0.1",
-		"--no-timestamps",
 	}
 
 	cmd := exec.Command(serverExe, args...)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -337,6 +338,141 @@ func (ab *AudioBuffer) callWhisperServer(wavData []byte) (string, error) {
 	}
 
 	return result.Text, nil
+}
+
+// ─── Offline full-file ASR ────────────────────────────────────────────
+
+// WordTimestamp is a single word with start/end time from whisper.
+type WordTimestamp struct {
+	Word  string  `json:"word"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+}
+
+// SubtitleSegment is a single subtitle cue with timestamps returned from offline ASR.
+type SubtitleSegment struct {
+	Text  string          `json:"text"`
+	Start float64         `json:"start"`
+	End   float64         `json:"end"`
+	Words []WordTimestamp `json:"words,omitempty"`
+}
+
+// ProcessOfflineFull takes a complete PCM buffer, sends it as one WAV to
+// whisper-server with verbose_json output, and returns timestamped segments.
+func ProcessOfflineFull(samples []int16, serverURL, language string) ([]SubtitleSegment, error) {
+	if serverURL == "" {
+		return nil, fmt.Errorf("no whisper server URL")
+	}
+	if len(samples) == 0 {
+		return nil, fmt.Errorf("empty audio")
+	}
+
+	wavData, err := pcmToWav(samples)
+	if err != nil {
+		return nil, fmt.Errorf("wav encode: %w", err)
+	}
+
+	text, err := callWhisperServerVerbose(wavData, serverURL, language)
+	if err != nil {
+		return nil, fmt.Errorf("whisper: %w", err)
+	}
+
+	// Log first 300 chars of raw whisper response for debugging
+	preview := text
+	if len(preview) > 300 {
+		preview = preview[:300]
+	}
+	log.Printf("[verbose-json] raw response preview: %s", preview)
+
+	return parseVerboseJSON(text)
+}
+
+// callWhisperServerVerbose sends WAV data and requests verbose_json (with timestamps).
+func callWhisperServerVerbose(wavData []byte, serverURL, language string) (string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	part, err := writer.CreateFormFile("file", "audio.wav")
+	if err != nil {
+		return "", fmt.Errorf("form file: %w", err)
+	}
+	part.Write(wavData)
+
+	writer.WriteField("language", language)
+	writer.WriteField("response_format", "verbose_json")
+	writer.WriteField("timestamps", "1")
+	writer.WriteField("word_timestamps", "1")
+	writer.Close()
+
+	url := serverURL + "/inference"
+	req, err := http.NewRequest("POST", url, &body)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("http post: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("server error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return string(respBody), nil
+}
+
+// parseVerboseJSON parses whisper.cpp verbose_json output and extracts segments.
+func parseVerboseJSON(raw string) ([]SubtitleSegment, error) {
+	var result struct {
+		Segments []struct {
+			Text  string  `json:"text"`
+			Start float64 `json:"start"`
+			End   float64 `json:"end"`
+			Words []struct {
+				Word  string  `json:"word"`
+				Start float64 `json:"start"`
+				End   float64 `json:"end"`
+			} `json:"words"`
+		} `json:"segments"`
+	}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return nil, fmt.Errorf("parse verbose_json: %w", err)
+	}
+
+	log.Printf("[verbose-json] raw segments count: %d", len(result.Segments))
+
+	var segs []SubtitleSegment
+	skipped := 0
+	for _, s := range result.Segments {
+		text := strings.TrimSpace(s.Text)
+		// Skip blank-audio markers and empty segments
+		if text == "" || text == "[BLANK_AUDIO]" || strings.Contains(text, "[BLANK_AUDIO]") {
+			skipped++
+			continue
+		}
+		if len([]rune(text)) >= 2 {
+			seg := SubtitleSegment{Text: text, Start: s.Start, End: s.End}
+			for _, w := range s.Words {
+				wText := strings.TrimSpace(w.Word)
+				if wText != "" {
+					seg.Words = append(seg.Words, WordTimestamp{Word: wText, Start: w.Start, End: w.End})
+				}
+			}
+			segs = append(segs, seg)
+		} else {
+			skipped++
+		}
+	}
+	log.Printf("[verbose-json] parsed: %d segments kept, %d skipped", len(segs), skipped)
+	return segs, nil
 }
 
 // pcmToWav converts raw PCM int16 samples to a WAV byte slice.

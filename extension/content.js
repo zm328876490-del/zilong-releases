@@ -64,21 +64,38 @@
   let ccMuteUntil = 0;           // mute DOM capture for N ms after CC click
   let subtitleModeTimer = null;  // timeout: fallback to ASR if no captions
 
+  // Offline ASR state
+  let offlineMode = false;        // true = offline full-audio ASR mode
+  let offlineRecording = false;   // true = currently recording (Phase 1)
+  let offlineVideo = null;        // the video being recorded/replayed
+  let offlineAudioCtx = null;     // AudioContext for capture (shared with real-time ASR)
+  let offlineStream = null;       // MediaStream from captureStream
+  let offlineProcessor = null;    // ScriptProcessor for offline PCM capture
+  let offlineSavedRate = 1;       // saved playbackRate before speed-up
+  let offlineSavedVolume = 1;     // saved volume before mute
+  const OFFLINE_SPEED = 1.0;      // playback speed during recording phase (1.0 = normal)
+
   // ─── Loading Overlay (shown during warmup, auto-hides on first TTS) ──
+  let loadingTarget = null;  // video element to track position for loading overlay
+  let loadingRafId = null;   // RAF loop for repositioning loading overlay
+
   const loadingOverlay = document.createElement('div');
   loadingOverlay.id = '__ai_loading_overlay__';
   loadingOverlay.innerHTML = `
     <style>
       #__ai_loading_overlay__ {
-        position: fixed !important; inset: 0 !important;
+        position: fixed !important;
         z-index: 2147483646 !important;
-        background: rgba(0, 0, 0, 0.75) !important;
+        background: rgba(0, 0, 0, 0.78) !important;
         display: flex !important;
         flex-direction: column !important;
         align-items: center !important;
         justify-content: center !important;
         font-family: -apple-system, 'Microsoft YaHei', 'PingFang SC', sans-serif !important;
         pointer-events: all !important;
+        border-radius: 8px !important;
+        overflow: hidden !important;
+        transition: opacity 0.3s !important;
       }
       #__ai_loading_overlay__ .spinner {
         width: 48px; height: 48px;
@@ -97,8 +114,8 @@
       }
     </style>
     <div class="spinner"></div>
-    <div class="loading-text">AI 翻译准备中...</div>
-    <div class="loading-sub">首次加载需要预热线，请稍候</div>
+    <div class="loading-text" id="__ai_load_title__">AI 翻译准备中...</div>
+    <div class="loading-sub" id="__ai_load_sub__">首次加载需要预热线，请稍候</div>
   `;
 
   // ─── Subtitle Overlay ─────────────────────────────────────────────
@@ -491,6 +508,14 @@
         const areaB = b.videoWidth * b.videoHeight;
         return areaB - areaA;
       })[0] || videos[0];
+  }
+
+  function isLiveStream(video) {
+    if (!video) return false;
+    if (!isFinite(video.duration)) return true;
+    if (document.querySelector('.ytp-live-badge')) return true;
+    if (document.querySelector('.live-status-icon') || document.querySelector('.bilibili-live-player')) return true;
+    return false;
   }
 
 
@@ -1080,6 +1105,11 @@
         }));
         pendingSubs = null;
       }
+
+      // Offline ASR: signal start of audio streaming
+      if (offlineMode && offlineRecording) {
+        ws.send(JSON.stringify({ type: 'offline_asr_start', sampleRate: 16000, speed: OFFLINE_SPEED }));
+      }
     };
 
     ws.onmessage = (event) => {
@@ -1165,6 +1195,7 @@
 
       // ─── Preprocess messages (sync mode) ──────────────────────────
       case 'preprocess_start':
+        updateLoadingText('翻译+配音合成中...', '共 ' + msg.total + ' 条字幕');
         sendStatus('preprocessing', '预处理 ' + msg.total + ' 条字幕...');
         break;
 
@@ -1180,7 +1211,86 @@
 
       case 'preprocess_complete':
         sendStatus('playing');
-        startSyncPlayback();
+        if (offlineMode && offlineVideo) {
+          // Offline mode: wait for seek to 0 before starting sync playback
+          syncMode = true;
+          syncVideo = offlineVideo;
+          offlineVideo.playbackRate = 1;
+          offlineVideo.muted = false;
+          offlineVideo.volume = settings.originalVolume / 100;
+
+          var seekTimeout = null;
+          function beginOfflineReplay() {
+            if (seekTimeout) { clearTimeout(seekTimeout); seekTimeout = null; }
+            offlineVideo.removeEventListener('seeked', beginOfflineReplay);
+            if (offlineVideo.paused) {
+              offlineVideo.play().catch(function () {});
+            }
+            // Verify we're actually near the start; if not, seek again
+            if (offlineVideo.currentTime > 1.0) {
+              offlineVideo.currentTime = 0;
+              // Last resort: start syncLoop after a short delay even without seeked
+              setTimeout(function () {
+                if (!warmupDone) startOfflineSync();
+              }, 200);
+              return;
+            }
+            startOfflineSync();
+          }
+
+          function startOfflineSync() {
+            // Create Audio elements for preprocessed items
+            for (var i = 0; i < preprocessedItems.length; i++) {
+              var item = preprocessedItems[i];
+              if (item.audio) {
+                try {
+                  item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
+                  item.audioEl.volume = settings.ttsVolume / 100;
+                  item.audioEl.playbackRate = calcLipSyncRate(item);
+                } catch (e) {}
+              }
+            }
+            offlineVideo.addEventListener('ratechange', onVideoRateChange);
+            lastSyncTime = offlineVideo.currentTime;
+            chrome.runtime.sendMessage({ type: 'started' }).catch(function () {});
+            finishWarmup();
+            syncLoop();
+          }
+
+          offlineVideo.addEventListener('seeked', beginOfflineReplay, { once: true });
+          // Fallback: if seeked doesn't fire within 500ms, start anyway
+          seekTimeout = setTimeout(function () {
+            offlineVideo.removeEventListener('seeked', beginOfflineReplay);
+            beginOfflineReplay();
+          }, 500);
+          offlineVideo.currentTime = 0;
+          offlineVideo.play().catch(function () {
+            // Autoplay blocked — start sync anyway (video might still be usable)
+            if (seekTimeout) { clearTimeout(seekTimeout); seekTimeout = null; }
+            offlineVideo.removeEventListener('seeked', beginOfflineReplay);
+            startOfflineSync();
+          });
+        } else {
+          startSyncPlayback();
+        }
+        break;
+
+      case 'offline_asr_result':
+        if (msg.subs && msg.subs.length > 0) {
+          offlineRecording = false;
+          // Don't close offlineAudioCtx — it's the global audioContext shared with real-time ASR
+          if (offlineProcessor) { offlineProcessor.disconnect(); offlineProcessor = null; }
+          offlineAudioCtx = null;
+          if (offlineStream) { offlineStream.getTracks().forEach(function(t) { t.stop(); }); offlineStream = null; }
+          if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+          updateLoadingText('翻译+配音合成中...', '共 ' + msg.subs.length + ' 条字幕');
+          sendStatus('preprocessing', '翻译+配音合成中...');
+          ws.send(JSON.stringify({ type: 'preprocess', subs: msg.subs }));
+        } else {
+          sendStatus('error', '离线 ASR 无结果，回退到实时 ASR');
+          cleanupOffline();
+          startASRMode();
+        }
         break;
 
       case 'preprocess_error':
@@ -1191,14 +1301,14 @@
       // ─── Status ────────────────────────────────────────────────────
       case 'status':
         if (msg.status === 'configured') {
-          if (!syncMode) {
-            // In ASR mode: send warmup. In sync mode: preprocess already sent.
+          if (!syncMode && !offlineMode) {
+            // In ASR mode: send warmup. In sync/offline mode: skip.
             ws.send(JSON.stringify({ type: 'warmup' }));
           }
         } else if (msg.status === 'ready') {
           if (preheatActive) {
             preheatPhase2();
-          } else if (!startSent && !syncMode) {
+          } else if (!startSent && !syncMode && !offlineMode) {
             if (subtitleMode) {
               // DOM subtitle mode: no audio capture, just activate
               startSent = true;
@@ -1318,11 +1428,65 @@
       document.body.appendChild(loadingOverlay);
     }
     loadingOverlay.style.setProperty('display', 'flex', 'important');
+    if (!loadingTarget) {
+      loadingTarget = findVideoElement();
+    }
+    // Immediate first position to avoid flash
+    applyOverlayPosition();
+    if (loadingTarget && !loadingRafId) {
+      positionLoadingOverlay();
+    }
+  }
+
+  function applyOverlayPosition() {
+    if (!loadingTarget || !loadingTarget.isConnected) {
+      loadingTarget = findVideoElement();
+    }
+    if (!loadingTarget) {
+      loadingOverlay.style.setProperty('left', '0', 'important');
+      loadingOverlay.style.setProperty('top', '0', 'important');
+      loadingOverlay.style.setProperty('width', '100vw', 'important');
+      loadingOverlay.style.setProperty('height', '100vh', 'important');
+      loadingOverlay.style.setProperty('border-radius', '0', 'important');
+      return;
+    }
+    var rect = loadingTarget.getBoundingClientRect();
+    var isVisible = rect.width > 0 && rect.height > 0 &&
+      rect.bottom > 0 && rect.top < window.innerHeight &&
+      rect.right > 0 && rect.left < window.innerWidth;
+    if (!isVisible) {
+      loadingOverlay.style.setProperty('display', 'none', 'important');
+      return;
+    }
+    loadingOverlay.style.setProperty('display', 'flex', 'important');
+    loadingOverlay.style.setProperty('left', rect.left + 'px', 'important');
+    loadingOverlay.style.setProperty('top', rect.top + 'px', 'important');
+    loadingOverlay.style.setProperty('width', rect.width + 'px', 'important');
+    loadingOverlay.style.setProperty('height', rect.height + 'px', 'important');
+    var style = window.getComputedStyle(loadingTarget);
+    loadingOverlay.style.setProperty('border-radius', style.borderRadius, 'important');
+  }
+
+  function positionLoadingOverlay() {
+    loadingRafId = requestAnimationFrame(positionLoadingOverlay);
+    applyOverlayPosition();
+  }
+
+  function updateLoadingText(title, sub) {
+    var titleEl = document.getElementById('__ai_load_title__');
+    var subEl = document.getElementById('__ai_load_sub__');
+    if (titleEl && title) titleEl.textContent = title;
+    if (subEl && sub) subEl.textContent = sub;
   }
 
   function hideLoading() {
     clearTimeout(loadingOverlay._safetyTimer);
     clearTimeout(loadingOverlay._resumeTimer);
+    if (loadingRafId) {
+      cancelAnimationFrame(loadingRafId);
+      loadingRafId = null;
+    }
+    loadingTarget = null;
     loadingOverlay.style.setProperty('display', 'none', 'important');
   }
 
@@ -1348,7 +1512,7 @@
         try {
           item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
           item.audioEl.volume = settings.ttsVolume / 100;
-          item.audioEl.playbackRate = TTS_RATE_FINAL;
+          item.audioEl.playbackRate = calcLipSyncRate(item);
         } catch (e) {
         }
       }
@@ -1376,15 +1540,39 @@
     }
     lastSyncTime = currentTime;
 
+    var activeItem = null;
+
     for (const item of preprocessedItems) {
-      if (item.played) continue;
-      if (currentTime >= item.start) {
-        item.played = true;
-        showSubtitle(item.original, item.translation);
-        if (item.audioEl) {
-          enqueueAudio(item.audioEl, item.audioEl.src);
-          item.audioEl = null;  // prevent re-enqueue on next frames
+      if (currentTime >= item.start && currentTime < item.end) {
+        activeItem = item;
+        if (!item.played) {
+          item.played = true;
+          showSubtitle(item.original, item.translation);
+          if (item.audioEl) {
+            enqueueAudio(item.audioEl, item.audioEl.src);
+            item.audioEl = null;
+          }
         }
+        break;
+      }
+    }
+
+    // Word-by-word highlighting for active item
+    if (activeItem && activeItem.words && activeItem.words.length > 0) {
+      var wordIdx = -1;
+      for (var w = 0; w < activeItem.words.length; w++) {
+        if (currentTime >= activeItem.words[w].start && currentTime < activeItem.words[w].end) {
+          wordIdx = w;
+          break;
+        }
+      }
+      // Also handle case after last word's end but before segment end
+      if (wordIdx < 0 && currentTime >= activeItem.words[activeItem.words.length - 1].end) {
+        wordIdx = activeItem.words.length;
+      }
+      if (wordIdx !== activeItem._wordIdx) {
+        activeItem._wordIdx = wordIdx;
+        highlightOriginalWord(activeItem, wordIdx);
       }
     }
   }
@@ -1395,6 +1583,7 @@
     // Mark all items before currentTime as played, find current one
     let foundCurrent = false;
     for (const item of preprocessedItems) {
+      item._wordIdx = -1;
       if (!foundCurrent && currentTime < item.end) {
         item.played = false; // re-trigger for display
         foundCurrent = true;
@@ -1418,9 +1607,62 @@
     }
   }
 
+  function highlightOriginalWord(item, wordIdx) {
+    if (!item || !item.words || item.words.length === 0) return;
+    if (wordIdx < 0) {
+      // No word active yet — show plain text
+      originalLine.textContent = item.original;
+      return;
+    }
+    if (wordIdx >= item.words.length) {
+      // All words spoken — show full text dimmed
+      originalLine.innerHTML = '<span style="opacity:0.55">' + escapeHTML(item.original) + '</span>';
+      return;
+    }
+    // Build highlighted HTML: split by word boundaries
+    var word = item.words[wordIdx].word;
+    var text = item.original;
+    var idx = text.indexOf(word);
+    // Find the word in context (approximate match)
+    var before = '', after = '', highlight = word;
+    if (idx >= 0) {
+      before = escapeHTML(text.substring(0, idx));
+      highlight = escapeHTML(text.substring(idx, idx + word.length));
+      after = escapeHTML(text.substring(idx + word.length));
+    } else {
+      // Fallback: just show text with word highlighted if we can find it
+      var escaped = escapeHTML(text);
+      var escapedWord = escapeHTML(word);
+      var wIdx = escaped.indexOf(escapedWord);
+      if (wIdx >= 0) {
+        before = escaped.substring(0, wIdx);
+        highlight = escaped.substring(wIdx, wIdx + escapedWord.length);
+        after = escaped.substring(wIdx + escapedWord.length);
+      } else {
+        originalLine.textContent = text;
+        return;
+      }
+    }
+    originalLine.innerHTML = before + '<span style="color:#fbbf24;font-weight:600">' + highlight + '</span>' + after;
+  }
+
+  function calcLipSyncRate(item) {
+    if (item.durationMs && item.end > item.start) {
+      var segDurationMs = (item.end - item.start) * 1000;
+      var rate = item.durationMs / segDurationMs;
+      rate = Math.min(2.0, Math.max(0.5, rate));
+      // Adjust for video playback rate
+      if (syncVideo && syncVideo.playbackRate) {
+        rate = rate * syncVideo.playbackRate;
+      }
+      return rate;
+    }
+    return TTS_RATE_FINAL;
+  }
+
   function onVideoRateChange() {
     for (const item of preprocessedItems) {
-      if (item.audioEl) item.audioEl.playbackRate = TTS_RATE_FINAL;
+      if (item.audioEl) item.audioEl.playbackRate = calcLipSyncRate(item);
     }
   }
 
@@ -1510,6 +1752,128 @@
     }
   }
 
+  // ─── Offline ASR (record full audio → ASR → preprocess → replay) ─────
+
+  function cleanupOffline() {
+    offlineRecording = false;
+    // Don't close offlineAudioCtx — it's the global audioContext shared with real-time ASR
+    if (offlineProcessor) { offlineProcessor.disconnect(); offlineProcessor = null; }
+    offlineAudioCtx = null;
+    if (offlineStream) { offlineStream.getTracks().forEach(function(t) { t.stop(); }); offlineStream = null; }
+    if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+    if (offlineVideo) {
+      if (offlineVideo._offlineTimeUpdateHandler) {
+        offlineVideo.removeEventListener('timeupdate', offlineVideo._offlineTimeUpdateHandler);
+        offlineVideo._offlineTimeUpdateHandler = null;
+      }
+      try { offlineVideo.playbackRate = offlineSavedRate; } catch (_) {}
+      try { offlineVideo.volume = offlineSavedVolume; } catch (_) {}
+      offlineVideo = null;
+    }
+    offlineMode = false;
+  }
+
+  function onOfflineRecordingDone() {
+    if (!offlineRecording) return;
+    offlineRecording = false;
+
+    // Don't close offlineAudioCtx — it's the global audioContext
+    if (offlineProcessor) { offlineProcessor.disconnect(); offlineProcessor = null; }
+    offlineAudioCtx = null;
+    if (offlineStream) { offlineStream.getTracks().forEach(function(t) { t.stop(); }); offlineStream = null; }
+    if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+
+    // Clean up loop-detection timeupdate listener
+    if (offlineVideo && offlineVideo._offlineTimeUpdateHandler) {
+      offlineVideo.removeEventListener('timeupdate', offlineVideo._offlineTimeUpdateHandler);
+      offlineVideo._offlineTimeUpdateHandler = null;
+    }
+
+    updateLoadingText('ASR 识别中...', '正在将音频转为字幕');
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'offline_asr_end' }));
+    }
+  }
+
+  function startOfflineRecording(video) {
+    offlineMode = true;
+    offlineRecording = true;
+    offlineVideo = video;
+    offlineSavedRate = video.playbackRate;
+    offlineSavedVolume = video.volume;
+
+    var stream = video.captureStream();
+    video.volume = 0;  // use volume=0 instead of muted=true to avoid muting captured stream
+    video.playbackRate = OFFLINE_SPEED;
+    offlineStream = stream;
+    var audioTrack = stream.getAudioTracks()[0];
+    if (!audioTrack) {
+      cleanupOffline();
+      startASRMode();
+      return;
+    }
+    var audioStream = new MediaStream([audioTrack]);
+
+    // Reuse the global AudioContext (same as real-time ASR) to avoid
+    // suspended-state issues and ensure correct sample rate.
+    if (!ensureAudioContext()) {
+      cleanupOffline();
+      startASRMode();
+      return;
+    }
+    offlineAudioCtx = audioContext;
+    sendStatus('offline_recording', 'AudioContext sampleRate: ' + offlineAudioCtx.sampleRate);
+
+    offlineProcessor = offlineAudioCtx.createScriptProcessor(4096, 1, 1);
+    offlineProcessor.onaudioprocess = function (e) {
+      if (!offlineRecording) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      var input = e.inputBuffer.getChannelData(0);
+      var pcm = new Int16Array(input.length);
+      for (var i = 0; i < input.length; i++) {
+        var clamped = Math.max(-1, Math.min(1, input[i]));
+        pcm[i] = Math.round(clamped * 32767);
+      }
+      ws.send(pcm.buffer);
+    };
+
+    // Disconnect any existing source and connect this stream for recording
+    if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+    sourceNode = offlineAudioCtx.createMediaStreamSource(audioStream);
+    sourceNode.connect(offlineProcessor);
+    // Connect to destination so onaudioprocess fires
+    offlineProcessor.connect(offlineAudioCtx.destination);
+
+    video.addEventListener('ended', onOfflineRecordingDone, { once: true });
+
+    // TikTok auto-loop detection: watch for backward time jumps (looping without ended)
+    var _lastTime = -1;
+    function onOfflineTimeUpdate() {
+      if (!offlineRecording) {
+        video.removeEventListener('timeupdate', onOfflineTimeUpdate);
+        return;
+      }
+      var t = video.currentTime;
+      if (_lastTime >= 0 && t < _lastTime - 0.5) {
+        // Video looped — treat as recording done
+        onOfflineRecordingDone();
+        video.removeEventListener('timeupdate', onOfflineTimeUpdate);
+      }
+      _lastTime = t;
+    }
+    video.addEventListener('timeupdate', onOfflineTimeUpdate);
+    video._offlineTimeUpdateHandler = onOfflineTimeUpdate;
+
+    loadingTarget = video;
+    showLoading();
+    updateLoadingText('正在录制音频...', '录制完成后将自动识别字幕');
+    sendStatus('offline_recording');
+
+    video.currentTime = 0;
+    video.play();
+  }
+
   async function start() {
     if (isRunning) return;
     isRunning = true;
@@ -1586,7 +1950,23 @@
       return;
     }
 
-    // No subtitles at all — use persistent ASR pipeline
+    // Not YouTube/Bilibili DOM — check VOD vs live
+    var video = findVideoElement();
+    if (video && !isLiveStream(video) && video.duration > 0) {
+      // VOD: offline full-audio ASR (record → ASR → preprocess → replay)
+      startOfflineRecording(video);
+      if (ws) {
+        ws.onclose = null;
+        try { ws.close(); } catch (_) {}
+        ws = null;
+      }
+      preheatReady = false;
+      preheatActive = false;
+      connectWebSocket();
+      return;
+    }
+
+    // Live stream — real-time ASR
     startASRMode();
   }
 
@@ -1600,6 +1980,9 @@
     }
     if (subtitleMode) {
       stopDOMSubtitleObserver();
+    }
+    if (offlineMode) {
+      cleanupOffline();
     }
 
     disconnectWebSocket();
@@ -1707,8 +2090,7 @@
     }
   });
 
-  // Start background preheat as soon as a video is detected
-  tryPreheat();
+  // Auto-start disabled — user triggers manually via popup button
 
   // YouTube SPA navigation: re-enable CC on the new player
   document.addEventListener('yt-navigate-finish', function () {
