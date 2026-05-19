@@ -405,6 +405,7 @@ func callWhisperServerVerbose(wavData []byte, serverURL, language string) (strin
 	writer.WriteField("response_format", "verbose_json")
 	writer.WriteField("timestamps", "1")
 	writer.WriteField("word_timestamps", "1")
+	writer.WriteField("no_speech_threshold", "0.6")
 	writer.Close()
 
 	url := serverURL + "/inference"
@@ -436,10 +437,11 @@ func callWhisperServerVerbose(wavData []byte, serverURL, language string) (strin
 func parseVerboseJSON(raw string) ([]SubtitleSegment, error) {
 	var result struct {
 		Segments []struct {
-			Text  string  `json:"text"`
-			Start float64 `json:"start"`
-			End   float64 `json:"end"`
-			Words []struct {
+			Text         string  `json:"text"`
+			Start        float64 `json:"start"`
+			End          float64 `json:"end"`
+			NoSpeechProb float64 `json:"no_speech_prob"`
+			Words        []struct {
 				Word  string  `json:"word"`
 				Start float64 `json:"start"`
 				End   float64 `json:"end"`
@@ -454,7 +456,13 @@ func parseVerboseJSON(raw string) ([]SubtitleSegment, error) {
 
 	var segs []SubtitleSegment
 	skipped := 0
+	noSpeechSkipped := 0
 	for _, s := range result.Segments {
+		// Skip segments with high probability of NOT being speech
+		if s.NoSpeechProb > 0.5 {
+			noSpeechSkipped++
+			continue
+		}
 		text := strings.TrimSpace(s.Text)
 		// Skip blank-audio markers and empty segments
 		if text == "" || text == "[BLANK_AUDIO]" || strings.Contains(text, "[BLANK_AUDIO]") {
@@ -474,7 +482,7 @@ func parseVerboseJSON(raw string) ([]SubtitleSegment, error) {
 			skipped++
 		}
 	}
-	log.Printf("[verbose-json] parsed: %d segments kept, %d skipped", len(segs), skipped)
+	log.Printf("[verbose-json] parsed: %d segments kept, %d skipped (%d no-speech)", len(segs), skipped, noSpeechSkipped)
 	return segs, nil
 }
 
