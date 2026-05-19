@@ -73,7 +73,7 @@
   let offlineProcessor = null;    // ScriptProcessor for offline PCM capture
   let offlineSavedRate = 1;       // saved playbackRate before speed-up
   let offlineSavedVolume = 1;     // saved volume before mute
-  const OFFLINE_SPEED = 1.0;      // playback speed during recording phase (1.0 = normal)
+  const OFFLINE_SPEED = 3.0;      // playback speed during recording phase (3x faster collection)
 
   // ─── Loading Overlay (shown during warmup, auto-hides on first TTS) ──
   let loadingTarget = null;  // video element to track position for loading overlay
@@ -1909,6 +1909,7 @@
     // Unmute before captureStream — TikTok etc. mute on page load
     video.muted = false;
     var stream = video.captureStream();
+    video.volume = 0.02; // 2% — barely audible, keeps captured stream intact
     video.playbackRate = OFFLINE_SPEED;
     offlineStream = stream;
     var audioTrack = stream.getAudioTracks()[0];
