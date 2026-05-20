@@ -15,12 +15,12 @@ type Config struct {
 
 // WhisperPort returns the port for whisper-server (different from our WS port).
 func (c *Config) WhisperPort() string {
-	return "8080"
+	return "23321"
 }
 
 func Load() *Config {
 	cfg := &Config{
-		Port:     "9527",
+		Port:     "29527",
 		ModelDir: filepath.Join("..", "models"),
 	}
 

@@ -33,7 +33,7 @@
 
   // Settings (updated via popup messages)
   let settings = {
-    wsUrl: 'ws://localhost:9527/ws',
+    wsUrl: 'ws://localhost:29527/ws',
     sourceLang: 'auto',
     targetLang: 'zh-Hans',
     apiKey: '',

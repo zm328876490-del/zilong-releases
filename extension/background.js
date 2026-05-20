@@ -2,7 +2,7 @@
 // Handles messages from popup and relays between content scripts.
 // Manages extension state across tabs.
 
-const DEFAULT_WS_URL = 'ws://localhost:9527/ws';
+const DEFAULT_WS_URL = 'ws://localhost:29527/ws';
 
 // Store active translation sessions per tab
 const sessions = {};
