@@ -47,28 +47,57 @@ var (
 
 const ttsCacheMax = 200
 
-// VoiceForLang returns the Edge TTS voice name for a given language code.
+// VoiceForLang returns the Edge TTS voice name for a given language code (default female).
 func VoiceForLang(lang string) string {
-	m := map[string]string{
-		"zh-Hans": "zh-CN-XiaoxiaoNeural",
-		"zh-Hant": "zh-TW-HsiaoChenNeural",
-		"zh":      "zh-CN-XiaoxiaoNeural",
-		"en":      "en-US-JennyNeural",
-		"ja":      "ja-JP-NanamiNeural",
-		"ko":      "ko-KR-SunHiNeural",
-		"fr":      "fr-FR-DeniseNeural",
-		"de":      "de-DE-KatjaNeural",
-		"es":      "es-ES-ElviraNeural",
-		"pt":      "pt-BR-FranciscaNeural",
-		"ru":      "ru-RU-SvetlanaNeural",
-		"ar":      "ar-SA-ZariyahNeural",
-		"th":      "th-TH-PremwadeeNeural",
-		"vi":      "vi-VN-HoaiMyNeural",
+	return VoiceForLangAndGender(lang, "female")
+}
+
+// VoiceForLangAndGender returns the Edge TTS voice for a given language and gender.
+func VoiceForLangAndGender(lang, gender string) string {
+	if gender == "male" {
+		if v, ok := maleVoices[lang]; ok {
+			return v
+		}
 	}
-	if v, ok := m[lang]; ok {
+	// female or unknown → use female voice map
+	if v, ok := femaleVoices[lang]; ok {
 		return v
 	}
 	return "zh-CN-XiaoxiaoNeural"
+}
+
+var femaleVoices = map[string]string{
+	"zh-Hans": "zh-CN-XiaoxiaoNeural",
+	"zh-Hant": "zh-TW-HsiaoChenNeural",
+	"zh":      "zh-CN-XiaoxiaoNeural",
+	"en":      "en-US-JennyNeural",
+	"ja":      "ja-JP-NanamiNeural",
+	"ko":      "ko-KR-SunHiNeural",
+	"fr":      "fr-FR-DeniseNeural",
+	"de":      "de-DE-KatjaNeural",
+	"es":      "es-ES-ElviraNeural",
+	"pt":      "pt-BR-FranciscaNeural",
+	"ru":      "ru-RU-SvetlanaNeural",
+	"ar":      "ar-SA-ZariyahNeural",
+	"th":      "th-TH-PremwadeeNeural",
+	"vi":      "vi-VN-HoaiMyNeural",
+}
+
+var maleVoices = map[string]string{
+	"zh-Hans": "zh-CN-YunyangNeural",
+	"zh-Hant": "zh-TW-YunJheNeural",
+	"zh":      "zh-CN-YunyangNeural",
+	"en":      "en-US-GuyNeural",
+	"ja":      "ja-JP-KeitaNeural",
+	"ko":      "ko-KR-InJoonNeural",
+	"fr":      "fr-FR-HenriNeural",
+	"de":      "de-DE-ConradNeural",
+	"es":      "es-ES-AlvaroNeural",
+	"pt":      "pt-BR-AntonioNeural",
+	"ru":      "ru-RU-DmitryNeural",
+	"ar":      "ar-SA-HamedNeural",
+	"th":      "th-TH-NiwatNeural",
+	"vi":      "vi-VN-NamMinhNeural",
 }
 
 // voiceShortNames maps frontend short voice names to Edge TTS voice names.

@@ -52,6 +52,7 @@
   let syncVideo = null;           // the video element being synced to
   let wasPaused = false;          // track pause→play transitions
   let syncLastCleanup = 0;        // last time sliding window cleanup ran
+  let syncPrevActiveItem = null;  // detect activeItem transitions for word highlight reset
   let currentSyncAudio = null;    // (managed by queue, kept for backward compat)
 
   // DOM subtitle observer state
@@ -80,6 +81,7 @@
   // ─── Loading Overlay (shown during warmup, auto-hides on first TTS) ──
   let loadingTarget = null;  // video element to track position for loading overlay
   let loadingRafId = null;   // RAF loop for repositioning loading overlay
+  let subtitlePosRafId = null; // RAF loop for repositioning subtitle overlay over video
 
   const loadingOverlay = document.createElement('div');
   loadingOverlay.id = '__ai_loading_overlay__';
@@ -306,15 +308,13 @@
     <style>
       #__ai_subtitle_overlay__ {
         position: fixed !important;
-        bottom: 100px !important;
-        left: 50% !important;
+        /* top, left, max-width set dynamically via JS to follow video rect */
         transform: translateX(-50%) !important;
         z-index: 2147483647 !important;
         pointer-events: none !important;
         font-family: -apple-system, 'Microsoft YaHei', 'PingFang SC', sans-serif !important;
         text-align: center !important;
         transition: opacity 0.3s !important;
-        max-width: 85vw !important;
       }
       #__ai_subtitle_overlay__ .subtitle-box {
         background: rgba(0, 0, 0, 0.78) !important;
@@ -346,6 +346,14 @@
   `;
   document.body.appendChild(overlay);
   document.body.appendChild(fab);
+
+  // Reposition subtitle on fullscreen change or window resize
+  document.addEventListener('fullscreenchange', function () {
+    if (isRunning) updateSubtitlePosition();
+  });
+  window.addEventListener('resize', function () {
+    if (isRunning) updateSubtitlePosition();
+  });
 
   // FAB click handler
   fab.addEventListener('click', function () {
@@ -448,6 +456,7 @@
       requestAnimationFrame(function () {
         subtitleBox.style.transition = '';
       });
+      startSubtitlePositioning();
     } else {
       subtitleBox.style.opacity = '0';
     }
@@ -457,6 +466,42 @@
     contentDiv._clearTimer = setTimeout(() => {
       subtitleBox.style.opacity = '0';
     }, 5000);
+  }
+
+  function updateSubtitlePosition() {
+    var video = duckedVideo || activeVideo || findVideoElement();
+    if (!video || !video.isConnected) {
+      // Fallback: center bottom of viewport
+      overlay.style.setProperty('bottom', '100px', 'important');
+      overlay.style.setProperty('left', '50%', 'important');
+      overlay.style.setProperty('max-width', '85vw', 'important');
+      return;
+    }
+    var rect = video.getBoundingClientRect();
+    // Place subtitle at the bottom of the video area, centered
+    // Keep at least 60px from the bottom of the viewport to avoid overlapping player controls
+    var bottomFromVideo = window.innerHeight - rect.bottom;
+    var bottom = Math.max(bottomFromVideo + 20, 60);
+    overlay.style.setProperty('bottom', bottom + 'px', 'important');
+    overlay.style.setProperty('left', (rect.left + rect.width / 2) + 'px', 'important');
+    overlay.style.setProperty('max-width', Math.max(300, rect.width * 0.85) + 'px', 'important');
+  }
+
+  function startSubtitlePositioning() {
+    if (subtitlePosRafId) return;
+    function loop() {
+      if (!isRunning) { subtitlePosRafId = null; return; }
+      updateSubtitlePosition();
+      subtitlePosRafId = requestAnimationFrame(loop);
+    }
+    subtitlePosRafId = requestAnimationFrame(loop);
+  }
+
+  function stopSubtitlePositioning() {
+    if (subtitlePosRafId) {
+      cancelAnimationFrame(subtitlePosRafId);
+      subtitlePosRafId = null;
+    }
   }
 
   function escapeHTML(str) {
@@ -1646,6 +1691,7 @@
   function startVideoReplay(video) {
     wasPaused = false;
     syncLastCleanup = 0;
+    syncPrevActiveItem = null;
     syncMode = true;
     syncVideo = video;
     video.playbackRate = 1;
@@ -1660,7 +1706,7 @@
         try {
           item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
           item.audioEl.volume = settings.ttsVolume / 100;
-          item.audioEl.playbackRate = calcLipSyncRate(item);
+          item.audioEl.playbackRate = 1.0;
         } catch (e) {}
       }
     }
@@ -1701,6 +1747,7 @@
 
   function startSyncPlayback() {
     syncLastCleanup = 0;
+    syncPrevActiveItem = null;
     syncVideo = findVideoElement();
     if (!syncVideo) {
       sendStatus('error', '未找到视频元素');
@@ -1713,7 +1760,7 @@
         try {
           item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
           item.audioEl.volume = settings.ttsVolume / 100;
-          item.audioEl.playbackRate = calcLipSyncRate(item);
+          item.audioEl.playbackRate = 1.0;
         } catch (e) {
         }
       }
@@ -1776,6 +1823,8 @@
           showSubtitle(item.original, item.translation);
           if (!syncLoadingHidden) { syncLoadingHidden = true; unduckVideoAudio(); hideLoading(); }
           if (item.audioEl) {
+            // Stop previous TTS immediately so new sentence audio plays on time
+            stopTTS();
             enqueueAudio(item.audioEl, item.audioEl.src);
             item.audioEl = null;
           }
@@ -1804,6 +1853,11 @@
     }
 
     // Word-by-word highlighting for active item
+    if (activeItem !== syncPrevActiveItem) {
+      syncPrevActiveItem = activeItem;
+      // Force re-highlight when transitioning to a new item
+      if (activeItem) activeItem._wordIdx = -2;
+    }
     if (activeItem && activeItem.words && activeItem.words.length > 0) {
       var wordIdx = -1;
       for (var w = 0; w < activeItem.words.length; w++) {
@@ -1832,6 +1886,7 @@
       ttsAudio = null;
       ttsPlaying = false;
     }
+    syncPrevActiveItem = null;  // force re-highlight on next frame
     // Mark all items before currentTime as played, find current one
     let foundCurrent = false;
     for (const item of preprocessedItems) {
@@ -1843,7 +1898,7 @@
           try {
             item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
             item.audioEl.volume = settings.ttsVolume / 100;
-            item.audioEl.playbackRate = calcLipSyncRate(item);
+            item.audioEl.playbackRate = 1.0;
           } catch (e) {}
         }
         foundCurrent = true;
@@ -1906,23 +1961,9 @@
     originalLine.innerHTML = before + '<span style="color:#fbbf24;font-weight:600">' + highlight + '</span>' + after;
   }
 
-  function calcLipSyncRate(item) {
-    if (item.durationMs && item.end > item.start) {
-      var segDurationMs = (item.end - item.start) * 1000;
-      var rate = item.durationMs / segDurationMs;
-      rate = Math.min(2.0, Math.max(0.80, rate));
-      // Adjust for video playback rate
-      if (syncVideo && syncVideo.playbackRate) {
-        rate = rate * syncVideo.playbackRate;
-      }
-      return rate;
-    }
-    return TTS_RATE_FINAL;
-  }
-
   function onVideoRateChange() {
     for (const item of preprocessedItems) {
-      if (item.audioEl) item.audioEl.playbackRate = calcLipSyncRate(item);
+      if (item.audioEl) item.audioEl.playbackRate = 1.0;
     }
   }
 
@@ -2274,6 +2315,7 @@
     isRunning = false;
     fab.classList.remove('running');
     startSent = false;
+    stopSubtitlePositioning();
 
     if (syncMode) {
       stopSyncPlayback();

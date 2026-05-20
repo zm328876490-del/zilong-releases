@@ -10,12 +10,14 @@ import (
 	"html"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,6 +64,7 @@ type Subtitle struct {
 	End           float64            `json:"end"`
 	SkipTranslate bool               `json:"skipTranslate,omitempty"`
 	Words         []asr.WordTimestamp `json:"words,omitempty"`
+	Gender        string             `json:"gender,omitempty"` // "male" / "female" / "" (unknown)
 }
 
 // Pending translations for async Google Translate via browser
@@ -111,8 +114,9 @@ type PreprocessResult struct {
 	Audio       string             `json:"audio,omitempty"`
 	Start       float64            `json:"start"`
 	End         float64            `json:"end"`
-	DurationMs  int                `json:"durationMs,omitempty"` // TTS audio duration (ms), for time-stretch sync
+	DurationMs  int                `json:"durationMs,omitempty"` // TTS audio duration (ms)
 	Words       []asr.WordTimestamp `json:"words,omitempty"`     // per-word timestamps from whisper
+	Gender      string             `json:"gender,omitempty"`    // "male" / "female" / ""
 }
 
 type OutMsg struct {
@@ -355,14 +359,52 @@ func (c *Client) processOfflineASR(samples []int16, sampleRate int) {
 	if speed <= 0 {
 		speed = 1.0
 	}
+	// Collect pitch estimates for global consensus (avoid per-segment flip-flop)
+	type segPitch struct {
+		idx   int
+		pitch float64
+	}
+	var pitches []segPitch
+	for i, s := range segs {
+		p := EstimatePitch(pcmSlice(samples, sampleRate, s.Start, s.End), sampleRate)
+		if p > 0 {
+			pitches = append(pitches, segPitch{idx: i, pitch: p})
+		}
+	}
+
+	// Determine consensus gender: median pitch → male/female
+	// If pitch variance is high (multi-speaker), keep per-segment decisions.
+	consensusGender := ""
+	if len(pitches) >= 2 {
+		sort.Slice(pitches, func(i, j int) bool { return pitches[i].pitch < pitches[j].pitch })
+		medianPitch := pitches[len(pitches)/2].pitch
+
+		var sum, sumSq float64
+		for _, sp := range pitches {
+			sum += sp.pitch
+			sumSq += sp.pitch * sp.pitch
+		}
+		mean := sum / float64(len(pitches))
+		stdDev := math.Sqrt(sumSq/float64(len(pitches)) - mean*mean)
+
+		if stdDev < 35 {
+			consensusGender = classifyPitch(medianPitch)
+		}
+	} else if len(pitches) == 1 {
+		consensusGender = classifyPitch(pitches[0].pitch)
+	}
+
 	subs := make([]Subtitle, len(segs))
 	for i, s := range segs {
-		// Scale word timestamps too
 		words := make([]asr.WordTimestamp, len(s.Words))
 		for j, w := range s.Words {
 			words[j] = asr.WordTimestamp{Word: w.Word, Start: w.Start * speed, End: w.End * speed}
 		}
-		subs[i] = Subtitle{Text: s.Text, Start: s.Start * speed, End: s.End * speed, Words: words}
+		gender := consensusGender
+		if gender == "" {
+			gender = DetectGender(pcmSlice(samples, sampleRate, s.Start, s.End), sampleRate)
+		}
+		subs[i] = Subtitle{Text: s.Text, Start: s.Start * speed, End: s.End * speed, Words: words, Gender: gender}
 	}
 	log.Printf("[offline-asr] speed=%.1fx, sending %d subs to frontend", speed, len(subs))
 	c.sendJSON(OutMsg{Type: "offline_asr_result", Subs: subs})
@@ -406,16 +448,16 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 		return
 	}
 
-	subs = mergeSubtitles(subs)
+	subs = splitSubtitlesIntoSentences(subs)
 	if len(subs) == 0 {
 		c.sendJSON(OutMsg{Type: "preprocess_error", Message: "No subtitles to process"})
 		return
 	}
 
-	log.Printf("[preprocess] %d subtitles after merge", len(subs))
+	log.Printf("[preprocess] %d subtitles", len(subs))
 	c.sendJSON(OutMsg{Type: "preprocess_start", Total: len(subs)})
 
-	voice := tts.ResolveVoice(c.ttsVoice, c.targetLang)
+	voice := tts.ResolveVoice(c.ttsVoice, c.targetLang) // fallback default
 	from := c.sourceLang
 	to := c.targetLang
 
@@ -479,7 +521,11 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 		defer wg.Done()
 		ttsJobSem <- struct{}{}
 		defer func() { <-ttsJobSem }()
-		audio, err := tts.Synthesize(translation, voice)
+		itemVoice := voice
+			if subs[idx].Gender != "" {
+				itemVoice = tts.VoiceForLangAndGender(c.targetLang, subs[idx].Gender)
+			}
+			audio, err := tts.Synthesize(translation, itemVoice)
 		if err != nil {
 			audio = ""
 		}
@@ -492,6 +538,7 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 			End:         subs[idx].End,
 			DurationMs:  tts.EstimateMP3DurationFromBase64(audio),
 			Words:       subs[idx].Words,
+			Gender:      subs[idx].Gender,
 		}
 		mu.Lock()
 		batch = append(batch, item)
@@ -562,6 +609,125 @@ func mergeSubtitles(subs []Subtitle) []Subtitle {
 		out = append(out, cur)
 	}
 	return out
+}
+
+// splitSubtitlesIntoSentences splits each subtitle with word timestamps into
+// individual sentences. Subtitle without words stay as-is.
+func splitSubtitlesIntoSentences(subs []Subtitle) []Subtitle {
+	var out []Subtitle
+	for _, sub := range subs {
+		sentences := splitWordsToSentenceGroups(sub.Words)
+		if len(sentences) <= 1 {
+			out = append(out, sub)
+			continue
+		}
+		for _, words := range sentences {
+			text := joinWordsToText(words)
+			if len(strings.TrimSpace(text)) < 2 {
+				continue
+			}
+			out = append(out, Subtitle{
+				Text:   text,
+				Start:  words[0].Start,
+				End:    words[len(words)-1].End,
+				Words:  words,
+				Gender: sub.Gender,
+			})
+		}
+	}
+	return out
+}
+
+// splitWordsToSentenceGroups splits words by sentence-ending punctuation.
+// A sentence ends when a word's last character is one of: . ! ? 。！？
+// Groups with fewer than 3 words are merged into the next group to avoid
+// subtitle flicker from fragments like "Thank you."
+func splitWordsToSentenceGroups(words []asr.WordTimestamp) [][]asr.WordTimestamp {
+	if len(words) == 0 {
+		return nil
+	}
+	var groups [][]asr.WordTimestamp
+	var cur []asr.WordTimestamp
+	for _, w := range words {
+		cur = append(cur, w)
+		if endsWithSentencePunct(w.Word) {
+			groups = append(groups, cur)
+			cur = nil
+		}
+	}
+	if len(cur) > 0 {
+		if len(groups) > 0 {
+			groups[len(groups)-1] = append(groups[len(groups)-1], cur...)
+		} else {
+			groups = append(groups, cur)
+		}
+	}
+	// Merge short fragments (< 3 words) into the next group
+	if len(groups) > 1 {
+		var merged [][]asr.WordTimestamp
+		i := 0
+		for i < len(groups) {
+			g := groups[i]
+			for len(g) < 3 && i+1 < len(groups) {
+				i++
+				g = append(g, groups[i]...)
+			}
+			merged = append(merged, g)
+			i++
+		}
+		return merged
+	}
+	return groups
+}
+
+func endsWithSentencePunct(s string) bool {
+	if s == "" {
+		return false
+	}
+	return isSentenceEndPunct([]rune(s)[len([]rune(s))-1])
+}
+
+// joinWordsToText joins word tokens into a natural-language sentence.
+func joinWordsToText(words []asr.WordTimestamp) string {
+	if len(words) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, w := range words {
+		if i > 0 && needsWordSpace(words[i-1].Word, w.Word) {
+			b.WriteByte(' ')
+		}
+		b.WriteString(w.Word)
+	}
+	return b.String()
+}
+
+func needsWordSpace(prev, next string) bool {
+	if prev == "" || next == "" {
+		return false
+	}
+	prevRunes := []rune(prev)
+	nextRunes := []rune(next)
+	prevLast := prevRunes[len(prevRunes)-1]
+	nextFirst := nextRunes[0]
+	prevASCII := prevLast <= 127
+	nextASCII := nextFirst <= 127
+	// Space between two ASCII words (e.g. English), but not before/after CJK
+	if prevASCII && nextASCII &&
+		((prevLast >= 'a' && prevLast <= 'z') || (prevLast >= 'A' && prevLast <= 'Z')) &&
+		((nextFirst >= 'a' && nextFirst <= 'z') || (nextFirst >= 'A' && nextFirst <= 'Z')) {
+		return true
+	}
+	// Space after sentence-ending punctuation followed by an ASCII letter
+	if isSentenceEndPunct(prevLast) &&
+		((nextFirst >= 'a' && nextFirst <= 'z') || (nextFirst >= 'A' && nextFirst <= 'Z')) {
+		return true
+	}
+	return false
+}
+
+func isSentenceEndPunct(r rune) bool {
+	return r == '.' || r == '!' || r == '?' || r == '。' || r == '！' || r == '？'
 }
 
 // ─── WebSocket handler ────────────────────────────────────────────────
