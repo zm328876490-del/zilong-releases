@@ -1887,11 +1887,10 @@
       ttsPlaying = false;
     }
     syncPrevActiveItem = null;  // force re-highlight on next frame
-    // Mark all items before currentTime as played, find current one
-    let foundCurrent = false;
+    // Reset all items at or after currentTime for replay on loop/seek
     for (const item of preprocessedItems) {
       item._wordIdx = -1;
-      if (!foundCurrent && currentTime < item.end) {
+      if (currentTime < item.end) {
         item.played = false; // re-trigger for display
         // Re-create Audio element on loop (it was consumed and set to null)
         if (!item.audioEl && item.audio) {
@@ -1901,7 +1900,6 @@
             item.audioEl.playbackRate = 1.0;
           } catch (e) {}
         }
-        foundCurrent = true;
       } else {
         item.played = true;
       }
