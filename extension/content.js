@@ -53,6 +53,7 @@
   let currentSessionId = '';     // unique per video session, echoed by backend for validation
   let processGeneration = 0;     // incremented on cleanup, prevents stale preprocess results
   let activeProcessGeneration = 0; // generation when current preprocess was sent
+  let waitingPreprocess = false;  // true between sending preprocess and receiving preprocess_complete/error
 
   function generateSessionId() {
     return 's_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
@@ -1265,7 +1266,7 @@
           }
           for (var k = 0; k < videos.length; k++) {
             var v = videos[k];
-            if (v !== activeVideo && isRunning) {
+            if (v !== activeVideo && isRunning && !waitingPreprocess) {
               if (!didCleanup) { cleanupDisplayState(); didCleanup = true; }
               tryResumeOrCapture(v);
             }
@@ -1279,14 +1280,14 @@
           if (removed === activeVideo || (removed.contains && removed.contains(activeVideo)) ||
               removed === syncVideo || (removed.contains && removed.contains(syncVideo)) ||
               removed === offlineVideo || (removed.contains && removed.contains(offlineVideo))) {
-            if (!didCleanup) {
+            if (!didCleanup && !waitingPreprocess) {
               cleanupDisplayState();
               didCleanup = true;
             }
             if (removed === activeVideo || (removed.contains && removed.contains(activeVideo))) {
               activeVideo = null;
             }
-            if (removed === offlineVideo || (removed.contains && removed.contains(offlineVideo))) {
+            if ((removed === offlineVideo || (removed.contains && removed.contains(offlineVideo))) && !waitingPreprocess) {
               cleanupOffline();
             }
           }
@@ -1307,15 +1308,13 @@
       if (!video) return;
 
       if (!activeVideo) {
-        tryResumeOrCapture(video);
+        if (!waitingPreprocess) tryResumeOrCapture(video);
       } else if (activeVideo !== video) {
         // Different video element — destroy old display state before switching
-        cleanupDisplayState();
-        tryResumeOrCapture(video);
+        if (!waitingPreprocess) { cleanupDisplayState(); tryResumeOrCapture(video); }
       } else if (activeVideo.src !== activeVideo._lastSrc) {
         // Same element, different source — new video content, destroy old state
-        cleanupDisplayState();
-        tryResumeOrCapture(video);
+        if (!waitingPreprocess) { cleanupDisplayState(); tryResumeOrCapture(video); }
       } else if (activeStream) {
         // Detect ended tracks (video finished/looped) — re-capture to revive
         var tracks = activeStream.getAudioTracks();
@@ -1520,6 +1519,7 @@
       // In sync mode: send preprocess right after config (server processes sequentially)
       if (syncMode && pendingSubs) {
         activeProcessGeneration = processGeneration;
+        waitingPreprocess = true;
         sendWS({
           type: 'preprocess',
           subs: pendingSubs,
@@ -1642,6 +1642,7 @@
 
       case 'preprocess_complete':
         if (activeProcessGeneration !== processGeneration) break; // stale results from previous video
+        waitingPreprocess = false;
         // Save to IndexedDB cache (always, even during early replay)
         if (offlineVideo) {
           savePreprocessedToCache(offlineVideo, preprocessedItems);
@@ -1668,6 +1669,7 @@
           updateLoadingText('模型推理中...', '已处理 ' + msg.subs.length + ' 个片段');
           sendStatus('preprocessing', '模型推理中...');
           activeProcessGeneration = processGeneration;
+          waitingPreprocess = true;
           sendWS({ type: 'preprocess', subs: msg.subs });
         } else {
           sendStatus('error', '离线 ASR 未识别到字幕');
@@ -1676,6 +1678,7 @@
         break;
 
       case 'preprocess_error':
+        waitingPreprocess = false;
         sendStatus('error', msg.message);
         cleanupOffline();
         break;
@@ -1988,6 +1991,28 @@
 
     var now = syncVideo.currentTime;
     var paused = syncVideo.paused;
+
+    // Initial render: show first subtitle + hide loading even if video hasn't
+    // started playing yet (browser autoplay policy may block video.play()).
+    if (!syncLoadingHidden && preprocessedItems.length > 0) {
+      for (const item of preprocessedItems) {
+        if (now >= item.start && now < item.end) {
+          if (!item.played) {
+            item.played = true;
+            showSubtitle(item.original, item.translation);
+            syncLoadingHidden = true;
+            unduckVideoAudio();
+            hideLoading();
+            if (item.audioEl) {
+              stopTTS();
+              enqueueAudio(item.audioEl, item.audioEl.src);
+              item.audioEl = null;
+            }
+          }
+          break;
+        }
+      }
+    }
 
     // Video paused — pause TTS, keep position
     if (paused && !wasPaused) {
@@ -2329,6 +2354,11 @@
       offlineVideo._offlineTimeUpdateHandler = null;
     }
 
+    // Stop the video immediately after recording completes
+    if (offlineVideo) {
+      try { offlineVideo.pause(); } catch (_) {}
+    }
+
     updateLoadingText('神经网络处理中...', '正在提取特征向量');
 
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -2461,6 +2491,7 @@
     lastSpokenText = '';
     currentUtteranceId = '';
     currentSessionId = generateSessionId();
+    waitingPreprocess = false;
     processGeneration++;
   }
 
@@ -2483,6 +2514,7 @@
     syncLoadingHidden = false;
     startSent = false;
     syncMode = false;
+    waitingPreprocess = false;
     subtitleMode = false;
     pendingSubs = null;
     if (!currentSessionId) currentSessionId = generateSessionId();
