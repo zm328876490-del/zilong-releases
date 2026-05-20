@@ -51,6 +51,7 @@
   let lastSyncTime = 0;           // last video.currentTime
   let syncVideo = null;           // the video element being synced to
   let wasPaused = false;          // track pause→play transitions
+  let syncLastCleanup = 0;        // last time sliding window cleanup ran
   let currentSyncAudio = null;    // (managed by queue, kept for backward compat)
 
   // DOM subtitle observer state
@@ -74,7 +75,7 @@
   let offlineProcessor = null;    // ScriptProcessor for offline PCM capture
   let offlineSavedRate = 1;       // saved playbackRate before speed-up
   let offlineSavedVolume = 1;     // saved volume before mute
-  const OFFLINE_SPEED = 3.0;      // playback speed during recording phase (3x faster collection)
+  const OFFLINE_SPEED = 2.0;      // playback speed during recording phase (2x faster collection)
 
   // ─── Loading Overlay (shown during warmup, auto-hides on first TTS) ──
   let loadingTarget = null;  // video element to track position for loading overlay
@@ -559,15 +560,23 @@
     enqueueAudio(audio, url);
   }
 
-  function stopTTS() {
-    // Only clear queued items, leave currently playing audio alone.
-    // The current utterance's audio will finish naturally and playNextInQueue
-    // will pick up the next queued item (from the new utterance).
+  function stopTTS(all) {
+    // Stop currently playing audio immediately
+    if (ttsAudio) {
+      try { ttsAudio.pause(); } catch (_) {}
+      ttsAudio = null;
+      ttsAudioUrl = null;
+    }
+    // Clear queued items
     for (const item of ttsQueue) {
       URL.revokeObjectURL(item.url);
+      if (item.audio) {
+        try { item.audio.pause(); } catch (_) {}
+      }
     }
     ttsQueue = [];
     ttsFallbackChunks = [];
+    ttsPlaying = false;
   }
 
   // ─── Streaming TTS handlers (queue-based, no MSE) ─────────────────
@@ -1376,21 +1385,29 @@
           for (const item of msg.items) {
             preprocessedItems.push(item);
           }
-          // Sort by index to maintain correct order
           preprocessedItems.sort((a, b) => a.index - b.index);
+          // Early replay: start playback as soon as first batch is ready
+          if (msg.ready && !syncRafId && offlineMode && offlineVideo) {
+            updateLoadingText('首批就绪', '正在启动回放...');
+            sendStatus('playing');
+            startVideoReplay(offlineVideo);
+          }
         }
         break;
 
       case 'preprocess_complete':
-        sendStatus('playing');
-        // Save to IndexedDB cache for future page loads
+        // Save to IndexedDB cache (always, even during early replay)
         if (offlineVideo) {
           savePreprocessedToCache(offlineVideo, preprocessedItems);
         }
-        if (offlineMode && offlineVideo) {
-          startVideoReplay(offlineVideo);
-        } else {
-          startSyncPlayback();
+        // Start replay if not already started by early batch
+        if (!syncRafId) {
+          sendStatus('playing');
+          if (offlineMode && offlineVideo) {
+            startVideoReplay(offlineVideo);
+          } else {
+            startSyncPlayback();
+          }
         }
         break;
 
@@ -1628,6 +1645,7 @@
 
   function startVideoReplay(video) {
     wasPaused = false;
+    syncLastCleanup = 0;
     syncMode = true;
     syncVideo = video;
     video.playbackRate = 1;
@@ -1682,6 +1700,7 @@
   }
 
   function startSyncPlayback() {
+    syncLastCleanup = 0;
     syncVideo = findVideoElement();
     if (!syncVideo) {
       sendStatus('error', '未找到视频元素');
@@ -1762,6 +1781,25 @@
           }
         }
         break;
+      }
+    }
+
+    // Sliding window: periodically trim played items behind current position
+    if (!syncLastCleanup || currentTime - syncLastCleanup > 5) {
+      syncLastCleanup = currentTime;
+      var keepFrom = currentTime - 15; // keep items within 15s behind
+      var firstKept = 0;
+      for (var ci = 0; ci < preprocessedItems.length; ci++) {
+        if (preprocessedItems[ci].end > keepFrom) { firstKept = ci; break; }
+        // Release audio resources for old items
+        if (preprocessedItems[ci].audioEl) {
+          try { preprocessedItems[ci].audioEl.pause(); } catch (_) {}
+          preprocessedItems[ci].audioEl = null;
+        }
+        preprocessedItems[ci].audio = null; // free base64 string
+      }
+      if (firstKept > 0) {
+        preprocessedItems.splice(0, firstKept);
       }
     }
 
@@ -2250,6 +2288,8 @@
     disconnectWebSocket();
     destroyPipeline();
     stopTTS();
+    // Clear subtitles instantly (no transition)
+    if (subtitleBox) { subtitleBox.style.transition = 'none'; subtitleBox.style.opacity = '0'; }
     contentDiv.innerHTML = '';
     subtitleBox = null;
     originalLine = null;

@@ -479,6 +479,179 @@ func parseVerboseJSON(raw string) ([]SubtitleSegment, error) {
 	return segs, nil
 }
 
+// ─── Chunked offline ASR (long audio) ──────────────────────────────────
+
+const (
+	chunkWindowSec = 30 // seconds per whisper window
+	chunkOverlap   = 5  // seconds overlap between adjacent windows
+	chunkMaxConcur = 2  // max parallel whisper calls
+)
+
+// ProcessOfflineFullChunked splits a long PCM buffer into overlapping windows,
+// processes each with whisper, and merges the results with deduplication.
+func ProcessOfflineFullChunked(samples []int16, serverURL, language string, sampleRate int) ([]SubtitleSegment, error) {
+	if serverURL == "" {
+		return nil, fmt.Errorf("no whisper server URL")
+	}
+	if len(samples) == 0 {
+		return nil, fmt.Errorf("empty audio")
+	}
+	if sampleRate <= 0 {
+		sampleRate = 48000
+	}
+
+	totalSec := float64(len(samples)) / float64(sampleRate)
+	log.Printf("[chunked-asr] total duration: %.1fs, splitting into %ds windows with %ds overlap",
+		totalSec, chunkWindowSec, chunkOverlap)
+
+	// Short audio — use single-shot
+	if totalSec <= float64(chunkWindowSec+chunkOverlap) {
+		return ProcessOfflineFull(samples, serverURL, language, sampleRate)
+	}
+
+	windowSamples := sampleRate * chunkWindowSec
+	stepSamples := sampleRate * (chunkWindowSec - chunkOverlap)
+
+	// Build window boundaries
+	type window struct {
+		idx       int
+		start     int
+		end       int
+		timeStart float64 // offset in original audio timeline (seconds)
+	}
+	var windows []window
+	for start := 0; ; start += stepSamples {
+		end := start + windowSamples
+		if end > len(samples) {
+			end = len(samples)
+		}
+		windows = append(windows, window{
+			idx:       len(windows),
+			start:     start,
+			end:       end,
+			timeStart: float64(start) / float64(sampleRate),
+		})
+		if end >= len(samples) {
+			break
+		}
+	}
+	log.Printf("[chunked-asr] %d windows to process", len(windows))
+
+	// Process windows (limited concurrency)
+	type result struct {
+		idx  int
+		segs []SubtitleSegment
+		err  error
+	}
+	results := make([]result, len(windows))
+	sem := make(chan struct{}, chunkMaxConcur)
+	var wg sync.WaitGroup
+
+	for i, w := range windows {
+		wg.Add(1)
+		go func(wi window, idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			chunk := make([]int16, wi.end-wi.start)
+			copy(chunk, samples[wi.start:wi.end])
+			segs, err := ProcessOfflineFull(chunk, serverURL, language, sampleRate)
+			// Shift timestamps to original timeline
+			for s := range segs {
+				segs[s].Start += wi.timeStart
+				segs[s].End += wi.timeStart
+				for w := range segs[s].Words {
+					segs[s].Words[w].Start += wi.timeStart
+					segs[s].Words[w].End += wi.timeStart
+				}
+			}
+			results[idx] = result{idx: idx, segs: segs, err: err}
+			if err != nil {
+				log.Printf("[chunked-asr] window %d/%d error: %v", idx+1, len(windows), err)
+			} else {
+				log.Printf("[chunked-asr] window %d/%d done: %d segments", idx+1, len(windows), len(segs))
+			}
+		}(w, i)
+	}
+	wg.Wait()
+
+	// Merge results with deduplication
+	var allSegs []SubtitleSegment
+	for _, r := range results {
+		if r.err != nil {
+			continue // skip failed windows, keep partial results
+		}
+		for _, seg := range r.segs {
+			// Check overlap with last merged segment
+			if len(allSegs) > 0 {
+				last := &allSegs[len(allSegs)-1]
+				overlapStart := last.End - float64(chunkOverlap)
+				if overlapStart < 0 {
+					overlapStart = 0
+				}
+				// If this segment starts within the overlap zone of the last segment,
+				// and their texts are similar, skip it (dedup)
+				if seg.Start < last.End && seg.Start >= overlapStart {
+					if isSimilarText(seg.Text, last.Text) {
+						// Extend last segment if this one ends later
+						if seg.End > last.End {
+							last.End = seg.End
+							last.Text = seg.Text
+							last.Words = seg.Words
+						}
+						continue
+					}
+				}
+			}
+			allSegs = append(allSegs, seg)
+		}
+	}
+
+	log.Printf("[chunked-asr] merged: %d total segments from %d windows", len(allSegs), len(windows))
+	return allSegs, nil
+}
+
+// isSimilarText checks if two strings are similar enough to be considered
+// duplicate across overlapping windows. Uses simple edit-distance heuristic.
+func isSimilarText(a, b string) bool {
+	if a == b {
+		return true
+	}
+	// Normalize: lowercase, trim whitespace
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == b {
+		return true
+	}
+	// Check if one contains the other (common in overlapping windows)
+	if len(a) > 0 && len(b) > 0 {
+		if strings.Contains(a, b) || strings.Contains(b, a) {
+			return true
+		}
+	}
+	// Check character overlap ratio
+	ra := []rune(a)
+	rb := []rune(b)
+	if len(ra) == 0 || len(rb) == 0 {
+		return false
+	}
+	common := 0
+	for _, ca := range ra {
+		for _, cb := range rb {
+			if ca == cb {
+				common++
+				break
+			}
+		}
+	}
+	ratio := float64(common) / float64(len(ra))
+	if float64(common)/float64(len(rb)) > ratio {
+		ratio = float64(common) / float64(len(rb))
+	}
+	return ratio > 0.7
+}
+
 // pcmToWav converts raw PCM int16 samples to a WAV byte slice.
 func pcmToWav(samples []int16, sampleRate int) ([]byte, error) {
 	var buf bytes.Buffer

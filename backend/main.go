@@ -134,6 +134,7 @@ type OutMsg struct {
 	Items       []PreprocessResult `json:"items,omitempty"`
 	Subs        []Subtitle         `json:"subs,omitempty"`
 	Total       int                `json:"total,omitempty"`
+	Ready       bool               `json:"ready,omitempty"` // first batch ready for early replay
 	UtteranceId string             `json:"utteranceId,omitempty"` // ties audio_start/chunk/end to a specific utterance
 	TtsPartial   bool               `json:"ttsPartial,omitempty"`   // true = fast partial TTS, false = final
 }
@@ -323,7 +324,15 @@ func (c *Client) processOfflineASR(samples []int16, sampleRate int) {
 		return
 	}
 
-	segs, err := asr.ProcessOfflineFull(samples, whisperServerURL, c.sourceLang, sampleRate)
+	// Short audio (< 60s): use full-file whisper to avoid chunking overhead / errors
+	var segs []asr.SubtitleSegment
+	var err error
+	audioDuration := float64(len(samples)) / float64(sampleRate)
+	if audioDuration < 60 {
+		segs, err = asr.ProcessOfflineFull(samples, whisperServerURL, c.sourceLang, sampleRate)
+	} else {
+		segs, err = asr.ProcessOfflineFullChunked(samples, whisperServerURL, c.sourceLang, sampleRate)
+	}
 	if err != nil {
 		c.sendJSON(OutMsg{Type: "error", Message: fmt.Sprintf("离线 ASR 失败: %v", err)})
 		return
@@ -433,57 +442,99 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 	}
 	wg.Wait()
 
-	// Phase 2: concurrent TTS + streaming results back
+	// Phase 2: concurrent TTS with early replay
+	// Collect indices that need TTS
+	type ttsJob struct {
+		idx         int
+		translation string
+	}
+	var jobs []ttsJob
+	for i, trans := range translated {
+		if trans != "" {
+			jobs = append(jobs, ttsJob{idx: i, translation: trans})
+		}
+	}
+	total := len(jobs)
+	if total == 0 {
+		c.sendJSON(OutMsg{Type: "preprocess_complete"})
+		return
+	}
+
+	// Decide early-replay batch size: ~10 items or 20% of total, whichever is larger
+	firstBatchSize := 10
+	if pct := total / 5; pct > firstBatchSize {
+		firstBatchSize = pct
+	}
+	if firstBatchSize > total {
+		firstBatchSize = total
+	}
+
+	ttsJobSem := make(chan struct{}, 3) // concurrent TTS limit
 	var mu sync.Mutex
 	var batch []PreprocessResult
 	completed := 0
-	total := 0
+	firstBatchSent := false
 
-	for i, trans := range translated {
-		if trans == "" {
-			continue
+	processJob := func(idx int, translation string) {
+		defer wg.Done()
+		ttsJobSem <- struct{}{}
+		defer func() { <-ttsJobSem }()
+		audio, err := tts.Synthesize(translation, voice)
+		if err != nil {
+			audio = ""
 		}
-		total++
-		wg.Add(1)
-		go func(idx int, translation string) {
-			defer wg.Done()
-			var audio string
-			var err error
-			audio, err = tts.Synthesize(translation, voice)
-			if err != nil {
-			}
-			item := PreprocessResult{
-				Index:       idx,
-				Original:    subs[idx].Text,
-				Translation: translation,
-				Audio:       audio,
-				Start:       subs[idx].Start,
-				End:         subs[idx].End,
-				DurationMs:  tts.EstimateMP3DurationFromBase64(audio),
-				Words:       subs[idx].Words,
-			}
-			mu.Lock()
-			batch = append(batch, item)
-			completed++
-			if len(batch) >= 3 || completed == total {
-				c.sendJSON(OutMsg{Type: "preprocess_result", Items: batch})
-				batch = nil
-			}
-			mu.Unlock()
-		}(i, trans)
+		item := PreprocessResult{
+			Index:       idx,
+			Original:    subs[idx].Text,
+			Translation: translation,
+			Audio:       audio,
+			Start:       subs[idx].Start,
+			End:         subs[idx].End,
+			DurationMs:  tts.EstimateMP3DurationFromBase64(audio),
+			Words:       subs[idx].Words,
+		}
+		mu.Lock()
+		batch = append(batch, item)
+		completed++
+		// Send first batch immediately when it fills up
+		if !firstBatchSent && len(batch) >= firstBatchSize {
+			c.sendJSON(OutMsg{Type: "preprocess_result", Items: batch, Ready: true})
+			batch = nil
+			firstBatchSent = true
+		} else if firstBatchSent && len(batch) >= 3 {
+			c.sendJSON(OutMsg{Type: "preprocess_result", Items: batch})
+			batch = nil
+		} else if completed == total && len(batch) > 0 {
+			// Don't send here, will send after wg.Wait()
+		}
+		mu.Unlock()
 	}
+
+	// Process first batch with priority (to send Ready ASAP)
+	for i := 0; i < firstBatchSize && i < len(jobs); i++ {
+		wg.Add(1)
+		go processJob(jobs[i].idx, jobs[i].translation)
+	}
+
+	// Process remaining jobs
+	for i := 0; i < len(jobs); i++ {
+		if i < firstBatchSize {
+			continue // already started
+		}
+		wg.Add(1)
+		go processJob(jobs[i].idx, jobs[i].translation)
+	}
+
 	wg.Wait()
 
+	// Send any remaining batch
+	mu.Lock()
 	if len(batch) > 0 {
 		c.sendJSON(OutMsg{Type: "preprocess_result", Items: batch})
 	}
+	mu.Unlock()
 
-	transCount := 0
-	for _, t := range translated {
-		if t != "" {
-			transCount++
-		}
-	}
+	transCount := total
 	log.Printf("[preprocess] done: %d subtitles, %d translated, %d items with audio/TTS", len(subs), transCount, total)
 	c.sendJSON(OutMsg{Type: "preprocess_complete"})
 }
