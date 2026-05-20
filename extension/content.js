@@ -27,6 +27,9 @@
   let activeStream = null;      // current captureStream() MediaStream
   let videoWatcher = null;      // persistent MutationObserver for video elements
   let videoPollTimer = null;    // periodic check for video src changes / new videos
+  let urlWatchTimer = null;     // periodic URL change detection (SPA navigation)
+  let lastUrl = location.href;  // tracked for SPA navigation detection
+  let urlWatcherBusy = false;  // prevent overlapping async auto-resume calls
 
   // Settings (updated via popup messages)
   let settings = {
@@ -47,6 +50,32 @@
   let syncMode = false;           // true = subtitle sync mode, false = ASR mode
   let pendingSubs = null;         // extracted subtitles waiting for WS to connect
   let preprocessedItems = [];     // [{original, translation, audioB64, start, end, played, audioEl}]
+  let currentSessionId = '';     // unique per video session, echoed by backend for validation
+  let processGeneration = 0;     // incremented on cleanup, prevents stale preprocess results
+  let activeProcessGeneration = 0; // generation when current preprocess was sent
+
+  function generateSessionId() {
+    return 's_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+  }
+
+  function sendWS(msg) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    msg.sessionId = currentSessionId;
+    ws.send(JSON.stringify(msg));
+  }
+
+  function syncSessionToBackend() {
+    // Update backend's sessionId so streaming ASR results match currentSessionId
+    sendWS({
+      type: 'config',
+      sourceLang: settings.sourceLang,
+      targetLang: settings.targetLang,
+      apiKey: settings.apiKey,
+      region: settings.region,
+      engine: settings.engine,
+      ttsVoice: settings.ttsVoice,
+    });
+  }
   let syncRafId = null;           // requestAnimationFrame ID
   let lastSyncTime = 0;           // last video.currentTime
   let syncVideo = null;           // the video element being synced to
@@ -694,24 +723,24 @@
             return Array.isArray(seg) ? (seg[0] || '') : '';
           }).join('');
         }
-        ws.send(JSON.stringify({
+        sendWS({
           type: 'translate_response',
           id: msg.id,
           translation: translation,
-        }));
+        });
       } else {
-        ws.send(JSON.stringify({
+        sendWS({
           type: 'translate_response',
           id: msg.id,
           error: 'HTTP ' + resp.status,
-        }));
+        });
       }
     } catch (e) {
-      ws.send(JSON.stringify({
+      sendWS({
         type: 'translate_response',
         id: msg.id,
         error: e.message,
-      }));
+      });
     }
   }
 
@@ -898,7 +927,7 @@
         lastDOMSubtitle = text;
         var skip = isTargetLanguage(text, settings.targetLang);
         showSubtitle(skip ? null : text, skip ? text : null);
-        ws.send(JSON.stringify({ type: 'subtitle', text: text, skipTranslate: skip }));
+        sendWS({ type: 'subtitle', text: text, skipTranslate: skip });
       }
     }
 
@@ -1222,6 +1251,7 @@
     videoWatcher = new MutationObserver(function (mutations) {
       for (var i = 0; i < mutations.length; i++) {
         var m = mutations[i];
+        var didCleanup = false;
 
         // Detect newly added video elements
         for (var j = 0; j < m.addedNodes.length; j++) {
@@ -1235,22 +1265,30 @@
           }
           for (var k = 0; k < videos.length; k++) {
             var v = videos[k];
-            if (v.duration > 0 && !v.paused && v !== activeVideo && isRunning) {
-              captureVideoAudio(v);
-              return;
+            if (v !== activeVideo && isRunning) {
+              if (!didCleanup) { cleanupDisplayState(); didCleanup = true; }
+              tryResumeOrCapture(v);
             }
           }
         }
 
-        // Detect removed video elements — stop translation on swipe/scroll
+        // Detect removed video elements — soft cleanup on swipe/scroll (keep running)
         for (var r = 0; r < m.removedNodes.length; r++) {
           var removed = m.removedNodes[r];
           if (removed.nodeType !== 1) continue;
           if (removed === activeVideo || (removed.contains && removed.contains(activeVideo)) ||
               removed === syncVideo || (removed.contains && removed.contains(syncVideo)) ||
               removed === offlineVideo || (removed.contains && removed.contains(offlineVideo))) {
-            stop();
-            return;
+            if (!didCleanup) {
+              cleanupDisplayState();
+              didCleanup = true;
+            }
+            if (removed === activeVideo || (removed.contains && removed.contains(activeVideo))) {
+              activeVideo = null;
+            }
+            if (removed === offlineVideo || (removed.contains && removed.contains(offlineVideo))) {
+              cleanupOffline();
+            }
           }
         }
       }
@@ -1269,11 +1307,15 @@
       if (!video) return;
 
       if (!activeVideo) {
-        captureVideoAudio(video);
+        tryResumeOrCapture(video);
       } else if (activeVideo !== video) {
-        captureVideoAudio(video);
+        // Different video element — destroy old display state before switching
+        cleanupDisplayState();
+        tryResumeOrCapture(video);
       } else if (activeVideo.src !== activeVideo._lastSrc) {
-        captureVideoAudio(video);
+        // Same element, different source — new video content, destroy old state
+        cleanupDisplayState();
+        tryResumeOrCapture(video);
       } else if (activeStream) {
         // Detect ended tracks (video finished/looped) — re-capture to revive
         var tracks = activeStream.getAudioTracks();
@@ -1291,6 +1333,159 @@
     }
     clearInterval(videoPollTimer);
     videoPollTimer = null;
+  }
+
+  function startUrlWatcher() {
+    if (urlWatchTimer) return;
+    lastUrl = location.href;
+    urlWatchTimer = setInterval(function () {
+      if (location.href === lastUrl || urlWatcherBusy) return;
+
+      var prevUrl = lastUrl;
+      lastUrl = location.href;
+
+      urlWatcherBusy = true;
+
+      if (isRunning) {
+        // Save current state before navigating away
+        if (preprocessedItems.length > 0) {
+          var saveVideo = offlineVideo || syncVideo || findVideoElement();
+          if (saveVideo) {
+            savePreprocessedToCache(saveVideo, preprocessedItems, prevUrl);
+          }
+        }
+
+        // Fully clean up current session
+        stopDOMSubtitleObserver();
+        cleanupOffline();
+        cleanupDisplayState();
+        disconnectWebSocket();
+        destroyPipeline();
+        finishWarmup();
+        isRunning = false;
+        fab.classList.remove('running');
+      }
+
+      // Always try auto-resume — user may have navigated back to a cached video
+      tryAutoResume().catch(function () {}).finally(function () {
+        urlWatcherBusy = false;
+      });
+    }, 1000);
+  }
+
+  function stopUrlWatcher() {
+    clearInterval(urlWatchTimer);
+    urlWatchTimer = null;
+  }
+
+  async function tryAutoResume() {
+    var video = findVideoElement();
+    if (!video) {
+      isRunning = false;
+      fab.classList.remove('running');
+      chrome.runtime.sendMessage({ type: 'stopped' }).catch(function () {});
+      return;
+    }
+
+    // Wait for metadata if not loaded yet (same reason as tryResumeOrCapture)
+    if (video.readyState === 0) {
+      var _tripped = false;
+      video.addEventListener('loadedmetadata', function () {
+        if (_tripped) return; _tripped = true;
+        tryAutoResume();
+      }, { once: true });
+      setTimeout(function () {
+        if (!_tripped) { _tripped = true; isRunning = false; fab.classList.remove('running'); }
+      }, 5000);
+      return;
+    }
+
+    if (isLiveStream(video) || video.duration <= 0) {
+      isRunning = false;
+      fab.classList.remove('running');
+      chrome.runtime.sendMessage({ type: 'stopped' }).catch(function () {});
+      return;
+    }
+
+    var cached = await loadPreprocessedFromCache(video);
+    if (!cached || cached.length === 0) {
+      isRunning = false;
+      fab.classList.remove('running');
+      chrome.runtime.sendMessage({ type: 'stopped' }).catch(function () {});
+      return;
+    }
+
+    // Cache hit — auto-resume playback
+    preprocessedItems = cached;
+    offlineMode = true;
+    offlineVideo = video;
+    syncMode = true;
+    isRunning = true;
+    fab.classList.add('running');
+    updateLoadingText('本地缓存匹配', '即时加载');
+    sendStatus('playing');
+    startVideoReplay(video);
+    syncSessionToBackend();
+    startVideoWatcher();
+    startUrlWatcher();
+  }
+
+  // tryResumeOrCapture checks IndexedDB cache for a newly-detected video.
+  // Cache hit → resume playback. Cache miss → capture ASR audio.
+  async function tryResumeOrCapture(video) {
+    if (!video) {
+      captureVideoAudio(video);
+      syncSessionToBackend();
+      return;
+    }
+
+    // Guard against concurrent calls (poll timer + mutation observer race)
+    if (video._resumeCaptureBusy) return;
+    video._resumeCaptureBusy = true;
+
+    try {
+      // If metadata hasn't loaded yet, wait for it before deciding live vs VOD.
+      // Otherwise isLiveStream() returns true for NaN duration (not loaded = infinite).
+      if (video.readyState === 0) {
+        video._resumeCaptureBusy = false; // clear so loadedmetadata callback can re-enter
+        var _tripped = false;
+        video.addEventListener('loadedmetadata', function () {
+          if (_tripped) return; _tripped = true;
+          tryResumeOrCapture(video);
+        }, { once: true });
+        // Safety timeout: if metadata never loads, fall back to ASR after 5s
+        setTimeout(function () {
+          if (!_tripped) { _tripped = true; captureVideoAudio(video); syncSessionToBackend(); }
+        }, 5000);
+        return;
+      }
+
+      if (isLiveStream(video) || video.duration <= 0) {
+        captureVideoAudio(video);
+        syncSessionToBackend();
+        return;
+      }
+
+      var cached = await loadPreprocessedFromCache(video);
+      if (cached && cached.length > 0) {
+        // Cache hit — switch to offline playback mode
+        preprocessedItems = cached;
+        offlineMode = true;
+        offlineVideo = video;
+        syncMode = true;
+        updateLoadingText('本地缓存匹配', '即时加载');
+        sendStatus('playing');
+        startVideoReplay(video);
+        syncSessionToBackend();
+        startVideoWatcher();
+      } else {
+        // Cache miss — start real-time ASR capture
+        captureVideoAudio(video);
+        syncSessionToBackend();
+      }
+    } finally {
+      video._resumeCaptureBusy = false;
+    }
   }
 
   // ─── WebSocket ────────────────────────────────────────────────────
@@ -1312,7 +1507,7 @@
       reconnectAttempts = 0;
       sendStatus('connected');
 
-      ws.send(JSON.stringify({
+      sendWS({
         type: 'config',
         sourceLang: settings.sourceLang,
         targetLang: settings.targetLang,
@@ -1320,21 +1515,22 @@
         region: settings.region,
         engine: settings.engine,
         ttsVoice: settings.ttsVoice,
-      }));
+      });
 
       // In sync mode: send preprocess right after config (server processes sequentially)
       if (syncMode && pendingSubs) {
-        ws.send(JSON.stringify({
+        activeProcessGeneration = processGeneration;
+        sendWS({
           type: 'preprocess',
           subs: pendingSubs,
-        }));
+        });
         pendingSubs = null;
       }
 
       // Offline ASR: signal start of audio streaming
       if (offlineMode && offlineRecording) {
         var actualRate = (offlineAudioCtx && offlineAudioCtx.sampleRate) ? offlineAudioCtx.sampleRate : 48000;
-        ws.send(JSON.stringify({ type: 'offline_asr_start', sampleRate: actualRate, speed: OFFLINE_SPEED }));
+        sendWS({ type: 'offline_asr_start', sampleRate: actualRate, speed: OFFLINE_SPEED });
       }
     };
 
@@ -1377,6 +1573,9 @@
   }
 
   function handleServerMessage(msg) {
+    // Drop messages from previous sessions (stale video responses)
+    if (msg.sessionId && msg.sessionId !== currentSessionId) return;
+
     // Strip CC announcement text from ASR results before any processing
     if (msg.original) msg.original = stripCCAnnouncement(msg.original);
     if (msg.text) msg.text = stripCCAnnouncement(msg.text);
@@ -1426,6 +1625,7 @@
         break;
 
       case 'preprocess_result':
+        if (activeProcessGeneration !== processGeneration) break; // stale results from previous video
         if (msg.items) {
           for (const item of msg.items) {
             preprocessedItems.push(item);
@@ -1441,6 +1641,7 @@
         break;
 
       case 'preprocess_complete':
+        if (activeProcessGeneration !== processGeneration) break; // stale results from previous video
         // Save to IndexedDB cache (always, even during early replay)
         if (offlineVideo) {
           savePreprocessedToCache(offlineVideo, preprocessedItems);
@@ -1466,7 +1667,8 @@
           if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
           updateLoadingText('模型推理中...', '已处理 ' + msg.subs.length + ' 个片段');
           sendStatus('preprocessing', '模型推理中...');
-          ws.send(JSON.stringify({ type: 'preprocess', subs: msg.subs }));
+          activeProcessGeneration = processGeneration;
+          sendWS({ type: 'preprocess', subs: msg.subs });
         } else {
           sendStatus('error', '离线 ASR 未识别到字幕');
           cleanupOffline();
@@ -1483,7 +1685,7 @@
         if (msg.status === 'configured') {
           if (!syncMode && !offlineMode) {
             // In ASR mode: send warmup. In sync/offline mode: skip.
-            ws.send(JSON.stringify({ type: 'warmup' }));
+            sendWS({ type: 'warmup' });
           }
         } else if (msg.status === 'ready') {
           if (preheatActive) {
@@ -1492,7 +1694,7 @@
             if (subtitleMode) {
               // DOM subtitle mode: no audio capture, just activate
               startSent = true;
-              ws.send(JSON.stringify({ type: 'start' }));
+              sendWS({ type: 'start' });
               chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
             } else {
               var video = findVideoElement();
@@ -1596,7 +1798,7 @@
       processorNode.connect(audioContext.destination);
     }
     startSent = true;
-    ws.send(JSON.stringify({ type: 'start' }));
+    sendWS({ type: 'start' });
     chrome.runtime.sendMessage({ type: 'started' }).catch(function () {});
   }
 
@@ -1694,6 +1896,8 @@
     syncPrevActiveItem = null;
     syncMode = true;
     syncVideo = video;
+    activeVideo = video;
+    if (activeVideo) activeVideo._lastSrc = (activeVideo.currentSrc || activeVideo.src);
     video.playbackRate = 1;
     video.muted = false;
     video.volume = settings.originalVolume / 100;
@@ -1753,6 +1957,8 @@
       sendStatus('error', '未找到视频元素');
       return;
     }
+    activeVideo = syncVideo;
+    activeVideo._lastSrc = (activeVideo.currentSrc || activeVideo.src);
 
     // Pre-create Audio elements for each item that has TTS audio
     for (const item of preprocessedItems) {
@@ -2002,7 +2208,7 @@
       startVideoWatcher();
       duckVideoAudio();
       showLoading();
-      ws.send(JSON.stringify({ type: 'warmup' }));
+      sendWS({ type: 'warmup' });
       return;
     }
 
@@ -2026,7 +2232,7 @@
       startVideoWatcher();
       duckVideoAudio();
       showLoading();
-      ws.send(JSON.stringify({ type: 'warmup' }));
+      sendWS({ type: 'warmup' });
       return;
     }
 
@@ -2093,7 +2299,7 @@
     updateLoadingText('神经网络处理中...', '正在提取特征向量');
 
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'offline_asr_end' }));
+      sendWS({ type: 'offline_asr_end' });
     }
   }
 
@@ -2197,8 +2403,47 @@
     video.play();
   }
 
+  function cleanupDisplayState() {
+    // Stop sync playback loop + TTS + clear preprocessed items (display layer)
+    stopSyncPlayback();
+    stopTTS();
+    // Clear subtitles instantly
+    if (subtitleBox) { subtitleBox.style.transition = 'none'; subtitleBox.style.opacity = '0'; }
+    contentDiv.innerHTML = '';
+    subtitleBox = null;
+    originalLine = null;
+    translationLine = null;
+    stopSubtitlePositioning();
+    // Release all preprocessed audio resources
+    for (const item of preprocessedItems) {
+      if (item.audioEl) {
+        try { item.audioEl.pause(); } catch (_) {}
+        item.audioEl = null;
+      }
+      item.audio = null;
+    }
+    preprocessedItems = [];
+    pendingSubs = null;
+    syncPrevActiveItem = null;
+    lastSpokenText = '';
+    currentUtteranceId = '';
+    currentSessionId = generateSessionId();
+    processGeneration++;
+  }
+
   async function start() {
-    if (isRunning) return;
+    // Full cleanup if already running from a previous video
+    if (isRunning) {
+      stopDOMSubtitleObserver();
+      cleanupOffline();
+      cleanupDisplayState();
+      disconnectWebSocket();
+      destroyPipeline();
+      isRunning = false;
+      fab.classList.remove('running');
+      finishWarmup();
+      chrome.runtime.sendMessage({ type: 'stopped' }).catch(function () {});
+    }
     isRunning = true;
     fab.classList.add('running');
     warmupDone = false;
@@ -2207,7 +2452,10 @@
     syncMode = false;
     subtitleMode = false;
     pendingSubs = null;
+    if (!currentSessionId) currentSessionId = generateSessionId();
 
+    lastUrl = location.href;
+    startUrlWatcher();
     sendStatus('starting', '连接中...');
 
     // Kill preheat state (but keep audio pipeline alive if it exists)
@@ -2254,6 +2502,30 @@
     // Bilibili extraction failed or not Bilibili — try DOM subtitle observer for YouTube
     subtitleMode = canObserveDOMSubtitles();
     if (subtitleMode) {
+      // Check IndexedDB cache first — resume if we've processed this video before
+      var youtubeVideo = findVideoElement();
+      if (youtubeVideo) {
+        loadPreprocessedFromCache(youtubeVideo).then(function (cached) {
+          if (cached && cached.length > 0) {
+            // Cache hit — skip subtitle processing, resume playback directly
+            preprocessedItems = cached;
+            syncMode = true;
+            syncVideo = youtubeVideo;
+            updateLoadingText('本地缓存匹配', '即时加载');
+            sendStatus('playing');
+            startSyncPlayback();
+            return;
+          }
+          // Cache miss — fall through to normal subtitle mode
+          doSubtitleModeStart();
+        });
+        return;
+      }
+      doSubtitleModeStart();
+      return;
+    }
+
+    function doSubtitleModeStart() {
       // Kick CC button immediately — don't wait for WS warmup chain
       startDOMSubtitleObserver();
       clearTimeout(subtitleModeTimer);
@@ -2272,7 +2544,6 @@
       preheatReady = false;
       preheatActive = false;
       connectWebSocket();
-      return;
     }
 
     // Not YouTube/Bilibili DOM — check VOD vs live
@@ -2313,27 +2584,13 @@
     isRunning = false;
     fab.classList.remove('running');
     startSent = false;
-    stopSubtitlePositioning();
 
-    if (syncMode) {
-      stopSyncPlayback();
-    }
-    if (subtitleMode) {
-      stopDOMSubtitleObserver();
-    }
-    if (offlineMode) {
-      cleanupOffline();
-    }
-
+    stopUrlWatcher();
+    stopDOMSubtitleObserver();
+    cleanupOffline();
+    cleanupDisplayState();
     disconnectWebSocket();
     destroyPipeline();
-    stopTTS();
-    // Clear subtitles instantly (no transition)
-    if (subtitleBox) { subtitleBox.style.transition = 'none'; subtitleBox.style.opacity = '0'; }
-    contentDiv.innerHTML = '';
-    subtitleBox = null;
-    originalLine = null;
-    translationLine = null;
     finishWarmup();
 
     chrome.runtime.sendMessage({ type: 'stopped' }).catch(function () {});
@@ -2344,7 +2601,7 @@
     applyDisplaySettings(newSettings);
     // If already connected, send updated config
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
+      sendWS({
         type: 'config',
         sourceLang: settings.sourceLang,
         targetLang: settings.targetLang,
@@ -2352,7 +2609,7 @@
         region: settings.region,
         engine: settings.engine,
         ttsVoice: settings.ttsVoice,
-      }));
+      });
     }
   }
 
@@ -2376,22 +2633,30 @@
     });
   }
 
-  function getVideoKey(video) {
-    var src = (video.currentSrc || video.src || '').replace(/\?.*$/, '').replace(/#.*$/, '');
+  // getVideoKey returns a stable cache key for a video+page combination.
+  // optPageUrl overrides location.href (used when saving during navigation).
+  function getVideoKey(video, optPageUrl) {
+    var pageUrl = (optPageUrl || location.href).replace(/#.*/, '');
+    var src = (video.currentSrc || video.src || '');
+    var keyStr = pageUrl;
+    // Only include src if it's not a blob URL (blob URLs are ephemeral)
+    if (src.indexOf('blob:') !== 0 && src.length > 0) {
+      keyStr += '|' + src.replace(/\?.*/, '');
+    }
     var hash = 0;
-    for (var i = 0; i < src.length; i++) {
-      hash = ((hash << 5) - hash) + src.charCodeAt(i);
+    for (var i = 0; i < keyStr.length; i++) {
+      hash = ((hash << 5) - hash) + keyStr.charCodeAt(i);
       hash |= 0;
     }
     return 'vid_' + Math.abs(hash);
   }
 
-  async function savePreprocessedToCache(video, items) {
+  async function savePreprocessedToCache(video, items, optPageUrl) {
     try {
       var db = await openIDB();
       var tx = db.transaction(IDB_STORE, 'readwrite');
       var store = tx.objectStore(IDB_STORE);
-      var key = getVideoKey(video);
+      var key = getVideoKey(video, optPageUrl);
 
       // LRU eviction: if at capacity, remove oldest
       var allReq = store.getAll();
@@ -2492,14 +2757,14 @@
     if (newSettings.ttsVoice !== undefined && newSettings.ttsVoice !== settings.ttsVoice) {
       settings.ttsVoice = newSettings.ttsVoice;
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'voice', ttsVoice: newSettings.ttsVoice }));
+        sendWS({ type: 'voice', ttsVoice: newSettings.ttsVoice });
       }
     }
 
     if (newSettings.engine !== undefined && newSettings.engine !== settings.engine) {
       settings.engine = newSettings.engine;
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
+        sendWS({
           type: 'config',
           sourceLang: settings.sourceLang,
           targetLang: settings.targetLang,
@@ -2507,7 +2772,7 @@
           region: settings.region,
           engine: newSettings.engine,
           ttsVoice: settings.ttsVoice,
-        }));
+        });
       }
     }
 

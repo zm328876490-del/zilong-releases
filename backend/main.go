@@ -46,6 +46,7 @@ type Client struct {
 	targetLang      string
 	ttsVoice        string // user-selected TTS voice name (short form)
 	active          bool
+	sessionId       string // current translation session (video-specific), echoed in all responses
 	ttsCancel       chan struct{} // cancels the previous streaming TTS goroutine
 	ttsCancelMu     sync.Mutex    // guards ttsCancel
 	lastTtsTime     time.Time     // last time a TTS goroutine was started (for throttling)
@@ -121,6 +122,7 @@ type PreprocessResult struct {
 
 type OutMsg struct {
 	Type        string             `json:"type"`
+	SessionID   string             `json:"sessionId,omitempty"`
 	ID          string             `json:"id,omitempty"`        // translate_request correlation
 	TargetLang  string             `json:"targetLang,omitempty"` // translate_request target
 	Text        string             `json:"text,omitempty"`
@@ -145,6 +147,7 @@ type OutMsg struct {
 
 type InMsg struct {
 	Type        string     `json:"type"`
+	SessionID   string     `json:"sessionId,omitempty"`
 	ID          string     `json:"id,omitempty"`          // translate_response correlation
 	SourceLang  string     `json:"sourceLang,omitempty"`
 	TargetLang  string     `json:"targetLang,omitempty"`
@@ -164,6 +167,9 @@ type InMsg struct {
 func (c *Client) sendJSON(msg OutMsg) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if msg.SessionID == "" {
+		msg.SessionID = c.sessionId
+	}
 	return c.conn.WriteJSON(msg)
 }
 
@@ -764,6 +770,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			if msg.SessionID != "" {
+				client.sessionId = msg.SessionID
+			}
 			switch msg.Type {
 			case "config":
 				client.sourceLang = msg.SourceLang
