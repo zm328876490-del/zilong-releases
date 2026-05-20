@@ -2671,17 +2671,51 @@
   function getVideoKey(video, optPageUrl) {
     var pageUrl = (optPageUrl || location.href).replace(/#.*/, '');
     var src = (video.currentSrc || video.src || '');
-    var keyStr = pageUrl;
-    // Only include src if it's not a blob URL (blob URLs are ephemeral)
+    // Non-blob URL: src is the most reliable differentiator
     if (src.indexOf('blob:') !== 0 && src.length > 0) {
-      keyStr += '|' + src.replace(/\?.*/, '');
+      return hashKey(pageUrl + '|' + src.replace(/\?.*/, ''));
     }
-    var hash = 0;
-    for (var i = 0; i < keyStr.length; i++) {
-      hash = ((hash << 5) - hash) + keyStr.charCodeAt(i);
-      hash |= 0;
+    // Blob URL: build a composite key from available video identifiers
+    var extra = '';
+    // 1. video element id attribute (most reliable when present)
+    if (video.id) {
+      extra = '#id=' + video.id;
     }
-    return 'vid_' + Math.abs(hash);
+    // 2. first <source> child with non-blob src (common on video platforms)
+    if (!extra) {
+      var sources = video.querySelectorAll('source');
+      for (var si = 0; si < sources.length; si++) {
+        var s = (sources[si].src || '').replace(/\?.*/, '');
+        if (s && s.indexOf('blob:') !== 0) {
+          extra = 'src=' + s;
+          break;
+        }
+      }
+    }
+    // 3. DOM path fallback: ancestor chain (up to 5 levels) via nth-of-type
+    if (!extra) {
+      var path = '', el = video, depth = 0;
+      while (el && el !== document.body && el !== document.documentElement && depth < 5) {
+        var tag = el.tagName.toLowerCase();
+        if (el.id) { path = '#' + el.id + '>' + path; break; }
+        var nth = 1, prev = el.previousElementSibling;
+        while (prev) { if (prev.tagName === el.tagName) nth++; prev = prev.previousElementSibling; }
+        path = tag + ':nth-of-type(' + nth + ')>' + path;
+        el = el.parentElement;
+        depth++;
+      }
+      extra = 'path=' + path;
+    }
+    return hashKey(pageUrl + '|' + extra);
+  }
+
+  function hashKey(str) {
+    var h = 0;
+    for (var i = 0; i < str.length; i++) {
+      h = ((h << 5) - h) + str.charCodeAt(i);
+      h |= 0;
+    }
+    return 'vid_' + Math.abs(h);
   }
 
   async function savePreprocessedToCache(video, items, optPageUrl) {
