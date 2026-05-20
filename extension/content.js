@@ -1999,9 +1999,13 @@
       return;
     }
 
-    // Video resumed — resume TTS from where it paused
+    // Video resumed — detect if user seeked while paused, then resume TTS
     if (!paused && wasPaused) {
       wasPaused = false;
+      // Detect time jump during pause (user dragged progress bar)
+      if (Math.abs(now - lastSyncTime) > 1.0) {
+        reSync(now);
+      }
       if (ttsAudio && ttsAudio.paused) {
         try { ttsAudio.play().catch(function () {}); } catch (_) {}
       }
@@ -2009,11 +2013,18 @@
       return;
     }
 
-    if (paused) return;
+    if (paused) {
+      // Detect scrubbing while paused (user dragged progress bar without play)
+      if (Math.abs(now - lastSyncTime) > 1.0) {
+        reSync(now);
+        lastSyncTime = now;
+      }
+      return;
+    }
 
     const currentTime = now;
 
-    // Detect seeking (jump > 1 second)
+    // Detect seeking while playing (jump > 1 second)
     if (Math.abs(currentTime - lastSyncTime) > 1.0) {
       reSync(currentTime);
     }
@@ -2093,12 +2104,12 @@
       ttsPlaying = false;
     }
     syncPrevActiveItem = null;  // force re-highlight on next frame
-    // Reset all items at or after currentTime for replay on loop/seek
+    // Reset all items: mark future items unplayed, skip past items
     for (const item of preprocessedItems) {
       item._wordIdx = -1;
       if (currentTime < item.end) {
         item.played = false; // re-trigger for display
-        // Re-create Audio element on loop (it was consumed and set to null)
+        // Re-create Audio element if consumed (looped/seeks)
         if (!item.audioEl && item.audio) {
           try {
             item.audioEl = new Audio('data:audio/mp3;base64,' + item.audio);
@@ -2115,14 +2126,36 @@
       try { currentSyncAudio.pause(); } catch (_) {}
       currentSyncAudio = null;
     }
-    // Stop any playing TTS from items far past
-    for (const item of preprocessedItems) {
-      if (item.played && item.audioEl && !item.audioEl.paused) {
-        const elapsed = currentTime - item.start;
-        if (elapsed > item.end - item.start + 2) {
-          item.audioEl.pause();
-        }
+
+    // Immediately show the subtitle at the new position (so it updates even
+    // when the user scrubs while paused and hasn't resumed playback yet).
+    var seekItem = null;
+    for (var si = 0; si < preprocessedItems.length; si++) {
+      if (currentTime >= preprocessedItems[si].start && currentTime < preprocessedItems[si].end) {
+        seekItem = preprocessedItems[si];
+        break;
       }
+    }
+    if (seekItem) {
+      showSubtitle(seekItem.original, seekItem.translation);
+      // Update word highlighting at the new position
+      if (seekItem.words && seekItem.words.length > 0) {
+        var wordIdx = -1;
+        for (var w = 0; w < seekItem.words.length; w++) {
+          if (currentTime >= seekItem.words[w].start && currentTime < seekItem.words[w].end) {
+            wordIdx = w;
+            break;
+          }
+        }
+        if (wordIdx < 0 && currentTime >= seekItem.words[seekItem.words.length - 1].end) {
+          wordIdx = seekItem.words.length;
+        }
+        seekItem._wordIdx = wordIdx;
+        highlightOriginalWord(seekItem, wordIdx);
+      }
+    } else if (preprocessedItems.length === 0) {
+      // No items at all — clear subtitle
+      showSubtitle('', '');
     }
   }
 
