@@ -1809,10 +1809,9 @@ function generateSessionId() {
               ' [' + entry.start.toFixed(1) + '-' + entry.end.toFixed(1) + 's] ' +
               (entry.audioBase64 ? '[+audio]' : '[no audio yet]') +
               ': ' + JSON.stringify(entry.original));
-            // Show subtitle immediately — don't wait for delayed video to catch up
-            if (window.__ai_showFloatingSubtitle__) {
-              window.__ai_showFloatingSubtitle__(entry.original, entry.translation);
-            }
+            // Subtitle and TTS are handled by the floating window timeline loop,
+            // which uses refTime = originalTime - FRAME_DELAY to align with the
+            // delayed video. Don't show/play here.
           } else {
             // Old backend without timestamps — fallback to immediate display
             if (window.__ai_showFloatingSubtitle__) {
@@ -1880,11 +1879,9 @@ function generateSessionId() {
                 var reader2 = new FileReader();
                 reader2.onload = function () {
                   entryRef.audioBase64 = reader2.result.split(',')[1];
-                  // Play TTS immediately — don't wait for delayed video timeline
-                  if (window.__ai_playFloatingTTS__) {
-                    window.__ai_playFloatingTTS__(entryRef.audioBase64, entryRef.audioMime || 'audio/mpeg');
-                  }
-                  entryRef.played = true;
+                  // Don't play TTS here — the floating window timeline loop
+                  // plays it when refTime reaches this entry's start time,
+                  // which aligns with the delayed video.
                 };
                 reader2.readAsDataURL(blob2);
               }
