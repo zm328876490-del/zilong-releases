@@ -41,6 +41,7 @@ type Client struct {
 	conn            *websocket.Conn
 	mu              sync.Mutex
 	audioBuf        *asr.AudioBuffer
+	rollingBuf      *asr.RollingBuffer
 	translator      *translate.Translator
 	sourceLang      string
 	targetLang      string
@@ -49,6 +50,7 @@ type Client struct {
 	sessionId       string // current translation session (video-specific), echoed in all responses
 	ttsCancel       chan struct{} // cancels the previous streaming TTS goroutine
 	ttsCancelMu     sync.Mutex    // guards ttsCancel
+	ttsSeq          chan struct{} // semaphore (cap 1): serializes final TTS generation
 	lastTtsTime     time.Time     // last time a TTS goroutine was started (for throttling)
 
 	// offline ASR state
@@ -142,6 +144,9 @@ type OutMsg struct {
 	Total       int                `json:"total,omitempty"`
 	Ready       bool               `json:"ready,omitempty"` // first batch ready for early replay
 	UtteranceId string             `json:"utteranceId,omitempty"` // ties audio_start/chunk/end to a specific utterance
+	StartTime   float64            `json:"startTime,omitempty"`   // segment start (absolute video time)
+	EndTime     float64            `json:"endTime,omitempty"`     // segment end (absolute video time)
+	Words       []asr.WordTimestamp `json:"words,omitempty"`      // per-word timestamps
 	TtsPartial   bool               `json:"ttsPartial,omitempty"`   // true = fast partial TTS, false = final
 }
 
@@ -157,6 +162,7 @@ type InMsg struct {
 	TTSVoice    string     `json:"ttsVoice,omitempty"`
 	Translation string     `json:"translation,omitempty"` // translate_response result
 	Error         string     `json:"error,omitempty"`       // translate_response error
+	Rolling       bool       `json:"rolling,omitempty"`
 	SkipTranslate bool       `json:"skipTranslate,omitempty"`
 	Subs          []Subtitle `json:"subs,omitempty"`
 	Text          string     `json:"text,omitempty"`
@@ -173,7 +179,7 @@ func (c *Client) sendJSON(msg OutMsg) error {
 	return c.conn.WriteJSON(msg)
 }
 
-func (c *Client) onASRResult(text string, speechRate float64, duration float64, isPartial bool, speaker string) {
+func (c *Client) onASRResult(text string, speechRate float64, duration float64, isPartial bool, speaker string, startTime float64, endTime float64, words []asr.WordTimestamp) {
 	if !c.active {
 		return
 	}
@@ -204,22 +210,38 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 			SpeechRate:  speechRate,
 			Duration:    duration,
 			Speaker:     speaker,
+			UtteranceId: utterId,
+			StartTime:   startTime,
+			EndTime:     endTime,
+			Words:       words,
 		})
 	}
 
 	// Throttle TTS for partials: skip if TTS already running or started recently.
 	// Finals always proceed (cancel current TTS first).
+	if !isPartial {
+		c.lastTtsTime = time.Now()
+		// Queue final TTS via semaphore — serializes batch results from
+		// RollingBuffer without cancelling each other.
+		go func() {
+			c.ttsSeq <- struct{}{}
+			defer func() { <-c.ttsSeq }()
+			c.generateAndSendTTS(translated, utterId, speechRate, false, nil)
+		}()
+		return
+	}
+
+	// Partials: throttled + cancel-based (real-time VAD path only)
 	c.ttsCancelMu.Lock()
 	ttsRunning := c.ttsCancel != nil
 	c.ttsCancelMu.Unlock()
 
-	if isPartial && (ttsRunning || time.Since(c.lastTtsTime) < 600*time.Millisecond) {
+	if ttsRunning || time.Since(c.lastTtsTime) < 600*time.Millisecond {
 		return
 	}
 
 	c.lastTtsTime = time.Now()
 
-	// Cancel previous TTS goroutine before starting new one
 	c.ttsCancelMu.Lock()
 	if c.ttsCancel != nil {
 		close(c.ttsCancel)
@@ -228,7 +250,7 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 	cancelCh := c.ttsCancel
 	c.ttsCancelMu.Unlock()
 
-	go c.generateAndSendTTS(translated, utterId, speechRate, isPartial, cancelCh)
+	go c.generateAndSendTTS(translated, utterId, speechRate, true, cancelCh)
 }
 
 func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, isPartial bool, cancel <-chan struct{}) {
@@ -752,6 +774,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		conn:       conn,
 		sourceLang: "auto",
 		targetLang: "zh-Hans",
+		ttsSeq:     make(chan struct{}, 1),
 	}
 
 
@@ -785,12 +808,22 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if msg.Engine == "google" {
 					client.translator.SetAsyncFn(client.translateViaBrowser)
 				}
-				if client.audioBuf == nil {
-					client.audioBuf = asr.NewAudioBuffer(
-					whisperServerURL,
-					client.sourceLang,
-					client.onASRResult,
-				)
+				if msg.Rolling {
+					if client.rollingBuf == nil {
+						client.rollingBuf = asr.NewRollingBuffer(
+							whisperServerURL,
+							client.sourceLang,
+							client.onASRResult,
+						)
+					}
+				} else {
+					if client.audioBuf == nil {
+						client.audioBuf = asr.NewAudioBuffer(
+							whisperServerURL,
+							client.sourceLang,
+							client.onASRResult,
+						)
+					}
 				}
 				client.sendJSON(OutMsg{Type: "status", Status: "configured"})
 
@@ -823,10 +856,23 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 			case "start":
 				client.active = true
+				if msg.Rolling {
+					if client.rollingBuf == nil {
+						client.rollingBuf = asr.NewRollingBuffer(
+							whisperServerURL,
+							client.sourceLang,
+							client.onASRResult,
+						)
+					}
+					client.rollingBuf.Start()
+				}
 				client.sendJSON(OutMsg{Type: "status", Status: "listening"})
 
 			case "stop":
 				client.active = false
+				if client.rollingBuf != nil {
+					client.rollingBuf.Stop()
+				}
 				client.sendJSON(OutMsg{Type: "status", Status: "stopped"})
 
 			case "subtitle":
@@ -867,10 +913,14 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case websocket.BinaryMessage:
-			sampleCount := len(data) / 2
+			if len(data) < 8 {
+				continue
+			}
+			videoTime := math.Float64frombits(binary.LittleEndian.Uint64(data[:8]))
+			sampleCount := (len(data) - 8) / 2
 			samples := make([]int16, sampleCount)
 			for i := 0; i < sampleCount; i++ {
-				samples[i] = int16(binary.LittleEndian.Uint16(data[i*2 : (i+1)*2]))
+				samples[i] = int16(binary.LittleEndian.Uint16(data[8+i*2 : 8+(i+1)*2]))
 			}
 
 			if client.offlineASR {
@@ -878,10 +928,14 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			if client.rollingBuf != nil {
+				client.rollingBuf.Append(samples, videoTime)
+				continue
+			}
 			if client.audioBuf == nil {
 				continue
 			}
-			client.audioBuf.Append(samples)
+			client.audioBuf.Append(samples, videoTime)
 		}
 	}
 }

@@ -194,11 +194,12 @@
   }
 
   // ─── Button actions ───────────────────────────────────────────────
-  async function sendWithRetry(tabId, message, maxRetries = 3) {
+  async function sendWithRetry(tabId, message, maxRetries = 5) {
     for (let i = 0; i < maxRetries; i++) {
       try {
         return await chrome.tabs.sendMessage(tabId, message);
       } catch (e) {
+        console.warn('[popup] sendMessage attempt ' + (i + 1) + '/' + maxRetries + ' failed:', e.message);
         if (i < maxRetries - 1) {
           // Content script might not be loaded yet, inject and wait
           try {
@@ -206,10 +207,13 @@
               target: { tabId: tabId },
               files: ['content.js'],
             });
+            console.log('[popup] injected content.js');
           } catch (injectErr) {
-            // Might already be injected via manifest
+            console.warn('[popup] executeScript failed:', injectErr.message);
+            // If injection fails, try pinging background to wake SW
+            try { await chrome.runtime.sendMessage({ type: 'ping' }); } catch (_) {}
           }
-          await new Promise((r) => setTimeout(r, 300));
+          await new Promise((r) => setTimeout(r, 500));
         } else {
           throw e;
         }
@@ -252,7 +256,12 @@
       }
     } catch (err) {
       console.error('启动翻译失败:', err);
-      showError('无法连接: ' + err.message + '。请刷新页面后重试。');
+      // Check if the error is a connection error with the tab
+      if (err.message && err.message.indexOf('Receiving end does not exist') !== -1) {
+        showError('无法连接：请刷新视频页面后重试（按 F5 刷新当前页面，然后重新点击翻译）');
+      } else {
+        showError('无法连接: ' + err.message + '。请刷新页面后重试。');
+      }
       setStatus('error', '启动失败');
     } finally {
       toggleBtn.disabled = false;

@@ -20,13 +20,19 @@ const (
 	bitsPerSample  = 16
 	numChannels    = 1
 	silenceThresh  = 0.005 // RMS threshold for silence
-	silenceTimeout = 300   // ms of silence before cutting
-	minSpeechLen   = 100   // ms minimum speech segment length
-	maxSpeechLen   = 3000  // ms maximum speech segment length (force cut)
+	silenceTimeout = 600   // ms of silence before cutting
+	minSpeechLen   = 300   // ms minimum speech segment length
+	maxSpeechLen   = 5000  // ms maximum speech segment length (force cut)
 
 	streamFlushInterval = 300 // ms between streaming partial ASR flushes
 	streamMinWindow     = 500 // ms minimum speech before first streaming flush
 )
+
+// chunkTimestamp records the video playback time when a chunk of audio samples was captured.
+type chunkTimestamp struct {
+	sampleOffset int     // sample index in the buffer where this chunk starts
+	videoTime    float64 // video.currentTime at capture moment
+}
 
 // AudioBuffer accumulates PCM audio and detects speech segments.
 type AudioBuffer struct {
@@ -40,8 +46,8 @@ type AudioBuffer struct {
 	serverURL string
 	language  string
 
-	// onResult callback: text, speechRate (chars/sec), duration (sec), isPartial, speaker label
-	onResult func(originalText string, speechRate float64, duration float64, isPartial bool, speaker string)
+	// onResult callback: text, speechRate (chars/sec), duration (sec), isPartial, speaker label, startTime (sec), endTime (sec), word timestamps
+	onResult func(originalText string, speechRate float64, duration float64, isPartial bool, speaker string, startTime float64, endTime float64, words []WordTimestamp)
 
 	// streaming state
 	lastFlushSample   int
@@ -52,23 +58,33 @@ type AudioBuffer struct {
 	// speaker diarization (pause-based heuristic)
 	speakerTurn    int
 	lastSpeechTime time.Time
+
+	// video-anchored timestamps: each chunk records (sampleOffset, videoTime)
+	chunkTimestamps []chunkTimestamp
 }
 
 // NewAudioBuffer creates a new audio buffer.
-func NewAudioBuffer(serverURL, language string, onResult func(string, float64, float64, bool, string)) *AudioBuffer {
+func NewAudioBuffer(serverURL, language string, onResult func(string, float64, float64, bool, string, float64, float64, []WordTimestamp)) *AudioBuffer {
 	return &AudioBuffer{
-		samples:    make([]int16, 0, sampleRate*10),
-		speechStart: -1,
-		serverURL:  serverURL,
-		language:   language,
-		onResult:   onResult,
+		samples:         make([]int16, 0, sampleRate*10),
+		speechStart:     -1,
+		serverURL:       serverURL,
+		language:        language,
+		onResult:        onResult,
+		chunkTimestamps: make([]chunkTimestamp, 0, 256),
 	}
 }
 
 // Append adds PCM int16 samples to the buffer and runs VAD.
-func (ab *AudioBuffer) Append(pcm []int16) {
+// videoTime is the video's currentTime when these samples were captured.
+func (ab *AudioBuffer) Append(pcm []int16, videoTime float64) {
 	ab.mu.Lock()
 	defer ab.mu.Unlock()
+
+	ab.chunkTimestamps = append(ab.chunkTimestamps, chunkTimestamp{
+		sampleOffset: len(ab.samples),
+		videoTime:    videoTime,
+	})
 
 	ab.samples = append(ab.samples, pcm...)
 
@@ -91,6 +107,21 @@ func (ab *AudioBuffer) Append(pcm []int16) {
 			ab.lastFlushSample -= excess
 		} else {
 			ab.lastFlushSample = 0
+		}
+		// Trim chunkTimestamps that are entirely before the new buffer start
+		cut := 0
+		for _, ct := range ab.chunkTimestamps {
+			if ct.sampleOffset < excess {
+				cut++
+			} else {
+				break
+			}
+		}
+		if cut > 0 {
+			ab.chunkTimestamps = ab.chunkTimestamps[cut:]
+			for i := range ab.chunkTimestamps {
+				ab.chunkTimestamps[i].sampleOffset -= excess
+			}
 		}
 	}
 
@@ -176,7 +207,7 @@ func (ab *AudioBuffer) cutSegment(endSample int) {
 	speaker := string(rune('A' + ab.speakerTurn%26))
 
 
-	go ab.processSegment(segment, segDur, false, speaker) // final result
+	go ab.processSegment(segment, segDur, false, speaker, ab.speechStart, endSample) // final result
 }
 
 func calcRMS(samples []int16) float64 {
@@ -251,13 +282,30 @@ func (ab *AudioBuffer) flushStreamingChunk() {
 	ab.mu.Unlock()
 
 	segDur := float64(segLen) / sampleRate
-	go ab.processSegment(segment, segDur, true, "") // partial result (no speaker)
+	go ab.processSegment(segment, segDur, true, "", ab.speechStart, currentPos) // partial result
+}
+
+// sampleToVideoTime converts a sample index to the corresponding video playback time.
+// It finds the most recent chunk timestamp at or before sampleIdx and interpolates.
+func (ab *AudioBuffer) sampleToVideoTime(sampleIdx int) float64 {
+	ab.mu.Lock()
+	defer ab.mu.Unlock()
+
+	for i := len(ab.chunkTimestamps) - 1; i >= 0; i-- {
+		ct := ab.chunkTimestamps[i]
+		if ct.sampleOffset <= sampleIdx {
+			offsetSec := float64(sampleIdx-ct.sampleOffset) / sampleRate
+			return ct.videoTime + offsetSec
+		}
+	}
+	// Fallback: no chunk timestamp (should not normally happen)
+	return float64(sampleIdx) / sampleRate
 }
 
 // ─── Whisper-server communication ────────────────────────────────────
 
 // processSegment sends a speech segment to whisper-server via HTTP.
-func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial bool, speaker string) {
+func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial bool, speaker string, startSample int, endSample int) {
 	if ab.serverURL == "" {
 		return
 	}
@@ -267,7 +315,15 @@ func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial
 		return
 	}
 
-	text, err := ab.callWhisperServer(wavData)
+	var text string
+	var words []WordTimestamp
+
+	if isPartial {
+		text, err = ab.callWhisperServer(wavData)
+	} else {
+		// Final result: use verbose_json for word-level timestamps
+		text, words, err = ab.callWhisperServerWithWords(wavData)
+	}
 	if err != nil {
 		return
 	}
@@ -278,18 +334,23 @@ func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial
 	}
 
 	if isPartial {
-		// Deduplicate: only send if text differs from last streaming result
 		if text == ab.lastStreamingText {
 			return
 		}
 		ab.lastStreamingText = text
-	} else {
 	}
 
 	if ab.onResult != nil {
 		charCount := len([]rune(text))
 		speechRate := float64(charCount) / segDur
-		ab.onResult(text, speechRate, segDur, isPartial, speaker)
+		startTime := ab.sampleToVideoTime(startSample)
+		endTime := ab.sampleToVideoTime(endSample)
+			// Offset word timestamps from segment-relative to absolute video timeline
+			for i := range words {
+				words[i].Start += startTime
+				words[i].End += startTime
+			}
+			ab.onResult(text, speechRate, segDur, isPartial, speaker, startTime, endTime, words)
 	}
 }
 
@@ -338,6 +399,323 @@ func (ab *AudioBuffer) callWhisperServer(wavData []byte) (string, error) {
 	}
 
 	return result.Text, nil
+}
+
+// callWhisperServerWithWords sends WAV data to whisper-server with verbose_json
+// output and returns the full text plus word-level timestamps.
+func (ab *AudioBuffer) callWhisperServerWithWords(wavData []byte) (string, []WordTimestamp, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	part, err := writer.CreateFormFile("file", "audio.wav")
+	if err != nil {
+		return "", nil, fmt.Errorf("form file: %w", err)
+	}
+	part.Write(wavData)
+
+	writer.WriteField("language", ab.language)
+	writer.WriteField("response_format", "verbose_json")
+	writer.WriteField("timestamps", "1")
+	writer.WriteField("word_timestamps", "1")
+	writer.Close()
+
+	url := ab.serverURL + "/inference"
+	req, err := http.NewRequest("POST", url, &body)
+	if err != nil {
+		return "", nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", nil, fmt.Errorf("http post: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, fmt.Errorf("server error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Text     string `json:"text"`
+		Segments []struct {
+			Text  string  `json:"text"`
+			Start float64 `json:"start"`
+			End   float64 `json:"end"`
+			Words []struct {
+				Word  string  `json:"word"`
+				Start float64 `json:"start"`
+				End   float64 `json:"end"`
+			} `json:"words"`
+		} `json:"segments"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", nil, fmt.Errorf("parse verbose_json: %w", err)
+	}
+
+	fullText := strings.TrimSpace(result.Text)
+	var words []WordTimestamp
+	for _, seg := range result.Segments {
+		for _, w := range seg.Words {
+			wText := strings.TrimSpace(w.Word)
+			if wText != "" {
+				words = append(words, WordTimestamp{Word: wText, Start: w.Start, End: w.End})
+			}
+		}
+	}
+	return fullText, words, nil
+}
+
+// ─── Rolling-buffer batch ASR (VAD bypass, whisper-native segmentation) ──
+
+// RollingBuffer accumulates audio and periodically sends the full buffer to
+// whisper as a single WAV. Whisper handles its own segmentation, producing
+// more accurate sentence boundaries than energy-based VAD.
+// Designed for floating-window mode where the 5s delay provides room for batching.
+type RollingBuffer struct {
+	mu              sync.Mutex
+	samples         []int16
+	chunkTimestamps []chunkTimestamp
+	serverURL       string
+	language        string
+	onResult        func(string, float64, float64, bool, string, float64, float64, []WordTimestamp)
+
+	lastEmittedEnd    float64
+	lastEmittedSample int
+	processing        bool
+	started           bool
+	stopCh            chan struct{}
+}
+
+func NewRollingBuffer(serverURL, language string, onResult func(string, float64, float64, bool, string, float64, float64, []WordTimestamp)) *RollingBuffer {
+	return &RollingBuffer{
+		samples:         make([]int16, 0, sampleRate*60),
+		chunkTimestamps: make([]chunkTimestamp, 0, 256),
+		serverURL:       serverURL,
+		language:        language,
+		onResult:        onResult,
+	}
+}
+
+func (rb *RollingBuffer) Append(samples []int16, videoTime float64) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
+	rb.chunkTimestamps = append(rb.chunkTimestamps, chunkTimestamp{
+		sampleOffset: len(rb.samples),
+		videoTime:    videoTime,
+	})
+	rb.samples = append(rb.samples, samples...)
+
+	maxSamples := sampleRate * 60
+	if len(rb.samples) > maxSamples {
+		excess := len(rb.samples) - maxSamples
+		rb.samples = rb.samples[excess:]
+		rb.lastEmittedSample -= excess
+		if rb.lastEmittedSample < 0 {
+			rb.lastEmittedSample = 0
+		}
+		cut := 0
+		for _, ct := range rb.chunkTimestamps {
+			if ct.sampleOffset < excess {
+				cut++
+			} else {
+				break
+			}
+		}
+		if cut > 0 {
+			rb.chunkTimestamps = rb.chunkTimestamps[cut:]
+			for i := range rb.chunkTimestamps {
+				rb.chunkTimestamps[i].sampleOffset -= excess
+			}
+		}
+	}
+}
+
+func (rb *RollingBuffer) Start() {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	if rb.started {
+		return
+	}
+	rb.started = true
+	rb.samples = rb.samples[:0]
+	rb.chunkTimestamps = rb.chunkTimestamps[:0]
+	rb.lastEmittedEnd = 0
+	rb.lastEmittedSample = 0
+	rb.stopCh = make(chan struct{})
+	go rb.loop()
+}
+
+func (rb *RollingBuffer) Stop() {
+	rb.mu.Lock()
+	if !rb.started {
+		rb.mu.Unlock()
+		return
+	}
+	rb.started = false
+	rb.mu.Unlock()
+	close(rb.stopCh)
+}
+
+func (rb *RollingBuffer) loop() {
+	// Check every 1s: fire processBatch as soon as 2s of new unprocessed
+	// audio has accumulated. Much faster than a fixed 4s ticker — a 10s
+	// video gets 4-5 batches instead of 2-3.
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	// Initial check: audio may have been buffered before start (pcmBuffer flush)
+	rb.checkAndProcess()
+
+	for {
+		select {
+		case <-rb.stopCh:
+			rb.processBatch()
+			return
+		case <-ticker.C:
+			rb.checkAndProcess()
+		}
+	}
+}
+
+func (rb *RollingBuffer) checkAndProcess() {
+	rb.mu.Lock()
+	if rb.processing {
+		rb.mu.Unlock()
+		return
+	}
+	unprocessed := len(rb.samples) - rb.lastEmittedSample
+	if unprocessed >= sampleRate*2 {
+		rb.mu.Unlock()
+		rb.processBatch()
+	} else {
+		rb.mu.Unlock()
+	}
+}
+
+func (rb *RollingBuffer) processBatch() {
+	rb.mu.Lock()
+	if rb.processing {
+		rb.mu.Unlock()
+		return
+	}
+	if len(rb.samples) < sampleRate*2 {
+		rb.mu.Unlock()
+		return
+	}
+	rb.processing = true
+
+	// Slice from last emitted position, with 1s overlap so whisper has
+	// context at the boundary. This avoids re-processing the entire buffer.
+	startSample := rb.lastEmittedSample
+	overlap := sampleRate * 1 // 1s overlap
+	startSample -= overlap
+	if startSample < 0 {
+		startSample = 0
+	}
+	if startSample >= len(rb.samples) {
+		// lastEmittedSample has drifted past the buffer (e.g. buffer was
+		// trimmed). Reset and reprocess from the beginning.
+		log.Printf("[rolling] startSample %d >= buffer len %d, resetting cursor",
+			startSample, len(rb.samples))
+		rb.lastEmittedSample = 0
+		rb.lastEmittedEnd = 0
+		startSample = 0
+	}
+
+	slice := rb.samples[startSample:]
+	samples := make([]int16, len(slice))
+	copy(samples, slice)
+
+	timestamps := make([]chunkTimestamp, len(rb.chunkTimestamps))
+	copy(timestamps, rb.chunkTimestamps)
+	lastEnd := rb.lastEmittedEnd
+	rb.mu.Unlock()
+
+	defer func() {
+		rb.mu.Lock()
+		rb.processing = false
+		rb.mu.Unlock()
+	}()
+
+	// Video time at the start of our sliced audio
+	baseVideoTime := sampleToVideoTimeFrom(
+		float64(startSample)/float64(sampleRate),
+		timestamps,
+		sampleRate,
+	)
+
+	segs, err := ProcessOfflineFull(samples, rb.serverURL, rb.language, sampleRate)
+	if err != nil {
+		log.Printf("[rolling] whisper batch failed: %v", err)
+		return
+	}
+
+	log.Printf("[rolling] whisper returned %d segments from %.1fs audio (offset=%.1fs)",
+		len(segs), float64(len(samples))/sampleRate, baseVideoTime)
+
+	maxSegEnd := 0.0 // audio-relative end of the last emitted segment
+
+	for _, seg := range segs {
+		// Segment times from whisper are relative to the start of the
+		// sent audio; add baseVideoTime to get absolute video times.
+		absStart := baseVideoTime + seg.Start
+		absEnd := baseVideoTime + seg.End
+
+		if absEnd <= lastEnd {
+			continue
+		}
+
+		for i := range seg.Words {
+			seg.Words[i].Start = baseVideoTime + seg.Words[i].Start
+			seg.Words[i].End = baseVideoTime + seg.Words[i].End
+		}
+
+		charCount := len([]rune(seg.Text))
+		dur := absEnd - absStart
+		if dur <= 0 {
+			dur = 0.5
+		}
+		speechRate := float64(charCount) / dur
+
+		rb.onResult(seg.Text, speechRate, dur, false, "", absStart, absEnd, seg.Words)
+
+		if absEnd > lastEnd {
+			lastEnd = absEnd
+		}
+		if seg.End > maxSegEnd {
+			maxSegEnd = seg.End
+		}
+	}
+
+	rb.mu.Lock()
+	if lastEnd > rb.lastEmittedEnd {
+		rb.lastEmittedEnd = lastEnd
+		// Advance the sample cursor to the end of the last emitted segment,
+		// so the next batch starts from where this segment ended (minus overlap).
+		rb.lastEmittedSample = startSample + int(maxSegEnd*float64(sampleRate))
+	}
+	rb.mu.Unlock()
+}
+
+// sampleToVideoTimeFrom converts an audio-relative time (seconds) to absolute
+// video playback time using the chunk timestamp map.
+func sampleToVideoTimeFrom(audioSec float64, timestamps []chunkTimestamp, sr int) float64 {
+	sampleIdx := int(audioSec * float64(sr))
+	for i := len(timestamps) - 1; i >= 0; i-- {
+		ct := timestamps[i]
+		if ct.sampleOffset <= sampleIdx {
+			offsetSec := float64(sampleIdx-ct.sampleOffset) / float64(sr)
+			return ct.videoTime + offsetSec
+		}
+	}
+	return audioSec
 }
 
 // ─── Offline full-file ASR ────────────────────────────────────────────

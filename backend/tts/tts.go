@@ -200,6 +200,8 @@ func SynthesizeStream(text, voice string, onChunk func(AudioChunk)) error {
 	}
 
 	chunkCount := 0
+	deadline := time.Now().Add(15 * time.Second)
+	conn.SetReadDeadline(deadline)
 
 	// 2. Read all responses: skip metadata, process binary audio, stop at turn.end
 	for {

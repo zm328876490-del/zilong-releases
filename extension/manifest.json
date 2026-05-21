@@ -3,7 +3,7 @@
   "name": "AI 实时翻译",
   "version": "1.0.0",
   "description": "视频/直播实时翻译：字幕 + TTS 播报",
-  "permissions": ["activeTab", "storage", "scripting"],
+  "permissions": ["activeTab", "storage", "scripting", "offscreen"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup/popup.html",
@@ -17,9 +17,20 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["floating-window.js"],
+      "run_at": "document_idle"
     }
   ],
   "icons": {
     "128": "icons/icon.png"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["audio-processor.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }
