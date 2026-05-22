@@ -192,6 +192,12 @@
     // Clear popup close watcher
     if (_windowCloseCheckId) { clearInterval(_windowCloseCheckId); _windowCloseCheckId = null; }
 
+    // Remove visibility listener
+    if (_visibilityHandler) {
+      try { document.removeEventListener('visibilitychange', _visibilityHandler); } catch (_) {}
+      _visibilityHandler = null;
+    }
+
     // CRITICAL: remove every listener attached during this session.
     // Skipping this means the next start on the same <video> element
     // inherits stale watchers whose closures hold last-session state
@@ -1088,6 +1094,7 @@
   var _loopLastTime = -1;
   var _loopTimeHandler = null;
   var _cachedReplay = false;
+  var _visibilityHandler = null;
 
   function onFloatingVideoEnded() {
     if (!ai.floatingMode) return;
@@ -1323,5 +1330,17 @@
     ai.offlineVideo = video;
     ai._captureVideo = video;
     attachWatchers(video);
+
+    // Auto-stop when page is minimized / tab loses focus.
+    // RAF stops, audio capture stops, the frame buffer drains, and
+    // everything desyncs. Clean shutdown avoids wasted whisper compute.
+    _visibilityHandler = function () {
+      if (document.hidden) {
+        console.log('[floating-window] page hidden, stopping translation');
+        try { video.pause(); } catch (_) {}
+        closeFloatingWindow();
+      }
+    };
+    document.addEventListener('visibilitychange', _visibilityHandler);
   };
 })();
