@@ -48,12 +48,130 @@
   // and calls onFloatingVideoEnded(), freezing audio for the new run.
   // This was the real root cause of "second play has no subtitles/TTS".
   var _sessionListeners = [];
+  // Video lock overlay: prevents user interaction with the source video
+  // during floating-window translation (pause/seek/speed break audio sync).
+  var _videoOverlay = null;
+  var _lockedVideo = null;
+  var _videoSavedControls = null;
+  var _videoSavedFilter = null;
+  var _keyBlockHandler = null;
+  var _mouseBlockHandler = null;
 
   // ─── Helpers ────────────────────────────────────────────────────────
 
   function isFloatableVideo(video) {
     if (!video || ai.isLiveStream(video) || !video.duration || video.duration <= 0) return false;
     return true;
+  }
+
+  function createVideoOverlay(video) {
+    removeVideoOverlay();
+
+    _lockedVideo = video;
+    _videoSavedControls = video.getAttribute('controls');
+    _videoSavedFilter = video.style.filter || '';
+    video.setAttribute('controls', 'false');
+    video.style.pointerEvents = 'none';
+    video.style.filter = 'blur(12px)';
+
+    // Overlay appended to body (fixed positioning) so it reliably sits
+    // above every page stacking context and aligns to the video's screen rect.
+    var overlay = document.createElement('div');
+    overlay.id = 'ai-video-lock-overlay';
+    overlay.style.cssText =
+      'position:fixed;z-index:99999;cursor:default;' +
+      'display:flex;align-items:center;justify-content:center;' +
+      'background:rgba(0,0,0,0.15);pointer-events:all;';
+
+    function reposition() {
+      var r = video.getBoundingClientRect();
+      overlay.style.left = r.left + 'px';
+      overlay.style.top = r.top + 'px';
+      overlay.style.width = r.width + 'px';
+      overlay.style.height = r.height + 'px';
+    }
+    reposition();
+
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    overlay._reposition = reposition;
+
+    var label = document.createElement('div');
+    label.style.cssText =
+      'background:rgba(0,0,0,0.78);color:#ffd700;padding:14px 24px;border-radius:8px;' +
+      'font-size:15px;font-weight:600;text-align:center;line-height:1.7;' +
+      'pointer-events:none;' +
+      'font-family:-apple-system,"Microsoft YaHei","PingFang SC",sans-serif;';
+    label.textContent = 'AI 翻译配音中\n请勿操作视频（暂停 / 快进 / 调速会中断配音）';
+    overlay.appendChild(label);
+
+    document.body.appendChild(overlay);
+    _videoOverlay = overlay;
+
+    // Block all mouse interactions on the overlay area (covers the video).
+    _mouseBlockHandler = function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    };
+    overlay.addEventListener('mousedown', _mouseBlockHandler, true);
+    overlay.addEventListener('mouseup', _mouseBlockHandler, true);
+    overlay.addEventListener('click', _mouseBlockHandler, true);
+    overlay.addEventListener('dblclick', _mouseBlockHandler, true);
+    overlay.addEventListener('contextmenu', _mouseBlockHandler, true);
+
+    // Block keyboard shortcuts that could affect video playback.
+    _keyBlockHandler = function (e) {
+      if (!ai.floatingMode) return;
+      var tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+      // Space = pause, arrows = seek/volume, media keys = play/pause/skip,
+      // Home/End = seek to start/end, numbers = seek to percentage
+      if (e.code === 'Space' || e.code === 'ArrowLeft' || e.code === 'ArrowRight' ||
+          e.code === 'ArrowUp' || e.code === 'ArrowDown' ||
+          e.code === 'MediaPlayPause' || e.code === 'MediaTrackNext' || e.code === 'MediaTrackPrevious' ||
+          e.code === 'MediaStop' ||
+          e.code === 'Home' || e.code === 'End' ||
+          (e.code >= 'Digit0' && e.code <= 'Digit9') ||
+          (e.code >= 'Numpad0' && e.code <= 'Numpad9')) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    document.addEventListener('keydown', _keyBlockHandler, true);
+  }
+
+  function removeVideoOverlay() {
+    if (_videoOverlay) {
+      if (_videoOverlay._reposition) {
+        try { window.removeEventListener('scroll', _videoOverlay._reposition, true); } catch (_) {}
+        try { window.removeEventListener('resize', _videoOverlay._reposition); } catch (_) {}
+      }
+      if (_mouseBlockHandler) {
+        try { _videoOverlay.removeEventListener('mousedown', _mouseBlockHandler, true); } catch (_) {}
+        try { _videoOverlay.removeEventListener('mouseup', _mouseBlockHandler, true); } catch (_) {}
+        try { _videoOverlay.removeEventListener('click', _mouseBlockHandler, true); } catch (_) {}
+        try { _videoOverlay.removeEventListener('dblclick', _mouseBlockHandler, true); } catch (_) {}
+        try { _videoOverlay.removeEventListener('contextmenu', _mouseBlockHandler, true); } catch (_) {}
+      }
+      try { _videoOverlay.remove(); } catch (_) {}
+      _videoOverlay = null;
+      _mouseBlockHandler = null;
+    }
+    if (_lockedVideo) {
+      try {
+        if (_videoSavedControls !== null) _lockedVideo.setAttribute('controls', _videoSavedControls);
+        _lockedVideo.style.pointerEvents = '';
+        _lockedVideo.style.filter = _videoSavedFilter || '';
+      } catch (_) {}
+      _lockedVideo = null;
+      _videoSavedControls = null;
+      _videoSavedFilter = null;
+    }
+    if (_keyBlockHandler) {
+      try { document.removeEventListener('keydown', _keyBlockHandler, true); } catch (_) {}
+      _keyBlockHandler = null;
+    }
   }
 
   // ─── Popup window management ─────────────────────────────────────────
@@ -191,6 +309,9 @@
   function closeFloatingWindow() {
     // Clear popup close watcher
     if (_windowCloseCheckId) { clearInterval(_windowCloseCheckId); _windowCloseCheckId = null; }
+
+    // Remove video lock overlay + restore video controls
+    removeVideoOverlay();
 
     // Remove visibility listener
     if (_visibilityHandler) {
@@ -1163,7 +1284,10 @@
     _vt = null;
     _vtLastAdvanceMs = 0;
 
+    createVideoOverlay(video);
+
     if (!openFloatingWindow(video)) {
+      removeVideoOverlay();
       ai.floatingMode = false;
       ai.offlineMode = false;
       ai.offlineVideo = null;
