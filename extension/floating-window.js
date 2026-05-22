@@ -38,6 +38,7 @@
   var captureVideoEl = null;
   var _audioReady = false;
   var _windowCloseCheckId = null;
+  var _stayOnTopInterval = null;
   // Registry of all event listeners attached by the current floating
   // session, so closeFloatingWindow can reliably remove them. Without
   // this, a 2nd startFloatingWindowMode on the same <video> element
@@ -233,6 +234,30 @@
     ai.floatingCanvasCtx = ai.floatingCanvas ? ai.floatingCanvas.getContext('2d') : null;
     ai.floatingLoaded = true;
 
+    // Keep popup on top: re-focus on blur + periodic focus pulse.
+    // Browser popups have no native "always on top"; this is the best-effort
+    // approximation using blur interception and a heartbeat.
+    try {
+      ai.floatingWindow.addEventListener('blur', function () {
+        if (ai.floatingWindow && !ai.floatingWindow.closed) {
+          try { ai.floatingWindow.focus(); } catch (_) {}
+        }
+      });
+    } catch (_) {}
+    clearInterval(_stayOnTopInterval);
+    _stayOnTopInterval = setInterval(function () {
+      if (!ai.floatingWindow || ai.floatingWindow.closed) {
+        clearInterval(_stayOnTopInterval);
+        _stayOnTopInterval = null;
+        return;
+      }
+      try {
+        if (ai.floatingWindow.document.hasFocus && !ai.floatingWindow.document.hasFocus()) {
+          ai.floatingWindow.focus();
+        }
+      } catch (_) {}
+    }, 500);
+
     var sEl = ai.floatingWindow.document.getElementById('audio-status');
     var a = ai.floatingWindow.document.getElementById('tts-player');
     var primer = ai.floatingWindow.document.getElementById('audio-primer');
@@ -309,6 +334,9 @@
   function closeFloatingWindow() {
     // Clear popup close watcher
     if (_windowCloseCheckId) { clearInterval(_windowCloseCheckId); _windowCloseCheckId = null; }
+
+    // Clear stay-on-top interval
+    if (_stayOnTopInterval) { clearInterval(_stayOnTopInterval); _stayOnTopInterval = null; }
 
     // Remove video lock overlay + restore video controls
     removeVideoOverlay();
