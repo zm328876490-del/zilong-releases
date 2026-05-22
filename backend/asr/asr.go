@@ -599,13 +599,72 @@ func (rb *RollingBuffer) checkAndProcess() {
 	}
 }
 
+// ResetSession is called when the client signals that the audio source has
+// fundamentally changed (video looped, switched to next video, etc).
+// It first flushes any pending tail to capture the last words of the
+// previous segment, then wipes the buffer & cursors so the next Append()
+// starts a fresh timeline from videoTime=0. Without this, a TikTok loop
+// would have its 2nd play appended to the 1st, causing whisper to return
+// a single 30s segment for two consecutive 14.5s plays.
+func (rb *RollingBuffer) ResetSession() {
+	// Step 1: flush whatever is pending (last < 2s of previous session).
+	// This runs processBatch synchronously and returns when whisper has
+	// returned segments AND onResult has been invoked.
+	rb.FlushTail()
+
+	// Step 2: wait for any in-flight processBatch (started by the ticker
+	// loop) to finish — otherwise we'd clear the buffer while whisper is
+	// still transcribing the tail, and those segments would be lost.
+	for i := 0; i < 30; i++ { // up to 3s
+		rb.mu.Lock()
+		busy := rb.processing
+		rb.mu.Unlock()
+		if !busy {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Step 3: wipe state.
+	rb.mu.Lock()
+	rb.samples = rb.samples[:0]
+	rb.chunkTimestamps = rb.chunkTimestamps[:0]
+	rb.lastEmittedEnd = 0
+	rb.lastEmittedSample = 0
+	rb.mu.Unlock()
+}
+
+// FlushTail forces processBatch to run even if < 2s of unprocessed audio
+// remains. Called by the extension on video-ended or source-swap so the
+// final tail (which would otherwise sit forever below the 2s threshold)
+// gets transcribed. Safe to call repeatedly.
+func (rb *RollingBuffer) FlushTail() {
+	rb.mu.Lock()
+	if rb.processing || !rb.started {
+		rb.mu.Unlock()
+		return
+	}
+	// Even a tiny tail (e.g. 300ms) is worth sending — whisper handles
+	// short clips, and the alternative is silently dropping it.
+	unprocessed := len(rb.samples) - rb.lastEmittedSample
+	if unprocessed < sampleRate/4 { // < 250ms = noise, skip
+		rb.mu.Unlock()
+		return
+	}
+	rb.mu.Unlock()
+	rb.processBatch()
+}
+
 func (rb *RollingBuffer) processBatch() {
 	rb.mu.Lock()
 	if rb.processing {
 		rb.mu.Unlock()
 		return
 	}
-	if len(rb.samples) < sampleRate*2 {
+	// Allow tail-flush: as long as ANY new audio exists past lastEmittedSample,
+	// proceed. The old `len(samples) < 2s` guard caused the final < 2s of every
+	// video to be silently dropped.
+	if len(rb.samples) == 0 || rb.lastEmittedSample >= len(rb.samples) {
 		rb.mu.Unlock()
 		return
 	}
@@ -629,9 +688,20 @@ func (rb *RollingBuffer) processBatch() {
 		startSample = 0
 	}
 
-	slice := rb.samples[startSample:]
+	// HARD CAP: never send more than 8s of audio to whisper in one batch.
+	// Without this, video loops or long silent gaps cause whisper to
+	// receive 20-30s of audio and return a single huge segment that
+	// blocks subtitle granularity (one 30s subtitle line for a TikTok loop).
+	const maxBatchSamples = sampleRate * 8
+	endSample := len(rb.samples)
+	if endSample-startSample > maxBatchSamples {
+		endSample = startSample + maxBatchSamples
+	}
+
+	slice := rb.samples[startSample:endSample]
 	samples := make([]int16, len(slice))
 	copy(samples, slice)
+	sliceEndSample := endSample // remember where we cut so processBatch can advance cursor correctly even on dedup
 
 	timestamps := make([]chunkTimestamp, len(rb.chunkTimestamps))
 	copy(timestamps, rb.chunkTimestamps)
@@ -657,8 +727,7 @@ func (rb *RollingBuffer) processBatch() {
 		return
 	}
 
-	log.Printf("[rolling] whisper returned %d segments from %.1fs audio (offset=%.1fs)",
-		len(segs), float64(len(samples))/sampleRate, baseVideoTime)
+	// (verbose batch log removed; use the [stats] lines in main.go for timing)
 
 	maxSegEnd := 0.0 // audio-relative end of the last emitted segment
 
@@ -668,13 +737,62 @@ func (rb *RollingBuffer) processBatch() {
 		absStart := baseVideoTime + seg.Start
 		absEnd := baseVideoTime + seg.End
 
+		// Drop fully-overlapped segs (entirely before lastEnd).
 		if absEnd <= lastEnd {
 			continue
 		}
 
+		// Convert ALL word times to absolute video time first.
 		for i := range seg.Words {
 			seg.Words[i].Start = baseVideoTime + seg.Words[i].Start
 			seg.Words[i].End = baseVideoTime + seg.Words[i].End
+		}
+
+		// CRITICAL: trim overlap with previously-emitted audio.
+		// Without this, the 1s overlap fed to whisper for context
+		// makes the FIRST words of each batch repeat the LAST words
+		// of the previous batch — the user hears "下一句读到上一句的词"
+		// and sees duplicate subtitles.
+		if absStart < lastEnd {
+			if len(seg.Words) > 0 {
+				// Precise: keep words whose MIDPOINT is past lastEnd.
+				keptWords := seg.Words[:0]
+				for _, w := range seg.Words {
+					mid := (w.Start + w.End) / 2
+					if mid > lastEnd {
+						keptWords = append(keptWords, w)
+					}
+				}
+				if len(keptWords) == 0 {
+					// Whole segment was overlap repetition — drop it.
+					continue
+				}
+				seg.Words = keptWords
+				absStart = keptWords[0].Start
+				absEnd = keptWords[len(keptWords)-1].End
+				var sb strings.Builder
+				for i, w := range keptWords {
+					if i > 0 {
+						sb.WriteByte(' ')
+					}
+					sb.WriteString(w.Word)
+				}
+				seg.Text = sb.String()
+			} else {
+				// No word-level data: if the seg starts > 0.5s before
+				// lastEnd, it's mostly overlap repetition — drop it.
+				// Otherwise emit but anchor start to lastEnd.
+				if lastEnd-absStart > 0.5 {
+					continue
+				}
+				absStart = lastEnd
+			}
+		}
+
+		// Trim leading whitespace introduced by word joining.
+		seg.Text = strings.TrimSpace(seg.Text)
+		if seg.Text == "" {
+			continue
 		}
 
 		charCount := len([]rune(seg.Text))
@@ -700,6 +818,16 @@ func (rb *RollingBuffer) processBatch() {
 		// Advance the sample cursor to the end of the last emitted segment,
 		// so the next batch starts from where this segment ended (minus overlap).
 		rb.lastEmittedSample = startSample + int(maxSegEnd*float64(sampleRate))
+	} else {
+		// Whisper returned 0 new segments (silence / noise / dedup'd). If we
+		// don't advance the cursor, the next tick re-processes the SAME
+		// audio forever, blocking new audio from ever being emitted. Advance
+		// past the slice we JUST sent (not the whole buffer — we may have
+		// capped the batch), keeping 1s of overlap for boundary context.
+		newCursor := sliceEndSample - sampleRate
+		if newCursor > rb.lastEmittedSample {
+			rb.lastEmittedSample = newCursor
+		}
 	}
 	rb.mu.Unlock()
 }
@@ -763,8 +891,7 @@ func ProcessOfflineFull(samples []int16, serverURL, language string, sampleRate 
 	if len(preview) > 300 {
 		preview = preview[:300]
 	}
-	log.Printf("[verbose-json] raw response preview: %s", preview)
-
+	_ = preview
 	return parseVerboseJSON(text)
 }
 
@@ -828,8 +955,6 @@ func parseVerboseJSON(raw string) ([]SubtitleSegment, error) {
 		return nil, fmt.Errorf("parse verbose_json: %w", err)
 	}
 
-	log.Printf("[verbose-json] raw segments count: %d", len(result.Segments))
-
 	var segs []SubtitleSegment
 	skipped := 0
 	for _, s := range result.Segments {
@@ -853,7 +978,7 @@ func parseVerboseJSON(raw string) ([]SubtitleSegment, error) {
 			skipped++
 		}
 	}
-	log.Printf("[verbose-json] parsed: %d segments kept, %d skipped", len(segs), skipped)
+	_ = skipped
 	return segs, nil
 }
 

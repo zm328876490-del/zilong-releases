@@ -62,6 +62,23 @@
     stopAudioCapture: stopAudioCapture,
     finishWarmup: finishWarmup,
     _captureVideo: null,
+    // True once captureVideoAudio() has successfully connected the source
+    // and PCM is actually flowing into the worklet. The floating window
+    // uses this to defer its frame-buffering clock so that buffer t=0 ==
+    // the moment ASR first sees audio. Without this, the ~1-2s startup
+    // window (WS connect + worklet load) causes the opening words of the
+    // video to be played in the floating window but never seen by ASR.
+    asrCaptureReady: false,
+    // When true, the worklet drops incoming PCM instead of forwarding to
+    // backend. Used by floating-window to stop feeding ASR after the source
+    // video reaches its first 'ended' — prevents TikTok auto-loop's 2nd
+    // play from polluting the timeline with duplicate utterances.
+    audioFrozen: false,
+    _flushAudioWorklet: function () {
+      if (processorNode) {
+        try { processorNode.port.postMessage('flush'); } catch (_) {}
+      }
+    },
   };
 
   // ─── Configuration ────────────────────────────────────────────────
@@ -80,6 +97,18 @@
   let pipelineActive = false;    // AudioContext + processorNode created and live
   let activeVideo = null;       // currently captured <video> element
   let activeStream = null;      // current captureStream() MediaStream
+  // Source video whose PCM is currently entering the worklet queue. This is
+  // updated AFTER a flush+settle when switching sources, so PCM batches
+  // still in the worklet queue continue to be timestamped against the OLD
+  // video. Without this lock, batches from the old video would be stamped
+  // with the new video's currentTime → all timestamps wrong → ASR segments
+  // misaligned → subtitles/TTS don't match what's on screen.
+  let currentPcmSrcVideo = null;
+  // Worklet readiness promise — resolved when AudioWorkletNode is live.
+  let workletReadyPromise = null;
+  // Last sample-sequence we saw from the worklet; used to detect drops.
+  let _lastSampleSeqEnd = 0;
+  let _audioHoleCount = 0;
   let pcmBuffer = [];          // PCM chunks buffered during warmup before WS ready
   let videoWatcher = null;      // persistent MutationObserver for video elements
   let videoPollTimer = null;    // periodic check for video src changes / new videos
@@ -164,6 +193,7 @@ function generateSessionId() {
   let workletReady = false;        // AudioWorklet module loaded and node created
   let pendingStream = null;      // MediaStream waiting for worklet to be ready
   let pendingMediaElement = null; // HTMLMediaElement waiting for worklet to be ready
+  let pendingSrcVideoForStream = null; // video to lock as currentPcmSrcVideo when pendingStream attaches
   let offlineSavedRate = 1;       // saved playbackRate before speed-up
   let offlineSavedVolume = 1;     // saved volume before mute
   const OFFLINE_SPEED = 2.0;      // playback speed during recording phase (2x faster collection)
@@ -454,6 +484,21 @@ function generateSessionId() {
       start();
     }
   });
+
+  // Floating popup close → sync FAB + isRunning. Without this hook,
+  // a user closing the popup leaves isRunning=true and FAB in "running"
+  // state, so the next click is routed to stop() (no-op) instead of
+  // start(). User then has to click twice to restart translation.
+  window.__ai_onFloatingClosed__ = function () {
+    if (!isRunning) return;
+    // Full teardown matches the stop() codepath so audio/WS/pipeline are
+    // clean for the next start(). Avoids relying on partial cleanup.
+    try { stop(); } catch (e) {
+      // Defensive: at minimum sync the flags so FAB shows the right state.
+      isRunning = false;
+      fab.classList.remove('running');
+    }
+  };
 
   const contentDiv = overlay.querySelector('#__subtitle_content__');
 
@@ -1155,107 +1200,210 @@ function generateSessionId() {
   // AudioContext + processorNode are created ONCE and survive video swaps.
   // Only the source node (MediaStreamSource) is swapped when video changes.
 
+  // Returns a Promise<boolean> that resolves true ONLY when AudioContext +
+  // AudioWorkletNode are both ready. Synchronous callers that only need
+  // AudioContext (not worklet) can still treat truthy resolve as success.
+  // Multiple concurrent callers share the same in-flight promise.
   function ensureAudioContext() {
-    if (audioContext && processorNode) {
-      pipelineActive = true;
-      return true;
-    }
+    if (workletReadyPromise) return workletReadyPromise;
 
-    // AudioContext created but worklet module still loading — keep waiting
-    if (audioContext && !processorNode) {
-      pipelineActive = true;
-      return true;
-    }
+    workletReadyPromise = new Promise(function (resolve) {
+      try {
+        if (!audioContext) {
+          audioContext = new AudioContext({ sampleRate: 16000 });
+        }
+        if (audioContext.state === 'suspended') {
+          audioContext.resume().catch(function () {});
+        }
 
-    try {
-      audioContext = new AudioContext({ sampleRate: 16000 });
-      if (audioContext.state === 'suspended') {
-        audioContext.resume();
-      }
-
-      // Load AudioWorklet module (async). PCM chunks are buffered in pcmBuffer
-      // during the brief loading window — same as current warmup behavior.
-      audioContext.audioWorklet.addModule(chrome.runtime.getURL('audio-processor.js'))
-        .then(() => {
-          processorNode = new AudioWorkletNode(audioContext, 'audio-capture-processor');
-
-          processorNode.port.onmessage = (event) => {
-            if (!pipelineActive) return;
-            const pcm = new Int16Array(event.data.pcm);
-
-            // Timestamp: current video playback head minus chunk duration and
-            // pipeline latency, same formula as the old ScriptProcessor path.
-            var rawVt = activeVideo ? activeVideo.currentTime : (offlineVideo ? offlineVideo.currentTime : 0);
-            var chunkDur = pcm.length / audioContext.sampleRate;
-            var PIPELINE_LATENCY = 0.1;
-            var vt = rawVt - chunkDur - PIPELINE_LATENCY;
-            if (vt < 0) vt = 0;
-
-            var head = new Uint8Array(8);
-            new DataView(head.buffer).setFloat64(0, vt, true);
-            var combined = new Uint8Array(8 + pcm.byteLength);
-            combined.set(head, 0);
-            combined.set(new Uint8Array(pcm.buffer), 8);
-
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-              pcmBuffer.push(combined);
-              return;
-            }
-            ws.send(combined.buffer);
-          };
-
-          // Connect any source that was waiting for the worklet to load
-          if (pendingStream) {
-            sourceNode = audioContext.createMediaStreamSource(pendingStream);
-            sourceNode.connect(processorNode);
-            activeStream = pendingStream;
-            pendingStream = null;
-          } else if (pendingMediaElement) {
-            sourceNode = audioContext.createMediaElementSource(pendingMediaElement);
-            sourceNode.connect(processorNode);
-            activeVideo = pendingMediaElement;
-            pendingMediaElement = null;
-          }
-
+        if (processorNode) {
+          pipelineActive = true;
           workletReady = true;
-          console.log('[content] AudioWorklet ready');
-        })
-        .catch(err => {
-          sendStatus('error', 'AudioWorklet 加载失败: ' + err.message);
-        });
+          resolve(true);
+          return;
+        }
 
-      pipelineActive = true;
-      return true;
-    } catch (err) {
-      sendStatus('error', 'AudioContext 创建失败: ' + err.message);
-      return false;
-    }
+        audioContext.audioWorklet.addModule(chrome.runtime.getURL('audio-processor.js'))
+          .then(function () {
+            processorNode = new AudioWorkletNode(audioContext, 'audio-capture-processor');
+
+            processorNode.port.onmessage = function (event) {
+              if (!pipelineActive) return;
+              var data = event.data;
+              // Frozen mode: source video ended (TikTok auto-loop or
+              // end-of-content). Drop PCM to prevent the 2nd/3rd loop's
+              // audio from getting fed to ASR as "new content" — that
+              // pollutes the timeline and causes duplicate subtitles +
+              // out-of-order TTS the user reported.
+              // EXCEPTION: a 'flush' batch (worklet draining its tail in
+              // response to the end-of-video flush request) is always
+              // allowed through, even after audioFrozen is set — that's
+              // the legitimate final ~256ms of the original video.
+              if (window.__ai__.audioFrozen && !data.flush) return;
+
+              // Overflow notice from worklet — main thread was stalled, we
+              // dropped oldest samples. Log it so we can see if this is the
+              // cause of any alignment drift.
+              if (data.overflow) {
+                _audioHoleCount++;
+                console.warn('[content] AUDIO HOLE: worklet dropped ' +
+                  data.droppedSamples + ' samples (' +
+                  (data.droppedSamples * 1000 / 16000).toFixed(0) + 'ms) at seq ' +
+                  data.atSampleSeq + ' (total holes: ' + _audioHoleCount + ')');
+                return;
+              }
+
+              var pcm = new Int16Array(data.pcm);
+
+              // Sequence continuity check — if there's a gap between the
+              // end of the last batch and the start of this one, the
+              // worklet skipped samples and we MUST inject a marker so the
+              // backend doesn't misalign timestamps.
+              if (typeof data.sampleStartSeq === 'number') {
+                if (_lastSampleSeqEnd !== 0 &&
+                    data.sampleStartSeq !== _lastSampleSeqEnd) {
+                  var gap = data.sampleStartSeq - _lastSampleSeqEnd;
+                  console.warn('[content] AUDIO HOLE: ' + gap + ' samples skipped between batches (~' +
+                    (gap * 1000 / 16000).toFixed(0) + 'ms)');
+                }
+                _lastSampleSeqEnd = data.sampleStartSeq + (data.sampleCount || pcm.length);
+              }
+
+              // Anchor PCM batch to EXACT video time of its FIRST sample.
+              // CRITICAL: use currentPcmSrcVideo (locked to the source the
+              // batch CAME FROM), not activeVideo (which may have already
+              // been swapped to a new source while this batch sat in the
+              // worklet queue). Mis-locking causes systematic timestamp
+              // offset and subtitle/TTS desync.
+              var srcVideo = currentPcmSrcVideo || activeVideo || offlineVideo;
+              var startCtx = data.startCtxTime;
+              var vt = 0;
+              if (typeof startCtx === 'number' && startCtx >= 0 && audioContext) {
+                var ctxNow = audioContext.currentTime;
+                var vtNow = srcVideo ? srcVideo.currentTime : 0;
+                vt = vtNow - (ctxNow - startCtx);
+              } else {
+                var rawVt = srcVideo ? srcVideo.currentTime : 0;
+                var chunkDur = pcm.length / audioContext.sampleRate;
+                vt = rawVt - chunkDur - 0.1;
+              }
+              if (vt < 0) vt = 0;
+
+              var isFlush = !!data.flush;
+
+              var head = new Uint8Array(8);
+              new DataView(head.buffer).setFloat64(0, vt, true);
+              var combined = new Uint8Array(8 + pcm.byteLength);
+              combined.set(head, 0);
+              combined.set(new Uint8Array(pcm.buffer), 8);
+
+              if (!ws || ws.readyState !== WebSocket.OPEN) {
+                pcmBuffer.push(combined);
+                return;
+              }
+              ws.send(combined.buffer);
+
+              if (isFlush) {
+                try { sendWS({ type: 'flush_tail' }); } catch (_) {}
+              }
+            };
+
+            // Connect any source that was waiting for the worklet to load.
+            // Lock currentPcmSrcVideo to the source we're connecting.
+            if (pendingStream) {
+              sourceNode = audioContext.createMediaStreamSource(pendingStream);
+              sourceNode.connect(processorNode);
+              activeStream = pendingStream;
+              if (pendingSrcVideoForStream) {
+                currentPcmSrcVideo = pendingSrcVideoForStream;
+                pendingSrcVideoForStream = null;
+              }
+              pendingStream = null;
+            } else if (pendingMediaElement) {
+              sourceNode = audioContext.createMediaElementSource(pendingMediaElement);
+              sourceNode.connect(processorNode);
+              activeVideo = pendingMediaElement;
+              currentPcmSrcVideo = pendingMediaElement;
+              pendingMediaElement = null;
+            }
+
+            pipelineActive = true;
+            workletReady = true;
+            console.log('[content] AudioWorklet ready');
+            resolve(true);
+          })
+          .catch(function (err) {
+            sendStatus('error', 'AudioWorklet 加载失败: ' + err.message);
+            workletReadyPromise = null; // allow retry
+            resolve(false);
+          });
+      } catch (err) {
+        sendStatus('error', 'AudioContext 创建失败: ' + err.message);
+        workletReadyPromise = null;
+        resolve(false);
+      }
+    });
+
+    return workletReadyPromise;
   }
 
-  function connectVideoStream(stream) {
+  // Connect a new audio MediaStream to the worklet. `srcVideo` is the
+  // <video> element whose currentTime should be used to timestamp PCM
+  // batches arriving from this stream. We update currentPcmSrcVideo only
+  // AFTER flushing the worklet, so any in-queue PCM from the previous
+  // source is timestamped against its own video, not the new one.
+  function connectVideoStream(stream, srcVideo) {
     if (!audioContext) return false;
 
-    // Disconnect and release old source
+    var sameVideo = (srcVideo && srcVideo === currentPcmSrcVideo);
+
+    // Step 1: flush worklet so any partial batch from the OLD source is
+    // emitted before we change anything else.
+    if (processorNode) {
+      try { processorNode.port.postMessage('flush'); } catch (_) {}
+    }
+
+    // Step 2: disconnect old source. We do NOT stop the old MediaStream
+    // tracks here — defer that by 250ms so the worklet has time to drain
+    // its render-quantum pipeline (a stopped track immediately silences
+    // the AudioContext input). 250ms > 1 quantum + flush emission.
     if (sourceNode) {
-      sourceNode.disconnect();
+      try { sourceNode.disconnect(); } catch (_) {}
       sourceNode = null;
     }
-    if (activeStream) {
-      activeStream.getTracks().forEach(function (t) { t.stop(); });
-      activeStream = null;
+    if (activeStream && activeStream !== stream) {
+      var oldStream = activeStream;
+      setTimeout(function () {
+        try { oldStream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
+      }, 250);
     }
-
     activeStream = stream;
 
-    // If AudioWorklet hasn't loaded yet, store stream as pending;
-    // it will be connected when the worklet module resolves.
+    // Step 3: if worklet not yet loaded, stash and let the loader connect.
     if (!processorNode) {
       pendingStream = stream;
+      pendingSrcVideoForStream = srcVideo || null;
       return true;
     }
 
+    // Step 4: connect new source. Give the worklet ~50ms to drain the
+    // flush before we re-arm currentPcmSrcVideo — the in-flight flush
+    // message is delivered cross-thread and we don't want the next batch
+    // (from the new source) to inherit the old video's timestamp lock.
     sourceNode = audioContext.createMediaStreamSource(stream);
     sourceNode.connect(processorNode);
+
+    if (!sameVideo) {
+      // Defer the source-video lock change so the old-source batch (just
+      // flushed) is timestamped against the old video.
+      setTimeout(function () {
+        currentPcmSrcVideo = srcVideo || null;
+        // Reset hole-detection counter — a real swap is not a "hole".
+        _lastSampleSeqEnd = 0;
+      }, 60);
+    } else {
+      currentPcmSrcVideo = srcVideo;
+    }
     return true;
   }
 
@@ -1280,8 +1428,20 @@ function generateSessionId() {
     }
   }
 
-  function captureVideoAudio(video) {
+  async function captureVideoAudio(video) {
     if (!video) return false;
+
+    // If we're swapping AWAY from a previous active video, flush its
+    // worklet tail FIRST so the last < 256ms of that video survives,
+    // then tell the backend to start a fresh ASR session — otherwise
+    // the new video's audio gets appended to the old buffer and whisper
+    // merges them into a single (wrong) mega-segment.
+    if (activeVideo && activeVideo !== video) {
+      if (processorNode) {
+        try { processorNode.port.postMessage('flush'); } catch (_) {}
+      }
+      try { sendWS({ type: 'session_split' }); } catch (_) {}
+    }
 
     // Already capturing this video with a healthy stream — skip re-capture
     if (activeVideo === video && sourceNode && activeStream) {
@@ -1293,6 +1453,12 @@ function generateSessionId() {
 
     try {
       video.muted = false;
+
+      // CRITICAL: ensure AudioWorklet is fully loaded BEFORE we call
+      // video.captureStream(). Otherwise the 100-500ms worklet load
+      // window silently drops any audio data the stream produces.
+      var workletOk = await ensureAudioContext();
+      if (!workletOk) return false;
 
       // Try captureStream() first
       var stream = null;
@@ -1308,10 +1474,9 @@ function generateSessionId() {
       if (crossOriginError || (stream && stream.getAudioTracks().length === 0)) {
         // Cross-origin video: fallback to createMediaElementSource
         try {
-          if (!ensureAudioContext()) return false;
-          if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+          if (sourceNode) { try { sourceNode.disconnect(); } catch (_) {} sourceNode = null; }
           if (activeStream) {
-            activeStream.getTracks().forEach(function (t) { t.stop(); });
+            try { activeStream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
             activeStream = null;
           }
           sourceNode = audioContext.createMediaElementSource(video);
@@ -1320,8 +1485,10 @@ function generateSessionId() {
             processorNode.connect(audioContext.destination);
           }
           activeVideo = video;
+          currentPcmSrcVideo = video;
           activeVideo._lastSrc = video.src;
           pipelineActive = true;
+          window.__ai__.asrCaptureReady = true;
           sendStatus('listening', '跨域音频捕获成功 (MediaElementSource)');
           return true;
         } catch (e3) {
@@ -1338,11 +1505,14 @@ function generateSessionId() {
 
       var audioStream = new MediaStream(audioTracks);
 
-      if (!ensureAudioContext()) return false;
-
-      connectVideoStream(audioStream);
+      // Pass video so connectVideoStream can lock currentPcmSrcVideo
+      // correctly (after flushing the old tail).
+      connectVideoStream(audioStream, video);
       activeVideo = video;
       activeVideo._lastSrc = video.src;
+      // Signal to the floating window that audio is now flowing — it can
+      // safely start its delay-buffer clock from this point.
+      window.__ai__.asrCaptureReady = true;
 
       // Re-capture on play to revive ended tracks when video loops
       if (activeVideo._capturePlayHandler) {
@@ -1388,7 +1558,21 @@ function generateSessionId() {
     }
     pendingStream = null;
     pendingMediaElement = null;
+    pendingSrcVideoForStream = null;
     workletReady = false;
+    // CRITICAL: clear the worklet-ready promise. ensureAudioContext() caches
+    // this promise to dedupe concurrent callers; if we leave it set after
+    // destroying the AudioContext, the next start() will see a resolved
+    // promise but a null processorNode/audioContext, and no PCM will ever
+    // flow → "stop then start" produces a dead pipeline with no subtitles.
+    workletReadyPromise = null;
+    currentPcmSrcVideo = null;
+    pcmBuffer = [];
+    _lastSampleSeqEnd = 0;
+    _audioHoleCount = 0;
+    window.__ai__.asrCaptureReady = false;
+    window.__ai__.audioFrozen = false;
+    window.__ai__._droppedUids = {};
     if (activeVideo) {
       if (activeVideo._capturePlayHandler) {
         activeVideo.removeEventListener('play', activeVideo._capturePlayHandler);
@@ -1408,6 +1592,11 @@ function generateSessionId() {
   // window close to prevent orphaned capture/processing after window is gone.
   function stopAudioCapture() {
     pcmBuffer = [];
+    window.__ai__.asrCaptureReady = false;
+    // Reset frozen flag here too. closeFloatingWindow clears its own
+    // state, but if stopAudioCapture is reached via any other path the
+    // next capture session must not inherit a stuck audioFrozen=true.
+    window.__ai__.audioFrozen = false;
     if (ws && ws.readyState === WebSocket.OPEN) {
       sendWS({ type: 'stop' });
     }
@@ -1495,9 +1684,14 @@ function generateSessionId() {
         // Same element, different source — new video content, destroy old state
         if (!waitingPreprocess) { cleanupDisplayState(); tryResumeOrCapture(video); }
       } else if (activeStream) {
-        // Detect ended tracks (video finished/looped) — re-capture to revive
+        // Detect ended tracks (video finished/looped) — re-capture to revive.
+        // Flush worklet FIRST so the final < 256ms of the previous play is
+        // emitted before the recapture process disconnects the source.
         var tracks = activeStream.getAudioTracks();
         if (tracks.length === 0 || tracks[0].readyState === 'ended') {
+          if (processorNode) {
+            try { processorNode.port.postMessage('flush'); } catch (_) {}
+          }
           captureVideoAudio(video);
         }
       }
@@ -1804,13 +1998,42 @@ function generateSessionId() {
               displayed: false,
               played: false,
             };
-            floatingTimeline.push(entry);
-            console.log('[content] timeline entry #' + (floatingTimeline.length - 1) +
-              ' [' + entry.start.toFixed(1) + '-' + entry.end.toFixed(1) + 's] ' +
-              (entry.audioBase64 ? '[+audio]' : '[no audio yet]') +
-              ': ' + JSON.stringify(entry.original));
+            // Insert into timeline keyed by start time. Whisper batches
+            // and translate-API latency can deliver out of order; if we
+            // append blindly, the timeline-loop's cursor logic produces
+            // wrong-order subtitles ("顺序混乱"). Binary insert keeps
+            // floatingTimeline always sorted by .start.
+            var lo = 0, hi = floatingTimeline.length;
+            while (lo < hi) {
+              var mid = (lo + hi) >>> 1;
+              if (floatingTimeline[mid].start < entry.start) lo = mid + 1;
+              else hi = mid;
+            }
+            // Drop near-duplicate (overlapping start within 0.3s AND
+            // same original text) to defend against whisper overlap
+            // re-emitting the same segment twice. This is the main
+            // cause of "first TTS plays twice".
+            var dup = false;
+            for (var d = Math.max(0, lo - 2); d < Math.min(floatingTimeline.length, lo + 2); d++) {
+              var ex = floatingTimeline[d];
+              if (Math.abs(ex.start - entry.start) < 0.3 && ex.original === entry.original) {
+                dup = true; break;
+              }
+            }
+            if (!dup) {
+              floatingTimeline.splice(lo, 0, entry);
+              // If we inserted BEFORE the current cursor, shift cursor.
+              if (lo < ai.floatingTimelineCursor) ai.floatingTimelineCursor++;
+            } else {
+              // Remember dropped utteranceId so its incoming audio_start/
+              // chunk/end can be ignored instead of falling through to the
+              // legacy "play immediately" path (which would cause the
+              // duplicate TTS the user reported).
+              if (!window.__ai__._droppedUids) window.__ai__._droppedUids = {};
+              if (entry.utteranceId) window.__ai__._droppedUids[entry.utteranceId] = Date.now();
+            }
             // Subtitle and TTS are handled by the floating window timeline loop,
-            // which uses refTime = originalTime - FRAME_DELAY to align with the
+            // which uses refTime = displayedFrameVideoTime to align with the
             // delayed video. Don't show/play here.
           } else {
             // Old backend without timestamps — fallback to immediate display
@@ -1827,6 +2050,8 @@ function generateSessionId() {
         if (floatingFallback) {
           // Check if there's a matching timeline entry (new backend with timestamps)
           var uid = msg.utteranceId || '';
+          // Ignore audio for utterances we dropped as duplicates
+          if (window.__ai__._droppedUids && window.__ai__._droppedUids[uid]) break;
           var found = false;
           for (var i = floatingTimeline.length - 1; i >= 0; i--) {
             if (floatingTimeline[i].utteranceId === uid) {
@@ -1847,6 +2072,7 @@ function generateSessionId() {
       case 'audio_chunk':
         if (floatingFallback) {
           var uid = msg.utteranceId || '';
+          if (window.__ai__._droppedUids && window.__ai__._droppedUids[uid]) break;
           var found = false;
           for (var i = floatingTimeline.length - 1; i >= 0; i--) {
             if (floatingTimeline[i].utteranceId === uid && msg.audio) {
@@ -1869,6 +2095,16 @@ function generateSessionId() {
       case 'audio_end':
         if (floatingFallback) {
           var uid2 = msg.utteranceId || '';
+          if (window.__ai__._droppedUids && window.__ai__._droppedUids[uid2]) {
+            // Cleanup old dropped uids (keep map small)
+            var nowTs = Date.now();
+            for (var dk in window.__ai__._droppedUids) {
+              if (nowTs - window.__ai__._droppedUids[dk] > 60000) {
+                delete window.__ai__._droppedUids[dk];
+              }
+            }
+            break;
+          }
           var found = false;
           for (var k = floatingTimeline.length - 1; k >= 0; k--) {
             if (floatingTimeline[k].utteranceId === uid2) {
@@ -1879,9 +2115,31 @@ function generateSessionId() {
                 var reader2 = new FileReader();
                 reader2.onload = function () {
                   entryRef.audioBase64 = reader2.result.split(',')[1];
-                  // Don't play TTS here — the floating window timeline loop
-                  // plays it when refTime reaches this entry's start time,
-                  // which aligns with the delayed video.
+                  // If this entry is what the user is CURRENTLY seeing
+                  // on the subtitle, play its audio immediately — the
+                  // subtitle has been waiting for it. If a different
+                  // line is now showing, do NOT play — that would be
+                  // the "TTS reads something different from subtitle"
+                  // bug the user reported.
+                  try {
+                    var ai = window.__ai__;
+                    // Late-arriving TTS audio. Rules:
+                    //   1. This entry must still be the currently-visible line.
+                    //   2. _vt must not have crossed entry.end yet (don't
+                    //      backfill audio for a subtitle that's already gone).
+                    //   3. There must not be another TTS playing right now
+                    //      (no conflict). _currentTtsEntry===null means free.
+                    var vt = ai && ai.getFloatingVt ? ai.getFloatingVt() : null;
+                    var stillVisible = ai && ai._visibleLine === entryRef;
+                    var inWindow = vt === null || vt < entryRef.end;
+                    var noConflict = !ai || !ai._currentTtsEntry;
+                    if (stillVisible && inWindow && noConflict && !entryRef.played) {
+                      entryRef.played = true;
+                      if (ai.playFloatingTTSDirect) {
+                        ai.playFloatingTTSDirect(entryRef.audioBase64, entryRef.audioMime || 'audio/mpeg', entryRef);
+                      }
+                    }
+                  } catch (_) {}
                 };
                 reader2.readAsDataURL(blob2);
               }
@@ -2007,9 +2265,15 @@ function generateSessionId() {
               chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
             } else {
               var video = window.__ai__._captureVideo || findVideoElement();
-              var ok = video ? captureVideoAudio(video) : false;
-              if (ok) {
-                activatePipeline();
+              if (video) {
+                captureVideoAudio(video).then(function (ok) {
+                  if (ok) {
+                    activatePipeline();
+                  } else {
+                    isRunning = false;
+                    finishWarmup();
+                  }
+                });
               } else {
                 isRunning = false;
                 finishWarmup();
@@ -2092,13 +2356,14 @@ function generateSessionId() {
 
   function preheatPhase2() {
     var video = findVideoElement();
-    var ok = video ? captureVideoAudio(video) : false;
-    if (ok) {
+    if (!video) {
       preheatActive = false;
-      preheatReady = true;
-    } else {
-      preheatActive = false;
+      return;
     }
+    captureVideoAudio(video).then(function (ok) {
+      preheatActive = false;
+      if (ok) preheatReady = true;
+    });
   }
 
   function activatePipeline() {
@@ -2728,12 +2993,22 @@ function generateSessionId() {
     }
   }
 
-  function startOfflineRecording(video) {
+  async function startOfflineRecording(video) {
     offlineMode = true;
     offlineRecording = true;
     offlineVideo = video;
     offlineSavedRate = video.playbackRate;
     offlineSavedVolume = video.volume;
+
+    // CRITICAL: load AudioWorklet FIRST. captureStream() before worklet is
+    // ready means the load-window's 100-500ms of audio is silently dropped.
+    var workletOk = await ensureAudioContext();
+    if (!workletOk) {
+      cleanupOffline();
+      sendStatus('error', '无法初始化音频上下文');
+      return;
+    }
+    offlineAudioCtx = audioContext;
 
     // Unmute before captureStream — TikTok etc. mute on page load
     video.muted = false;
@@ -2764,36 +3039,25 @@ function generateSessionId() {
         audioStream = new MediaStream([audioTrack]);
       }
     }
-    if (!ensureAudioContext()) {
-      cleanupOffline();
-      sendStatus('error', '无法初始化音频上下文');
-      return;
-    }
-    offlineAudioCtx = audioContext;
     sendStatus('offline_recording', 'AudioContext sampleRate: ' + offlineAudioCtx.sampleRate);
 
-    // Use the shared AudioWorkletNode — no separate ScriptProcessor needed.
-    // AudioWorklet runs on a dedicated audio thread; it never drops chunks.
+    // Worklet is guaranteed ready here. Flush any prior tail then connect.
+    if (processorNode) {
+      try { processorNode.port.postMessage('flush'); } catch (_) {}
+    }
 
     // Disconnect any existing source and connect this stream for recording
-    if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+    if (sourceNode) { try { sourceNode.disconnect(); } catch (_) {} sourceNode = null; }
 
-    if (!processorNode) {
-      // AudioWorklet module still loading — store as pending, the worklet
-      // loading handler will connect it when ready.
-      if (useMediaElementSource) {
-        pendingMediaElement = video;
-      } else {
-        pendingStream = audioStream;
-      }
+    if (useMediaElementSource) {
+      sourceNode = offlineAudioCtx.createMediaElementSource(video);
     } else {
-      if (useMediaElementSource) {
-        sourceNode = offlineAudioCtx.createMediaElementSource(video);
-      } else {
-        sourceNode = offlineAudioCtx.createMediaStreamSource(audioStream);
-      }
-      sourceNode.connect(processorNode);
+      sourceNode = offlineAudioCtx.createMediaStreamSource(audioStream);
     }
+    sourceNode.connect(processorNode);
+    // Lock source video for PCM timestamping
+    currentPcmSrcVideo = video;
+    _lastSampleSeqEnd = 0;
 
     video.addEventListener('ended', onOfflineRecordingDone, { once: true });
 

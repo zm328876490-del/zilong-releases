@@ -265,6 +265,9 @@ func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, is
 
 	voice := tts.ResolveVoice(c.ttsVoice, c.targetLang)
 
+	ttsStart := time.Now()
+	var firstChunkAt time.Time
+
 	// Check cancellation before sending audio_start
 	select {
 	case <-cancel:
@@ -303,6 +306,9 @@ func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, is
 		buf = buf[:0]
 	}
 	err := tts.SynthesizeStream(text, voice, func(ch tts.AudioChunk) {
+		if firstChunkAt.IsZero() && !ch.Final {
+			firstChunkAt = time.Now()
+		}
 		// Check cancellation before processing each chunk
 		select {
 		case <-cancel:
@@ -311,6 +317,14 @@ func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, is
 		}
 		if ch.Final {
 			flush(false)
+			if !isPartial {
+				ttsTotal := time.Since(ttsStart)
+				firstLat := time.Duration(0)
+				if !firstChunkAt.IsZero() {
+					firstLat = firstChunkAt.Sub(ttsStart)
+				}
+				log.Printf("[stats] tts_done: first_chunk=%v total=%v text_len=%d", firstLat, ttsTotal, len(text))
+			}
 			c.sendJSON(OutMsg{Type: "audio_end", Original: text, UtteranceId: utterId, Index: -1, SpeechRate: speechRate})
 		} else {
 			buf = append(buf, ch.Data...)
@@ -874,6 +888,26 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					client.rollingBuf.Stop()
 				}
 				client.sendJSON(OutMsg{Type: "status", Status: "stopped"})
+
+			case "flush_tail":
+				// Caller (extension) signals end-of-stream or source swap.
+				// Force the rolling buffer to process any remaining
+				// unprocessed audio immediately, ignoring the 2s threshold,
+				// so the last < 2s tail (which would otherwise sit forever)
+				// is transcribed and delivered.
+				if client.rollingBuf != nil {
+					client.rollingBuf.FlushTail()
+				}
+
+			case "session_split":
+				// Video looped or source changed. Flush the tail of the
+				// previous session, then wipe the buffer so the next batch
+				// starts on a fresh timeline. Without this, whisper merges
+				// two consecutive plays into one mega-segment.
+				// ResetSession internally waits for any in-flight batch.
+				if client.rollingBuf != nil {
+					client.rollingBuf.ResetSession()
+				}
 
 			case "subtitle":
 				go client.handleDOMSubtitle(msg.Text, msg.SkipTranslate)

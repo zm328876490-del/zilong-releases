@@ -31,7 +31,8 @@ const (
 	winEpoch      = 11644473600 // seconds between 1601 and 1970
 )
 
-var ttsSem = make(chan struct{}, 3)
+var ttsSem = make(chan struct{}, 8)
+
 
 // AudioChunk is a piece of synthesized audio from the streaming TTS pipeline.
 type AudioChunk struct {
