@@ -58,6 +58,17 @@ type Client struct {
 	offlineBuf        []int16
 	offlineSpeed      float64 // playback speed during recording (for timestamp scaling)
 	offlineSampleRate int     // actual AudioContext sample rate from frontend
+
+	// audio-in debug stats (aggregated, printed once per second)
+	dbgBytesIn      int64
+	dbgChunksIn     int64
+	dbgSamplesIn    int64
+	dbgLastVideoT   float64
+	dbgLastFlushMs  int64
+	dbgRouteRolling int64
+	dbgRouteAudio   int64
+	dbgRouteOffline int64
+	dbgRouteDrop    int64
 }
 
 // Subtitle is a single subtitle cue extracted from a video platform.
@@ -880,6 +891,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					}
 					client.rollingBuf.Start()
 				}
+				log.Printf("[ctrl] start: rolling=%v sourceLang=%s targetLang=%s rollingBuf!=nil=%v",
+					msg.Rolling, client.sourceLang, client.targetLang, client.rollingBuf != nil)
 				client.sendJSON(OutMsg{Type: "status", Status: "listening"})
 
 			case "stop":
@@ -887,6 +900,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if client.rollingBuf != nil {
 					client.rollingBuf.Stop()
 				}
+				log.Printf("[ctrl] stop: active->false")
 				client.sendJSON(OutMsg{Type: "status", Status: "stopped"})
 
 			case "flush_tail":
@@ -955,6 +969,56 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			samples := make([]int16, sampleCount)
 			for i := 0; i < sampleCount; i++ {
 				samples[i] = int16(binary.LittleEndian.Uint16(data[8+i*2 : 8+(i+1)*2]))
+			}
+
+			// ── DEBUG: per-chunk + 1Hz aggregate audio-in log ──
+			client.dbgBytesIn += int64(len(data))
+			client.dbgChunksIn++
+			client.dbgSamplesIn += int64(sampleCount)
+			client.dbgLastVideoT = videoTime
+			route := "drop"
+			if client.offlineASR {
+				route = "offline"
+				client.dbgRouteOffline++
+			} else if client.rollingBuf != nil {
+				route = "rolling"
+				client.dbgRouteRolling++
+			} else if client.audioBuf != nil {
+				route = "audio"
+				client.dbgRouteAudio++
+			} else {
+				client.dbgRouteDrop++
+			}
+			// Per-chunk minimal log (first byte sample value to verify non-zero)
+			var peak int16
+			for _, s := range samples {
+				if s > peak {
+					peak = s
+				} else if -s > peak {
+					peak = -s
+				}
+			}
+			log.Printf("[audio-in] chunk=%dB samples=%d vt=%.2f peak=%d route=%s active=%v rollingBuf=%v audioBuf=%v",
+				len(data), sampleCount, videoTime, peak, route,
+				client.active, client.rollingBuf != nil, client.audioBuf != nil)
+
+			// Aggregate flush every 1s
+			nowMs := time.Now().UnixMilli()
+			if client.dbgLastFlushMs == 0 {
+				client.dbgLastFlushMs = nowMs
+			}
+			if nowMs-client.dbgLastFlushMs >= 1000 {
+				log.Printf("[audio-in/agg] last1s: chunks=%d samples=%d bytes=%d vt=%.2f routes={rolling:%d audio:%d offline:%d drop:%d}",
+					client.dbgChunksIn, client.dbgSamplesIn, client.dbgBytesIn, client.dbgLastVideoT,
+					client.dbgRouteRolling, client.dbgRouteAudio, client.dbgRouteOffline, client.dbgRouteDrop)
+				client.dbgBytesIn = 0
+				client.dbgChunksIn = 0
+				client.dbgSamplesIn = 0
+				client.dbgRouteRolling = 0
+				client.dbgRouteAudio = 0
+				client.dbgRouteOffline = 0
+				client.dbgRouteDrop = 0
+				client.dbgLastFlushMs = nowMs
 			}
 
 			if client.offlineASR {

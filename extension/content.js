@@ -109,6 +109,14 @@
   // Last sample-sequence we saw from the worklet; used to detect drops.
   let _lastSampleSeqEnd = 0;
   let _audioHoleCount = 0;
+  // Audio-out debug stats (front-end side). Aggregated and printed once per second
+  // so we can compare with the backend [audio-in] aggregate log to spot loss in flight.
+  let _dbgSentChunks = 0;
+  let _dbgSentBytes = 0;
+  let _dbgSentPeakMax = 0;
+  let _dbgFrozenDrops = 0;
+  let _dbgWsBuffered = 0;
+  let _dbgLastFlushMs = 0;
   let pcmBuffer = [];          // PCM chunks buffered during warmup before WS ready
   let videoWatcher = null;      // persistent MutationObserver for video elements
   let videoPollTimer = null;    // periodic check for video src changes / new videos
@@ -1239,7 +1247,10 @@ function generateSessionId() {
               // response to the end-of-video flush request) is always
               // allowed through, even after audioFrozen is set — that's
               // the legitimate final ~256ms of the original video.
-              if (window.__ai__.audioFrozen && !data.flush) return;
+              if (window.__ai__.audioFrozen && !data.flush) {
+                _dbgFrozenDrops++;
+                return;
+              }
 
               // Overflow notice from worklet — main thread was stalled, we
               // dropped oldest samples. Log it so we can see if this is the
@@ -1302,6 +1313,36 @@ function generateSessionId() {
                 return;
               }
               ws.send(combined.buffer);
+
+              // ── DEBUG: aggregate stats for outgoing PCM (1Hz flush) ──
+              _dbgSentChunks++;
+              _dbgSentBytes += combined.byteLength;
+              // Peak abs amplitude across this chunk — quick sanity for "is it silence?"
+              var _pk = 0;
+              for (var _pi = 0; _pi < pcm.length; _pi++) {
+                var _v = pcm[_pi]; if (_v < 0) _v = -_v;
+                if (_v > _pk) _pk = _v;
+              }
+              if (_pk > _dbgSentPeakMax) _dbgSentPeakMax = _pk;
+              _dbgWsBuffered = ws.bufferedAmount;
+              var _now = Date.now();
+              if (_dbgLastFlushMs === 0) _dbgLastFlushMs = _now;
+              if (_now - _dbgLastFlushMs >= 1000) {
+                console.log('[audio-out/agg] last1s: chunks=' + _dbgSentChunks +
+                  ' bytes=' + _dbgSentBytes +
+                  ' peakMax=' + _dbgSentPeakMax +
+                  ' frozenDrops=' + _dbgFrozenDrops +
+                  ' wsBuffered=' + _dbgWsBuffered +
+                  ' vt=' + vt.toFixed(2) +
+                  ' wsState=' + (ws ? ws.readyState : 'null') +
+                  ' frozen=' + window.__ai__.audioFrozen +
+                  ' floating=' + floatingFallback);
+                _dbgSentChunks = 0;
+                _dbgSentBytes = 0;
+                _dbgSentPeakMax = 0;
+                _dbgFrozenDrops = 0;
+                _dbgLastFlushMs = _now;
+              }
 
               if (isFlush) {
                 try { sendWS({ type: 'flush_tail' }); } catch (_) {}

@@ -38,6 +38,16 @@
   var captureVideoEl = null;
   var _audioReady = false;
   var _windowCloseCheckId = null;
+  // Registry of all event listeners attached by the current floating
+  // session, so closeFloatingWindow can reliably remove them. Without
+  // this, a 2nd startFloatingWindowMode on the same <video> element
+  // accumulates duplicate watchers — and the OLD watcher's closure
+  // still holds _hasPlayedThroughOnce=true + _lastObservedTime≈duration
+  // from the previous session, so when the new session's currentTime=0
+  // assignment fires, the old watcher mis-detects it as a TikTok loop
+  // and calls onFloatingVideoEnded(), freezing audio for the new run.
+  // This was the real root cause of "second play has no subtitles/TTS".
+  var _sessionListeners = [];
 
   // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -80,14 +90,16 @@
         '#status-tag{position:absolute;top:8px;right:12px;color:rgba(255,255,255,.5);font-size:11px;pointer-events:none}' +
         '#audio-panel{background:#111;padding:8px 12px;display:flex;align-items:center;gap:10px}' +
         '#audio-panel span{color:#888;font-size:12px}' +
-        '#audio-primer{position:absolute;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:20;cursor:pointer}' +
-        '#audio-primer span{color:#ffd700;font-size:18px;font-weight:600;text-align:center;line-height:1.6}' +
+        '#audio-primer{position:fixed;inset:0;background:radial-gradient(circle at center,rgba(20,20,40,.92),rgba(0,0,0,.96));display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;cursor:pointer;gap:14px;animation:primer-pulse 2s ease-in-out infinite}' +
+        '@keyframes primer-pulse{0%,100%{background:radial-gradient(circle at center,rgba(20,20,40,.92),rgba(0,0,0,.96))}50%{background:radial-gradient(circle at center,rgba(40,30,80,.92),rgba(0,0,0,.96))}}' +
+        '#audio-primer .primer-btn{background:linear-gradient(135deg,#ffd700,#ffb700);color:#1a1a2e;font-size:22px;font-weight:700;padding:18px 36px;border-radius:50px;box-shadow:0 6px 24px rgba(255,200,0,.4),0 2px 8px rgba(0,0,0,.3);letter-spacing:1px;text-align:center;line-height:1.3}' +
+        '#audio-primer .primer-hint{color:rgba(255,255,255,.7);font-size:13px;text-align:center;line-height:1.5}' +
         '#audio-primer.hidden{display:none}' +
         '</style>\n</head>\n<body>\n' +
         '<div id="video-wrap"><canvas id="delayed-canvas"></canvas><div id="sub-overlay"><div id="sub-original"></div><div id="sub-translation"></div></div><div id="status-tag">AI 翻译 · -' + (FRAME_DELAY_MS / 1000) + 's</div></div>' +
-        '<div id="audio-panel"><span>🔊</span><span id="audio-status">正在启用配音...</span></div>' +
+        '<div id="audio-panel"><span>🔊</span><span id="audio-status">已就绪</span></div>' +
         '<audio id="tts-player" style="display:none"></audio>' +
-        '<div id="audio-primer"><span>🔊<br>点击此处启用配音</span></div>' +
+        '<div id="audio-primer"><div class="primer-btn">▶ 点击启动翻译</div><div class="primer-hint">浏览器要求在此处点一下，<br>才能在浮窗内播放配音</div></div>' +
         '</body>\n</html>');
       ai.floatingWindow.document.close();
     } catch (e) {
@@ -140,13 +152,38 @@
     }
 
     if (primer) {
+      // Do NOT hide the primer here — primeAudio() hides it inside the
+      // play().then() success callback once audio is genuinely unlocked.
+      // Hiding optimistically here would strand the user with no audio
+      // and no way to retry if AudioContext.resume() silently fails.
       primer.addEventListener('click', function onClick() {
-        primer.classList.add('hidden');
         primeAudio();
       });
     }
-    // Attempt auto-prime immediately (may or may not work cross-window)
+
+    // Auto-prime attempt: try synchronously inside opener's user
+    // gesture window. If the popup inherits user activation from the
+    // opener (Chrome usually does for same-origin popups opened in a
+    // gesture handler), AudioContext.resume() and audio.play() will
+    // succeed and the primer hides automatically.
+    //
+    // IMPORTANT: do NOT synthesize click events on the primer. Browsers
+    // explicitly exclude scripted MouseEvents from "user activation",
+    // so a synthetic click cannot unlock autoplay. Worse, our primer
+    // click handler sets _audioReady=true and hides the primer
+    // OPTIMISTICALLY, so a synthetic click would make the UI think
+    // audio is unlocked while the underlying AudioContext is still
+    // suspended — producing the exact "no TTS sound" symptom we saw.
     primeAudio();
+    // One retry after popup finishes loading (in case the document
+    // wasn't fully parsed when the first attempt ran).
+    try {
+      if (ai.floatingWindow.document.readyState !== 'complete') {
+        ai.floatingWindow.addEventListener('load', function () {
+          if (!_audioReady) primeAudio();
+        });
+      }
+    } catch (_) {}
 
     return true;
   }
@@ -154,6 +191,18 @@
   function closeFloatingWindow() {
     // Clear popup close watcher
     if (_windowCloseCheckId) { clearInterval(_windowCloseCheckId); _windowCloseCheckId = null; }
+
+    // CRITICAL: remove every listener attached during this session.
+    // Skipping this means the next start on the same <video> element
+    // inherits stale watchers whose closures hold last-session state
+    // (notably _hasPlayedThroughOnce=true + _lastObservedTime≈duration),
+    // which immediately mis-fires onFloatingVideoEnded on the new run
+    // and silently freezes audio capture for the entire 2nd playback.
+    for (var li = 0; li < _sessionListeners.length; li++) {
+      var rec = _sessionListeners[li];
+      try { rec.target.removeEventListener(rec.type, rec.fn, rec.opts); } catch (_) {}
+    }
+    _sessionListeners = [];
 
     stopFloatingTTS();
     stopTimelineLoop();
@@ -1038,6 +1087,16 @@
       duration: video.duration,
     });
 
+    // Defensive: drain any leftover listeners from a previous session
+    // that didn't go through closeFloatingWindow (e.g. user clicked the
+    // FAB to restart without first closing the popup). Without this,
+    // duplicate watchers on the same <video> element pile up.
+    for (var li = 0; li < _sessionListeners.length; li++) {
+      var rec = _sessionListeners[li];
+      try { rec.target.removeEventListener(rec.type, rec.fn, rec.opts); } catch (_) {}
+    }
+    _sessionListeners = [];
+
     ai.floatingMode = true;
     ai.offlineMode = true;
     ai.syncMode = false;
@@ -1073,11 +1132,23 @@
 
     // Helper: set up watchers for source video (NOT for floating window UX)
     function attachWatchers(cv) {
-      cv.addEventListener('ended', function () {
+      // Listener registration helper — every listener attached during
+      // this floating session must go through here, so closeFloatingWindow
+      // can tear them all down. Otherwise repeated start/stop cycles on
+      // the same <video> element pile up duplicate handlers.
+      function attach(target, type, fn, opts) {
+        try {
+          target.addEventListener(type, fn, opts);
+          _sessionListeners.push({ target: target, type: type, fn: fn, opts: opts });
+        } catch (_) {}
+      }
+
+      attach(cv, 'ended', function () {
         onFloatingVideoEnded();
-      }); // NOT once:true — TikTok loop can fire ended multiple times; the
-          // onFloatingVideoEnded function is idempotent (guarded by
-          // _floatingEnded flag), so extra fires are safe.
+      });
+      // NOT once:true — TikTok loop can fire ended multiple times; the
+      // onFloatingVideoEnded function is idempotent (guarded by
+      // _floatingEnded flag), so extra fires are safe.
 
       // Detect source-video RESET (TikTok player swaps video element mid-
       // playback for prefetch). When currentTime jumps backwards or play
@@ -1101,8 +1172,15 @@
         var t = cv.currentTime;
         var dur = cv.duration;
 
-        // Backward jump → TikTok-style loop reset
-        if (_lastObservedTime > 1.0 && t < 0.5 && !_floatingEnded) {
+        // Backward jump → TikTok-style loop reset.
+        // CRITICAL: also require _hasPlayedThroughOnce, otherwise we
+        // false-positive on TikTok's prefetch-buffer timeline jitter at
+        // startup (player initially reports currentTime ≈ 3.0 from the
+        // prefetch ring, then jumps to 0.x when real playback begins).
+        // Without this guard, the first onSourceTimeChange tick after
+        // startFloatingWindowMode immediately calls onFloatingVideoEnded
+        // → audioFrozen=true → every PCM batch is dropped.
+        if (_hasPlayedThroughOnce && _lastObservedTime > 1.0 && t < 0.5 && !_floatingEnded) {
           console.log('[floating-window] source video looped (currentTime ' +
             _lastObservedTime.toFixed(1) + ' → ' + t.toFixed(1) + '), stopping audio capture');
           try { ai.sendWS && ai.sendWS({ type: 'session_split' }); } catch (_) {}
@@ -1128,8 +1206,8 @@
 
         _lastObservedTime = t;
       }
-      cv.addEventListener('timeupdate', onSourceTimeChange);
-      cv.addEventListener('seeking', onSourceTimeChange);
+      attach(cv, 'timeupdate', onSourceTimeChange);
+      attach(cv, 'seeking', onSourceTimeChange);
 
       _loopLastTime = -1;
       _cachedReplay = false;
@@ -1141,7 +1219,7 @@
       // auto-destroy itself when the user just changed tabs.
       var unloadFired = false;
       try {
-        ai.floatingWindow.addEventListener('unload', function () {
+        attach(ai.floatingWindow, 'unload', function () {
           unloadFired = true;
           if (cv.ended) onFloatingVideoEnded();
           // Defer cleanup so the unload handler can complete first.
@@ -1194,10 +1272,15 @@
       ai.startASRMode();
     }
     if (video.seeking) {
-      video.addEventListener('seeked', function onSeeked() {
-        video.removeEventListener('seeked', onSeeked);
+      // Note: this is a one-shot bootstrap listener (removed inside the
+      // handler), so we don't need _sessionListeners tracking — but use
+      // it anyway for symmetry and safety in case the seek never resolves.
+      function onSeeked() {
+        try { video.removeEventListener('seeked', onSeeked); } catch (_) {}
         startVideoPlayback();
-      }, { once: true });
+      }
+      video.addEventListener('seeked', onSeeked, { once: true });
+      _sessionListeners.push({ target: video, type: 'seeked', fn: onSeeked });
     } else {
       startVideoPlayback();
     }
