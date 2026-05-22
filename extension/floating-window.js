@@ -494,6 +494,42 @@
         _vtLastAdvanceMs = now;
       }
 
+      // ─── Auto-close after one full playthrough ───────────────────────
+      // User intent: "play the video once → then everything closes".
+      // Conditions for triggering full shutdown:
+      //   1. Source video has ended (_floatingEnded=true, set by
+      //      onFloatingVideoEnded via the source video's 'ended' event
+      //      or the duration-reached heuristic).
+      //   2. _vt has reached the source video's duration — meaning the
+      //      delayed mirror in this popup has also caught up to the end.
+      //   3. The last subtitle has elapsed (_vt > _lastItemEndTime),
+      //      otherwise we'd cut off the final caption.
+      //   4. No TTS is currently speaking. Closing mid-utterance feels
+      //      abrupt; let the last line finish naturally.
+      // A small +1s grace after _vt passes duration covers rounding +
+      // gives the final TTS a moment to start (the trigger is on
+      // segment boundary which slightly trails _vt).
+      if (_floatingEnded && captureVideoEl) {
+        var srcDur = captureVideoEl.duration;
+        if (isFinite(srcDur) && srcDur > 0 && _vt >= srcDur + 1.0) {
+          var lastSubDone = (_vt > (_lastItemEndTime || 0));
+          var ttsDone = !ai._currentTtsEntry;
+          if (lastSubDone && ttsDone) {
+            console.log('[floating-window] full playthrough complete, auto-closing');
+            renderRafId = null;
+            // Schedule on next tick so this RAF can exit cleanly first.
+            setTimeout(function () {
+              try { closeFloatingWindow(); } catch (_) {}
+              try { if (ai.floatingWindow && !ai.floatingWindow.closed) ai.floatingWindow.close(); } catch (_) {}
+              // closeFloatingWindow fires __ai_onFloatingClosed__ which
+              // calls stop() on the content.js side → FAB returns to
+              // non-running state and the WS/pipeline tear down.
+            }, 0);
+            return;
+          }
+        }
+      }
+
       // Pick the frame whose videoTime is closest to _vt.
       var best = null, bestDiff = Infinity;
       var maxVideoTime = -Infinity;
