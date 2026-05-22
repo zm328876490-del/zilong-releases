@@ -13,6 +13,9 @@ import (
 	"time"
 )
 
+// ctxPair is an original→translated pair stored for context injection.
+type ctxPair struct{ original, translated string }
+
 // Translator supports multiple backends. Engine can be set to "microsoft", "google", or "ollama".
 type Translator struct {
 	engine      string // "microsoft", "google", or "ollama"; empty = auto
@@ -26,6 +29,11 @@ type Translator struct {
 	cache       map[string]string
 	cacheKeys   []string
 	cacheMu     sync.RWMutex
+	// Rolling context window for ollama subtitle translation
+	ctxRing  []ctxPair
+	ctxIdx   int
+	ctxCount int
+	ctxMu    sync.Mutex
 }
 
 const translateCacheMax = 500
@@ -49,7 +57,8 @@ func New(apiKey, region string) *Translator {
 			Transport: transport,
 			Timeout:   10 * time.Second,
 		},
-		cache: make(map[string]string),
+		cache:   make(map[string]string),
+		ctxRing: make([]ctxPair, 6),
 	}
 }
 
@@ -286,9 +295,10 @@ func mapLangGoogle(lang string) string {
 // ─── Ollama (local LLM via OpenAI-compatible /v1/chat/completions) ──────
 
 type ollamaChatRequest struct {
-	Model    string             `json:"model"`
-	Messages []ollamaChatMessage `json:"messages"`
-	Stream   bool               `json:"stream"`
+	Model       string              `json:"model"`
+	Messages    []ollamaChatMessage `json:"messages"`
+	Stream      bool                `json:"stream"`
+	Temperature float64             `json:"temperature"`
 }
 
 type ollamaChatMessage struct {
@@ -312,8 +322,6 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 		return "", fmt.Errorf("ollama model not configured")
 	}
 
-	// Log first few calls so user can confirm local engine is active.
-	// Full log is visible in the backend terminal.
 	log.Printf("[ollama] translating %d chars with model %s → %s", len(text), t.ollamaModel, to)
 	if len(text) < 80 {
 		log.Printf("[ollama]   text: %q", text)
@@ -331,15 +339,31 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 		toName = to
 	}
 
-	systemPrompt := fmt.Sprintf("你是一个专业翻译助手。将用户输入的文本翻译为%s。只输出翻译结果，不要任何解释、注释或额外内容。", toName)
+	systemPrompt := fmt.Sprintf(
+		"你是视频字幕翻译专家。将用户输入的英文口语翻译为简洁自然的%s字幕。"+
+			"要求：口语化，符合中文表达习惯；每句不超过25字；保留原文语气（疑问/感叹/否定）；"+
+			"人名地名直接音译；只输出译文，不要任何解释或额外内容。", toName)
+
+	// Build messages with context window (last 3 pairs)
+	t.ctxMu.Lock()
+	var messages []ollamaChatMessage
+	messages = append(messages, ollamaChatMessage{Role: "system", Content: systemPrompt})
+	// Append recent context as user/assistant pairs for continuity
+	pairs := t.ctxPairsLocked()
+	for _, p := range pairs {
+		messages = append(messages,
+			ollamaChatMessage{Role: "user", Content: p.original},
+			ollamaChatMessage{Role: "assistant", Content: p.translated},
+		)
+	}
+	t.ctxMu.Unlock()
+	messages = append(messages, ollamaChatMessage{Role: "user", Content: text})
 
 	reqBody := ollamaChatRequest{
-		Model: t.ollamaModel,
-		Messages: []ollamaChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: text},
-		},
-		Stream: false,
+		Model:       t.ollamaModel,
+		Messages:    messages,
+		Stream:      false,
+		Temperature: 0.1,
 	}
 
 	bodyBytes, _ := json.Marshal(reqBody)
@@ -368,9 +392,46 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 	}
 
 	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
-	// Strip quotes if the model wrapped the result in them
 	result = strings.Trim(result, "\"'")
 	log.Printf("[ollama] result: %q", result)
+
+	// Store in context ring buffer for the next translation
+	t.ctxMu.Lock()
+	t.ctxRing[t.ctxIdx] = ctxPair{original: text, translated: result}
+	t.ctxIdx = (t.ctxIdx + 1) % len(t.ctxRing)
+	if t.ctxCount < len(t.ctxRing) {
+		t.ctxCount++
+	}
+	t.ctxMu.Unlock()
+
 	return result, nil
+}
+
+// ctxPairsLocked returns the last N context pairs in chronological order.
+// Caller must hold t.ctxMu.
+func (t *Translator) ctxPairsLocked() []ctxPair {
+	if t.ctxCount == 0 {
+		return nil
+	}
+	// Ring buffer: oldest is at ctxIdx - ctxCount, newest at ctxIdx - 1
+	out := make([]ctxPair, 0, 3)
+	maxPairs := 3
+	start := t.ctxIdx - t.ctxCount
+	if start < 0 {
+		start += len(t.ctxRing)
+	}
+	// Take only the last maxPairs
+	if t.ctxCount > maxPairs {
+		skip := t.ctxCount - maxPairs
+		start = (start + skip) % len(t.ctxRing)
+	}
+	for i := 0; i < maxPairs && i < t.ctxCount; i++ {
+		idx := (start + i) % len(t.ctxRing)
+		pair := t.ctxRing[idx]
+		if pair.original != "" {
+			out = append(out, pair)
+		}
+	}
+	return out
 }
 
