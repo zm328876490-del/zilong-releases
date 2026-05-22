@@ -297,10 +297,13 @@
           a.pause(); a.currentTime = 0; a.volume = 1; a.src = '';
           _audioReady = true;
           if (primer) primer.classList.add('hidden');
-          // Show loading animation while the frame buffer fills (~6s)
-          var loadingEl = ai.floatingWindow.document.getElementById('loading-overlay');
-          if (loadingEl) loadingEl.classList.remove('hidden');
-          if (sEl) sEl.textContent = '配音已启用 · 缓冲中';
+          // Show loading animation only if the frame buffer hasn't already
+          // finished filling while the primer was waiting for user click.
+          if (!ai.floatingBufferFilled) {
+            var loadingEl = ai.floatingWindow.document.getElementById('loading-overlay');
+            if (loadingEl) loadingEl.classList.remove('hidden');
+            if (sEl) sEl.textContent = '配音已启用 · 缓冲中';
+          }
         }).catch(function () {
           // Auto-prime failed (browser autoplay policy) — show primer
           if (sEl) sEl.textContent = '点击浮窗任意位置启用配音';
