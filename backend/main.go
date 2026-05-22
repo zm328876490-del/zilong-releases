@@ -186,6 +186,8 @@ type InMsg struct {
 	Region      string     `json:"region,omitempty"`
 	Engine      string     `json:"engine,omitempty"`
 	TTSVoice    string     `json:"ttsVoice,omitempty"`
+	OllamaUrl   string     `json:"ollamaUrl,omitempty"`
+	OllamaModel string     `json:"ollamaModel,omitempty"`
 	Translation string     `json:"translation,omitempty"` // translate_response result
 	Error         string     `json:"error,omitempty"`       // translate_response error
 	Rolling       bool       `json:"rolling,omitempty"`
@@ -977,6 +979,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				client.translator.SetEngine(msg.Engine)
 				if msg.Engine == "google" {
 					client.translator.SetAsyncFn(client.translateViaBrowser)
+				}
+				if msg.Engine == "ollama" {
+					client.translator.SetOllama(msg.OllamaUrl, msg.OllamaModel)
 				}
 				if msg.Rolling {
 					if client.rollingBuf == nil {

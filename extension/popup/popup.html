@@ -58,7 +58,19 @@
         <select id="translateEngine">
           <option value="microsoft">微软翻译</option>
           <option value="google">Google 翻译</option>
+          <option value="ollama">本地 (Ollama)</option>
         </select>
+      </div>
+
+      <div id="ollamaFields" class="engine-fields" style="display:none">
+        <div class="form-group">
+          <label for="ollamaUrl">Ollama 地址</label>
+          <input type="text" id="ollamaUrl" placeholder="http://localhost:11434" spellcheck="false">
+        </div>
+        <div class="form-group">
+          <label for="ollamaModel">翻译模型</label>
+          <input type="text" id="ollamaModel" placeholder="qwen2.5:7b" spellcheck="false">
+        </div>
       </div>
 
       <div class="form-group">

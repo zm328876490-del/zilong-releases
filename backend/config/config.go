@@ -7,10 +7,12 @@ import (
 )
 
 type Config struct {
-	Port       string
-	WhisperExe string // path to whisper-cli.exe (whisper-server.exe is derived from this)
-	ModelPath  string
-	ModelDir   string
+	Port        string
+	WhisperExe  string // path to whisper-cli.exe (whisper-server.exe is derived from this)
+	ModelPath   string
+	ModelDir    string
+	OllamaUrl   string
+	OllamaModel string
 }
 
 // WhisperPort returns the port for whisper-server (different from our WS port).
@@ -20,12 +22,20 @@ func (c *Config) WhisperPort() string {
 
 func Load() *Config {
 	cfg := &Config{
-		Port:     "29527",
-		ModelDir: filepath.Join("..", "models"),
+		Port:        "29527",
+		ModelDir:    filepath.Join("..", "models"),
+		OllamaUrl:   "http://localhost:11434",
+		OllamaModel: "qwen2.5:7b",
 	}
 
 	if p := os.Getenv("PORT"); p != "" {
 		cfg.Port = p
+	}
+	if u := os.Getenv("OLLAMA_URL"); u != "" {
+		cfg.OllamaUrl = u
+	}
+	if m := os.Getenv("OLLAMA_MODEL"); m != "" {
+		cfg.OllamaModel = m
 	}
 
 	exeName := "whisper-cli"

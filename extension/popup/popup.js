@@ -7,6 +7,9 @@
   const sourceLangSelect = document.getElementById('sourceLang');
   const targetLangSelect = document.getElementById('targetLang');
   const translateEngineSelect = document.getElementById('translateEngine');
+  const ollamaFields = document.getElementById('ollamaFields');
+  const ollamaUrlInput = document.getElementById('ollamaUrl');
+  const ollamaModelInput = document.getElementById('ollamaModel');
   const ttsVoiceSelect = document.getElementById('ttsVoice');
   const subtitleToggle = document.getElementById('subtitleToggle');
   const subtitleSizeSlider = document.getElementById('subtitleSize');
@@ -30,6 +33,8 @@
     sourceLang: 'auto',
     targetLang: 'zh-Hans',
     engine: 'microsoft',
+    ollamaUrl: 'http://localhost:11434',
+    ollamaModel: 'qwen2.5:7b',
     ttsVoice: 'default',
     subtitleEnabled: true,
     subtitleSize: 50,
@@ -126,6 +131,9 @@
     sourceLangSelect.value = settings.sourceLang || DEFAULT_SETTINGS.sourceLang;
     targetLangSelect.value = targetLang;
     translateEngineSelect.value = settings.engine || DEFAULT_SETTINGS.engine;
+    ollamaUrlInput.value = settings.ollamaUrl || DEFAULT_SETTINGS.ollamaUrl;
+    ollamaModelInput.value = settings.ollamaModel || DEFAULT_SETTINGS.ollamaModel;
+    updateEngineFields();
     populateTTSVoices(targetLang);
     ttsVoiceSelect.value = settings.ttsVoice || 'default';
     subtitleToggle.checked = settings.subtitleEnabled !== false;
@@ -144,6 +152,8 @@
       sourceLang: sourceLangSelect.value,
       targetLang: targetLangSelect.value,
       engine: translateEngineSelect.value,
+      ollamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
+      ollamaModel: ollamaModelInput.value.trim() || 'qwen2.5:7b',
       ttsVoice: ttsVoiceSelect.value,
       subtitleEnabled: subtitleToggle.checked,
       subtitleSize: parseInt(subtitleSizeSlider.value, 10),
@@ -307,13 +317,29 @@
   // Target language change: rebuild TTS voices first, then save
   targetLangSelect.addEventListener('change', onTargetLangChange);
 
+  // Engine change: show/hide engine-specific fields, then save
+  translateEngineSelect.addEventListener('change', function () {
+    updateEngineFields();
+    saveSettings();
+  });
+
   // Auto-save on input change
-  [sourceLangSelect, translateEngineSelect, ttsVoiceSelect].forEach(
+  [sourceLangSelect, ttsVoiceSelect].forEach(
     (el) => {
       el.addEventListener('change', saveSettings);
       el.addEventListener('input', saveSettings);
     }
   );
+
+  [ollamaUrlInput, ollamaModelInput].forEach(function (el) {
+    el.addEventListener('change', saveSettings);
+    el.addEventListener('input', saveSettings);
+  });
+
+  function updateEngineFields() {
+    var engine = translateEngineSelect.value;
+    ollamaFields.style.display = (engine === 'ollama') ? '' : 'none';
+  }
 
   // Subtitle toggle: save and push immediately
   subtitleToggle.addEventListener('change', function () {

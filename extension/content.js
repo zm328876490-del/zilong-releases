@@ -132,6 +132,8 @@
     apiKey: '',
     region: 'eastasia',
     engine: 'microsoft',
+    ollamaUrl: 'http://localhost:11434',
+    ollamaModel: 'qwen2.5:7b',
     ttsVoice: 'default',
     subtitleEnabled: true,
     subtitleSize: 50,
@@ -170,6 +172,8 @@ function generateSessionId() {
       region: settings.region,
       engine: settings.engine,
       ttsVoice: settings.ttsVoice,
+      ollamaUrl: settings.ollamaUrl,
+      ollamaModel: settings.ollamaModel,
     });
   }
   let syncRafId = null;           // requestAnimationFrame ID
@@ -1932,6 +1936,8 @@ function generateSessionId() {
         engine: settings.engine,
         ttsVoice: settings.ttsVoice,
         rolling: floatingFallback,
+        ollamaUrl: settings.ollamaUrl,
+        ollamaModel: settings.ollamaModel,
       });
 
       // In sync mode: send preprocess right after config (server processes sequentially)
@@ -3334,6 +3340,8 @@ function generateSessionId() {
         region: settings.region,
         engine: settings.engine,
         ttsVoice: settings.ttsVoice,
+        ollamaUrl: settings.ollamaUrl,
+        ollamaModel: settings.ollamaModel,
       });
     }
   }
@@ -3532,9 +3540,13 @@ function generateSessionId() {
           region: settings.region,
           engine: newSettings.engine,
           ttsVoice: settings.ttsVoice,
+          ollamaUrl: settings.ollamaUrl,
+          ollamaModel: settings.ollamaModel,
         });
       }
     }
+    if (newSettings.ollamaUrl !== undefined) settings.ollamaUrl = newSettings.ollamaUrl;
+    if (newSettings.ollamaModel !== undefined) settings.ollamaModel = newSettings.ollamaModel;
 
     if (newSettings.sourceLang !== undefined) settings.sourceLang = newSettings.sourceLang;
     if (newSettings.targetLang !== undefined) settings.targetLang = newSettings.targetLang;

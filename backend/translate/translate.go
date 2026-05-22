@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -12,10 +13,12 @@ import (
 	"time"
 )
 
-// Translator supports multiple backends. Engine can be set to "microsoft" or "google".
+// Translator supports multiple backends. Engine can be set to "microsoft", "google", or "ollama".
 type Translator struct {
-	engine      string // "microsoft" or "google"; empty = auto (microsoft first, then google)
+	engine      string // "microsoft", "google", or "ollama"; empty = auto
 	asyncFn     func(text, from, to string) (string, error)
+	ollamaUrl   string
+	ollamaModel string
 	msToken     string
 	msTokenAt   time.Time
 	msTokenMu   sync.Mutex
@@ -58,6 +61,11 @@ func (t *Translator) SetAsyncFn(fn func(text, from, to string) (string, error)) 
 	t.asyncFn = fn
 }
 
+func (t *Translator) SetOllama(url, model string) {
+	t.ollamaUrl = strings.TrimRight(url, "/")
+	t.ollamaModel = model
+}
+
 func (t *Translator) Engine() string {
 	return t.engine
 }
@@ -92,6 +100,12 @@ case "google":
 			return result, err
 		}
 		result, err := t.translateGoogle(text, from, to)
+		if err == nil {
+			t.cachePut(cacheKey, result)
+		}
+		return result, err
+	case "ollama":
+		result, err := t.translateOllama(text, from, to)
 		if err == nil {
 			t.cachePut(cacheKey, result)
 		}
@@ -267,5 +281,96 @@ func mapLangGoogle(lang string) string {
 		return v
 	}
 	return lang
+}
+
+// ─── Ollama (local LLM via OpenAI-compatible /v1/chat/completions) ──────
+
+type ollamaChatRequest struct {
+	Model    string             `json:"model"`
+	Messages []ollamaChatMessage `json:"messages"`
+	Stream   bool               `json:"stream"`
+}
+
+type ollamaChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type ollamaChatResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+func (t *Translator) translateOllama(text, from, to string) (string, error) {
+	if t.ollamaUrl == "" {
+		return "", fmt.Errorf("ollama URL not configured")
+	}
+	if t.ollamaModel == "" {
+		return "", fmt.Errorf("ollama model not configured")
+	}
+
+	// Log first few calls so user can confirm local engine is active.
+	// Full log is visible in the backend terminal.
+	log.Printf("[ollama] translating %d chars with model %s → %s", len(text), t.ollamaModel, to)
+	if len(text) < 80 {
+		log.Printf("[ollama]   text: %q", text)
+	}
+
+	langNames := map[string]string{
+		"zh-Hans": "简体中文", "zh-Hant": "繁體中文", "zh": "中文",
+		"en": "English", "ja": "日本語", "ko": "한국어",
+		"fr": "Français", "de": "Deutsch", "es": "Español",
+		"pt": "Português", "ru": "Русский", "ar": "العربية",
+		"th": "ไทย", "vi": "Tiếng Việt",
+	}
+	toName := langNames[to]
+	if toName == "" {
+		toName = to
+	}
+
+	systemPrompt := fmt.Sprintf("你是一个专业翻译助手。将用户输入的文本翻译为%s。只输出翻译结果，不要任何解释、注释或额外内容。", toName)
+
+	reqBody := ollamaChatRequest{
+		Model: t.ollamaModel,
+		Messages: []ollamaChatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: text},
+		},
+		Stream: false,
+	}
+
+	bodyBytes, _ := json.Marshal(reqBody)
+	endpoint := t.ollamaUrl + "/v1/chat/completions"
+
+	req, _ := http.NewRequest("POST", endpoint, strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var chatResp ollamaChatResponse
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		return "", fmt.Errorf("ollama parse: %w", err)
+	}
+	if len(chatResp.Choices) == 0 {
+		return "", fmt.Errorf("ollama empty response")
+	}
+
+	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	// Strip quotes if the model wrapped the result in them
+	result = strings.Trim(result, "\"'")
+	log.Printf("[ollama] result: %q", result)
+	return result, nil
 }
 
