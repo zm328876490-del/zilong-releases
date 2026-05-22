@@ -49,16 +49,46 @@ func EstimatePitch(samples []int16, sampleRate int) float64 {
 
 // DetectGender estimates whether a PCM audio slice is male or female speech.
 // Returns "male", "female", or "" (unknown / audio too short).
+//
+// NOTE: this is a single-segment "snapshot" decision and may flip on borderline
+// segments (a male speaker excited to ~170 Hz can briefly land in the female
+// zone). For session-level stability, callers should track gender history and
+// only flip on strong-confidence detections — see DetectGenderConfidence.
 func DetectGender(samples []int16, sampleRate int) string {
+	g, _ := DetectGenderConfidence(samples, sampleRate)
+	return g
+}
+
+// DetectGenderConfidence returns gender plus a confidence label:
+//
+//	"strong" — pitch is clearly inside male (<145 Hz) or female (>185 Hz) zone
+//	"weak"   — pitch is in the ambiguous 145–185 Hz band; the snap decision
+//	           is unreliable and callers should prefer prior history
+//	""       — no pitch found (silence / too short / noise)
+//
+// The wide ambiguous band exists because male fundamental commonly extends up
+// to ~180 Hz and female down to ~165 Hz; a single short segment cannot reliably
+// separate them in that overlap.
+func DetectGenderConfidence(samples []int16, sampleRate int) (gender, confidence string) {
 	pitch := EstimatePitch(samples, sampleRate)
 	if pitch <= 0 {
-		return ""
+		return "", ""
 	}
-	return classifyPitch(pitch)
+	switch {
+	case pitch < 145:
+		return "male", "strong"
+	case pitch > 185:
+		return "female", "strong"
+	case pitch < 165:
+		return "male", "weak"
+	default:
+		return "female", "weak"
+	}
 }
 
 // classifyPitch maps a fundamental frequency (Hz) to "male" or "female".
 // Male: 85–180 Hz, Female: 165–255 Hz. Threshold at 160 Hz.
+// Kept for backwards compatibility — new code should use DetectGenderConfidence.
 func classifyPitch(hz float64) string {
 	if hz < 160 {
 		return "male"

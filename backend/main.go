@@ -69,7 +69,21 @@ type Client struct {
 	dbgRouteAudio   int64
 	dbgRouteOffline int64
 	dbgRouteDrop    int64
+
+	// Gender stickiness — Edge TTS sounds jarring when voice flips mid-session
+	// for the same speaker. Track the last *strong* detection and the count of
+	// consecutive opposite-strong detections required to flip.
+	genderMu          sync.Mutex
+	stickyGender      string // last committed gender, "male" / "female" / ""
+	flipPendingGender string // candidate new gender accumulating evidence
+	flipPendingCount  int    // consecutive strong opposite detections
 }
+
+// flipConfirmCount is the number of consecutive strong opposite-gender
+// detections required before flipping the sticky gender. 2 strong hits in a
+// row beats one-off mis-detections without delaying real speaker changes
+// (typical multi-speaker dialogue has > 2 segments per speaker).
+const flipConfirmCount = 2
 
 // Subtitle is a single subtitle cue extracted from a video platform.
 type Subtitle struct {
@@ -159,6 +173,7 @@ type OutMsg struct {
 	EndTime     float64            `json:"endTime,omitempty"`     // segment end (absolute video time)
 	Words       []asr.WordTimestamp `json:"words,omitempty"`      // per-word timestamps
 	TtsPartial   bool               `json:"ttsPartial,omitempty"`   // true = fast partial TTS, false = final
+	Gender       string             `json:"gender,omitempty"`       // detected speaker gender: "male" / "female" / ""
 }
 
 type InMsg struct {
@@ -190,11 +205,24 @@ func (c *Client) sendJSON(msg OutMsg) error {
 	return c.conn.WriteJSON(msg)
 }
 
-func (c *Client) onASRResult(text string, speechRate float64, duration float64, isPartial bool, speaker string, startTime float64, endTime float64, words []asr.WordTimestamp) {
+func (c *Client) onASRResult(text string, speechRate float64, duration float64, isPartial bool, speaker string, startTime float64, endTime float64, words []asr.WordTimestamp, segmentPCM []int16) {
 	if !c.active {
 		return
 	}
-	c.sendJSON(OutMsg{Type: "original", Text: text, Partial: isPartial, Speaker: speaker, Duration: duration})
+
+	// Gender-aware voice selection (final results only — partials too short / unreliable).
+	// For rolling mode, segmentPCM is the slice corresponding to this exact segment.
+	// For VAD mode, segmentPCM is the whole utterance.
+	//
+	// Apply per-session stickiness so a single mis-detection on a borderline
+	// segment can't flip the voice. See resolveStickyGender for the rules.
+	gender := ""
+	if !isPartial && len(segmentPCM) > 0 {
+		snap, conf := DetectGenderConfidence(segmentPCM, 16000)
+		gender = c.resolveStickyGender(snap, conf, startTime, endTime, text)
+	}
+
+	c.sendJSON(OutMsg{Type: "original", Text: text, Partial: isPartial, Speaker: speaker, Duration: duration, Gender: gender})
 
 	if c.translator == nil || c.targetLang == "" {
 		return
@@ -225,6 +253,7 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 			StartTime:   startTime,
 			EndTime:     endTime,
 			Words:       words,
+			Gender:      gender,
 		})
 	}
 
@@ -234,10 +263,11 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 		c.lastTtsTime = time.Now()
 		// Queue final TTS via semaphore — serializes batch results from
 		// RollingBuffer without cancelling each other.
+		genderCopy := gender
 		go func() {
 			c.ttsSeq <- struct{}{}
 			defer func() { <-c.ttsSeq }()
-			c.generateAndSendTTS(translated, utterId, speechRate, false, nil)
+			c.generateAndSendTTS(translated, utterId, speechRate, false, nil, genderCopy)
 		}()
 		return
 	}
@@ -261,10 +291,84 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 	cancelCh := c.ttsCancel
 	c.ttsCancelMu.Unlock()
 
-	go c.generateAndSendTTS(translated, utterId, speechRate, true, cancelCh)
+	go c.generateAndSendTTS(translated, utterId, speechRate, true, cancelCh, gender)
 }
 
-func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, isPartial bool, cancel <-chan struct{}) {
+// resolveStickyGender turns a per-segment snapshot detection into a stable,
+// per-session gender. Rules:
+//
+//  1. If we have no committed gender yet, take the first non-empty detection
+//     (strong OR weak) and commit it. We need *something* to start with.
+//  2. If the snapshot agrees with the committed gender → keep it, reset
+//     any pending flip counter.
+//  3. If the snapshot disagrees but is "weak" (in the 145–185 Hz ambiguous
+//     band) → ignore it, keep committed. This is the main mis-flip case.
+//  4. If the snapshot disagrees and is "strong" → it's a candidate flip.
+//     Require flipConfirmCount consecutive strong opposite detections before
+//     actually flipping. A real speaker change produces a run of opposites;
+//     a single mis-detection does not.
+//  5. Empty snapshot ("") → return committed (no change).
+func (c *Client) resolveStickyGender(snap, conf string, startTime, endTime float64, text string) string {
+	c.genderMu.Lock()
+	defer c.genderMu.Unlock()
+
+	logCommit := func(reason string) {
+		log.Printf("[gender] %.2f-%.2f snap=%s/%s sticky=%s (%s) text=%q",
+			startTime, endTime, snap, conf, c.stickyGender, reason, text)
+	}
+
+	// Rule 5: no detection — keep current sticky.
+	if snap == "" {
+		logCommit("no-pitch")
+		return c.stickyGender
+	}
+
+	// Rule 1: bootstrap.
+	if c.stickyGender == "" {
+		c.stickyGender = snap
+		c.flipPendingGender = ""
+		c.flipPendingCount = 0
+		logCommit("bootstrap")
+		return c.stickyGender
+	}
+
+	// Rule 2: agrees → reset flip pending.
+	if snap == c.stickyGender {
+		c.flipPendingGender = ""
+		c.flipPendingCount = 0
+		logCommit("agree")
+		return c.stickyGender
+	}
+
+	// Disagrees from here on.
+
+	// Rule 3: weak disagreement → ignore.
+	if conf != "strong" {
+		logCommit("ignore-weak-flip")
+		return c.stickyGender
+	}
+
+	// Rule 4: strong disagreement — accumulate evidence.
+	if c.flipPendingGender == snap {
+		c.flipPendingCount++
+	} else {
+		c.flipPendingGender = snap
+		c.flipPendingCount = 1
+	}
+	if c.flipPendingCount >= flipConfirmCount {
+		log.Printf("[gender] %.2f-%.2f FLIP %s→%s after %d strong hits text=%q",
+			startTime, endTime, c.stickyGender, snap, c.flipPendingCount, text)
+		c.stickyGender = snap
+		c.flipPendingGender = ""
+		c.flipPendingCount = 0
+		return c.stickyGender
+	}
+	log.Printf("[gender] %.2f-%.2f strong-disagree %s vs sticky=%s pending=%d/%d text=%q",
+		startTime, endTime, snap, c.stickyGender, c.flipPendingCount, flipConfirmCount, text)
+	return c.stickyGender
+}
+
+func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, isPartial bool, cancel <-chan struct{}, gender string) {
 	// Clear ttsCancel on exit so throttler knows TTS is done
 	defer func() {
 		c.ttsCancelMu.Lock()
@@ -274,10 +378,23 @@ func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, is
 		c.ttsCancelMu.Unlock()
 	}()
 
-	voice := tts.ResolveVoice(c.ttsVoice, c.targetLang)
+	// Gender-aware voice when detected, otherwise fall back to user/default voice.
+	// Keep both candidates so we can retry with the default if the gender voice
+	// silently produces zero audio chunks (Edge TTS sometimes accepts a request
+	// and closes the stream without emitting any audio — usually voice/lang
+	// mismatch or upstream throttling).
+	defaultVoice := tts.ResolveVoice(c.ttsVoice, c.targetLang)
+	voice := defaultVoice
+	if gender != "" {
+		if v := tts.VoiceForLangAndGender(c.targetLang, gender); v != "" {
+			voice = v
+		}
+	}
+	if voice == "" {
+		voice = defaultVoice
+	}
 
 	ttsStart := time.Now()
-	var firstChunkAt time.Time
 
 	// Check cancellation before sending audio_start
 	select {
@@ -294,64 +411,92 @@ func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, is
 		TtsPartial:  isPartial,
 	})
 
-	idx := 0
-	batchSize := 1024 // buffer ~170ms of mp3 before sending (lower = less latency)
-	var buf []byte
-	flush := func(final bool) {
-		if len(buf) == 0 && !final {
-			return
-		}
-		select {
-		case <-cancel:
-			return
-		default:
-		}
-		c.sendJSON(OutMsg{
-			Type:        "audio_chunk",
-			Original:    text,
-			Audio:       base64.StdEncoding.EncodeToString(buf),
-			Index:       idx,
-			UtteranceId: utterId,
-		})
-		idx++
-		buf = buf[:0]
-	}
-	err := tts.SynthesizeStream(text, voice, func(ch tts.AudioChunk) {
-		if firstChunkAt.IsZero() && !ch.Final {
-			firstChunkAt = time.Now()
-		}
-		// Check cancellation before processing each chunk
-		select {
-		case <-cancel:
-			return
-		default:
-		}
-		if ch.Final {
-			flush(false)
-			if !isPartial {
-				ttsTotal := time.Since(ttsStart)
-				firstLat := time.Duration(0)
-				if !firstChunkAt.IsZero() {
-					firstLat = firstChunkAt.Sub(ttsStart)
-				}
-				log.Printf("[stats] tts_done: first_chunk=%v total=%v text_len=%d", firstLat, ttsTotal, len(text))
+	// trySynth runs one SynthesizeStream pass and returns
+	// (sentBytes, err). If sentBytes == 0 and err == nil the upstream silently
+	// produced nothing — caller decides whether to retry.
+	trySynth := func(useVoice string) (int, error) {
+		var firstChunkAt time.Time
+		idx := 0
+		batchSize := 1024
+		var buf []byte
+		sentBytes := 0
+		flush := func(final bool) {
+			if len(buf) == 0 && !final {
+				return
 			}
-			c.sendJSON(OutMsg{Type: "audio_end", Original: text, UtteranceId: utterId, Index: -1, SpeechRate: speechRate})
-		} else {
+			select {
+			case <-cancel:
+				return
+			default:
+			}
+			c.sendJSON(OutMsg{
+				Type:        "audio_chunk",
+				Original:    text,
+				Audio:       base64.StdEncoding.EncodeToString(buf),
+				Index:       idx,
+				UtteranceId: utterId,
+			})
+			sentBytes += len(buf)
+			idx++
+			buf = buf[:0]
+		}
+		err := tts.SynthesizeStream(text, useVoice, func(ch tts.AudioChunk) {
+			if firstChunkAt.IsZero() && !ch.Final {
+				firstChunkAt = time.Now()
+			}
+			select {
+			case <-cancel:
+				return
+			default:
+			}
+			if ch.Final {
+				flush(false)
+				return
+			}
 			buf = append(buf, ch.Data...)
 			if len(buf) >= batchSize {
 				flush(false)
 			}
-		}
-	})
-	if err != nil {
+		})
+		return sentBytes, err
+	}
+
+	sentBytes, err := trySynth(voice)
+	usedVoice := voice
+
+	// Fallback: retry with default voice if the gender-aware voice produced
+	// zero audio (and we actually had a different default to try). This is
+	// what fixes "subtitle visible but no TTS sound": gender voice mismatched
+	// the language or got rate-limited, Edge TTS closed with turn.end + 0
+	// chunks, the user got silence.
+	if err == nil && sentBytes == 0 && voice != defaultVoice && defaultVoice != "" {
+		log.Printf("[tts-fallback] zero audio with voice=%s text=%q — retrying with default voice=%s", voice, text, defaultVoice)
 		select {
 		case <-cancel:
 			return
 		default:
 		}
-		c.sendJSON(OutMsg{Type: "audio_end", Original: text, UtteranceId: utterId, Index: -1, SpeechRate: speechRate})
+		sentBytes, err = trySynth(defaultVoice)
+		usedVoice = defaultVoice
 	}
+
+	if err != nil {
+		log.Printf("[tts-error] voice=%s text=%q err=%v", usedVoice, text, err)
+	} else if sentBytes == 0 {
+		log.Printf("[tts-empty] voice=%s text=%q produced 0 audio bytes (upstream silently closed)", usedVoice, text)
+	} else if !isPartial {
+		log.Printf("[stats] tts_done: voice=%s total=%v bytes=%d text_len=%d", usedVoice, time.Since(ttsStart), sentBytes, len(text))
+	}
+
+	// Always send audio_end so the frontend doesn't wait forever — even on
+	// error, even on zero-bytes (which keeps subtitle visible but releases
+	// the TTS queue slot).
+	select {
+	case <-cancel:
+		return
+	default:
+	}
+	c.sendJSON(OutMsg{Type: "audio_end", Original: text, UtteranceId: utterId, Index: -1, SpeechRate: speechRate})
 }
 
 // ─── Offline ASR ─────────────────────────────────────────────────────
@@ -490,7 +635,7 @@ func (c *Client) handleDOMSubtitle(text string, skipTranslate bool) {
 		Translation: translated,
 	})
 
-	go c.generateAndSendTTS(translated, newID(), 5.0, false, nil)
+	go c.generateAndSendTTS(translated, newID(), 5.0, false, nil, "")
 }
 
 // handlePreprocess runs concurrent translation + TTS synthesis for all subtitles

@@ -46,8 +46,8 @@ type AudioBuffer struct {
 	serverURL string
 	language  string
 
-	// onResult callback: text, speechRate (chars/sec), duration (sec), isPartial, speaker label, startTime (sec), endTime (sec), word timestamps
-	onResult func(originalText string, speechRate float64, duration float64, isPartial bool, speaker string, startTime float64, endTime float64, words []WordTimestamp)
+	// onResult callback: text, speechRate (chars/sec), duration (sec), isPartial, speaker label, startTime (sec), endTime (sec), word timestamps, segment PCM (nil for partials)
+	onResult func(originalText string, speechRate float64, duration float64, isPartial bool, speaker string, startTime float64, endTime float64, words []WordTimestamp, segmentPCM []int16)
 
 	// streaming state
 	lastFlushSample   int
@@ -64,7 +64,7 @@ type AudioBuffer struct {
 }
 
 // NewAudioBuffer creates a new audio buffer.
-func NewAudioBuffer(serverURL, language string, onResult func(string, float64, float64, bool, string, float64, float64, []WordTimestamp)) *AudioBuffer {
+func NewAudioBuffer(serverURL, language string, onResult func(string, float64, float64, bool, string, float64, float64, []WordTimestamp, []int16)) *AudioBuffer {
 	return &AudioBuffer{
 		samples:         make([]int16, 0, sampleRate*10),
 		speechStart:     -1,
@@ -350,7 +350,13 @@ func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial
 				words[i].Start += startTime
 				words[i].End += startTime
 			}
-			ab.onResult(text, speechRate, segDur, isPartial, speaker, startTime, endTime, words)
+			// For final results pass the segment PCM so main can do gender detection.
+			// For partials, gender detection is meaningless — pass nil.
+			var segPCM []int16
+			if !isPartial {
+				segPCM = samples
+			}
+			ab.onResult(text, speechRate, segDur, isPartial, speaker, startTime, endTime, words, segPCM)
 	}
 }
 
@@ -483,7 +489,7 @@ type RollingBuffer struct {
 	chunkTimestamps []chunkTimestamp
 	serverURL       string
 	language        string
-	onResult        func(string, float64, float64, bool, string, float64, float64, []WordTimestamp)
+	onResult        func(string, float64, float64, bool, string, float64, float64, []WordTimestamp, []int16)
 
 	lastEmittedEnd    float64
 	lastEmittedSample int
@@ -492,7 +498,7 @@ type RollingBuffer struct {
 	stopCh            chan struct{}
 }
 
-func NewRollingBuffer(serverURL, language string, onResult func(string, float64, float64, bool, string, float64, float64, []WordTimestamp)) *RollingBuffer {
+func NewRollingBuffer(serverURL, language string, onResult func(string, float64, float64, bool, string, float64, float64, []WordTimestamp, []int16)) *RollingBuffer {
 	return &RollingBuffer{
 		samples:         make([]int16, 0, sampleRate*60),
 		chunkTimestamps: make([]chunkTimestamp, 0, 256),
@@ -802,7 +808,22 @@ func (rb *RollingBuffer) processBatch() {
 		}
 		speechRate := float64(charCount) / dur
 
-		rb.onResult(seg.Text, speechRate, dur, false, "", absStart, absEnd, seg.Words)
+		// Slice the segment's PCM out of the batch so main can do gender detection.
+		// seg.Start/seg.End are relative to the start of the audio sent to whisper.
+		segStartIdx := int(seg.Start * float64(sampleRate))
+		segEndIdx := int(seg.End * float64(sampleRate))
+		if segStartIdx < 0 {
+			segStartIdx = 0
+		}
+		if segEndIdx > len(samples) {
+			segEndIdx = len(samples)
+		}
+		var segPCM []int16
+		if segEndIdx > segStartIdx {
+			segPCM = samples[segStartIdx:segEndIdx]
+		}
+
+		rb.onResult(seg.Text, speechRate, dur, false, "", absStart, absEnd, seg.Words, segPCM)
 
 		if absEnd > lastEnd {
 			lastEnd = absEnd
