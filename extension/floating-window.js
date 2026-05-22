@@ -214,11 +214,24 @@
         '#audio-primer .primer-btn{background:linear-gradient(135deg,#ffd700,#ffb700);color:#1a1a2e;font-size:22px;font-weight:700;padding:18px 36px;border-radius:50px;box-shadow:0 6px 24px rgba(255,200,0,.4),0 2px 8px rgba(0,0,0,.3);letter-spacing:1px;text-align:center;line-height:1.3}' +
         '#audio-primer .primer-hint{color:rgba(255,255,255,.7);font-size:13px;text-align:center;line-height:1.5}' +
         '#audio-primer.hidden{display:none}' +
+        '#loading-overlay{position:fixed;inset:0;background:radial-gradient(circle at center,rgba(10,10,30,.95),rgba(0,0,0,.97));display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9998;gap:24px}' +
+        '#loading-overlay.hidden{display:none}' +
+        '#loading-wave{display:flex;align-items:flex-end;justify-content:center;gap:6px;height:60px}' +
+        '#loading-wave .bar{width:8px;border-radius:4px;background:linear-gradient(to top,#ffd700,#ffaa00);animation:wave-bounce 0.8s ease-in-out infinite alternate}' +
+        '#loading-wave .bar:nth-child(1){height:20px;animation-delay:0s}' +
+        '#loading-wave .bar:nth-child(2){height:36px;animation-delay:0.12s}' +
+        '#loading-wave .bar:nth-child(3){height:52px;animation-delay:0.24s}' +
+        '#loading-wave .bar:nth-child(4){height:40px;animation-delay:0.36s}' +
+        '#loading-wave .bar:nth-child(5){height:28px;animation-delay:0.48s}' +
+        '@keyframes wave-bounce{0%{transform:scaleY(0.4);opacity:0.5}100%{transform:scaleY(1.2);opacity:1}}' +
+        '#loading-text{color:#c0b0e0;font-size:16px;font-weight:500;letter-spacing:2px;animation:text-pulse 2s ease-in-out infinite}' +
+        '@keyframes text-pulse{0%,100%{opacity:0.6}50%{opacity:1}}' +
         '</style>\n</head>\n<body>\n' +
         '<div id="video-wrap"><canvas id="delayed-canvas"></canvas><div id="sub-overlay"><div id="sub-original"></div><div id="sub-translation"></div></div><div id="status-tag">AI 翻译 · -' + (FRAME_DELAY_MS / 1000) + 's</div></div>' +
         '<div id="audio-panel"><span>🔊</span><span id="audio-status">已就绪</span></div>' +
         '<audio id="tts-player" style="display:none"></audio>' +
         '<div id="audio-primer"><div class="primer-btn">▶ 点击启动翻译</div><div class="primer-hint">浏览器要求在此处点一下，<br>才能在浮窗内播放配音</div></div>' +
+        '<div id="loading-overlay" class="hidden"><div id="loading-wave"><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div></div><div id="loading-text">AI 翻译配音准备中...</div></div>' +
         '</body>\n</html>');
       ai.floatingWindow.document.close();
     } catch (e) {
@@ -284,7 +297,10 @@
           a.pause(); a.currentTime = 0; a.volume = 1; a.src = '';
           _audioReady = true;
           if (primer) primer.classList.add('hidden');
-          if (sEl) sEl.textContent = '配音已启用';
+          // Show loading animation while the frame buffer fills (~6s)
+          var loadingEl = ai.floatingWindow.document.getElementById('loading-overlay');
+          if (loadingEl) loadingEl.classList.remove('hidden');
+          if (sEl) sEl.textContent = '配音已启用 · 缓冲中';
         }).catch(function () {
           // Auto-prime failed (browser autoplay policy) — show primer
           if (sEl) sEl.textContent = '点击浮窗任意位置启用配音';
@@ -567,6 +583,9 @@
         if (!ai.floatingBufferFilled && bufferStartTime && t - bufferStartTime >= FRAME_DELAY_MS) {
           ai.floatingBufferFilled = true;
           console.log('[floating-window] Buffer filled after ' + (t - bufferStartTime).toFixed(0) + 'ms, ' + frameBufCount + ' frames');
+          // Hide loading animation — frame buffer is ready
+          var loadingEl = ai.floatingWindow && !ai.floatingWindow.closed ? ai.floatingWindow.document.getElementById('loading-overlay') : null;
+          if (loadingEl) loadingEl.classList.add('hidden');
           // Pre-seed _displayedFrameVideoTime from the oldest frame so the
           // very first timeline loop tick has a valid refTime (avoids a
           // momentary fallback to originalTime - 6s, which would mismatch).
