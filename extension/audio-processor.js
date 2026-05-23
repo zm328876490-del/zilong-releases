@@ -87,8 +87,20 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
     if (!input || !input[0] || input[0].length === 0) {
       return true;
     }
+    // ─── Channel down-mix ────────────────────────────────────────────
+    // Many videos (movies, dialog-heavy clips, music videos) split vocals
+    // and music between the two stereo channels. Previously we only read
+    // input[0] (left), which on such clips could feed whisper a BGM-only
+    // stream while the dialog sat entirely on the right channel.
+    //
+    // Mix all available channels down to mono via simple averaging. Cost is
+    // a couple of multiplies per sample — negligible (~256 extra ops per
+    // 128-sample quantum = thousandths of a percent of a CPU core).
+    const channelCount = input.length;
     const channelData = input[0];
     const n = channelData.length;
+    // Cache the second channel reference outside the inner loop for speed.
+    const channelR = channelCount > 1 ? input[1] : null;
 
     // Arm timestamp for the first sample of THIS quantum if buffer was empty.
     if (this._writePos === 0 && this._bufStartCtxTime < 0) {
@@ -114,16 +126,31 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
       this._bufStartCtxTime += dropped / SAMPLE_RATE_HZ;
     }
 
-    // Convert Float32 → Int16 and append into the ring at _writePos.
+    // Convert Float32 → Int16 (mixed down to mono) and append at _writePos.
     let maxAbs = this._maxAbs;
     const base = this._writePos;
-    for (let i = 0; i < n; i++) {
-      const f = channelData[i];
-      const clamped = f < -1 ? -1 : (f > 1 ? 1 : f);
-      const v = Math.round(clamped * 32767);
-      this._buf[base + i] = v;
-      const a = v < 0 ? -v : v;
-      if (a > maxAbs) maxAbs = a;
+    if (channelR) {
+      // Stereo (or more): average L+R. Two-channel case is by far the most
+      // common; for >2 channels we still only use L+R here — surround mixes
+      // typically duplicate dialog into front L/R anyway.
+      for (let i = 0; i < n; i++) {
+        const f = (channelData[i] + channelR[i]) * 0.5;
+        const clamped = f < -1 ? -1 : (f > 1 ? 1 : f);
+        const v = Math.round(clamped * 32767);
+        this._buf[base + i] = v;
+        const a = v < 0 ? -v : v;
+        if (a > maxAbs) maxAbs = a;
+      }
+    } else {
+      // True mono — original fast path, no extra add/mul per sample.
+      for (let i = 0; i < n; i++) {
+        const f = channelData[i];
+        const clamped = f < -1 ? -1 : (f > 1 ? 1 : f);
+        const v = Math.round(clamped * 32767);
+        this._buf[base + i] = v;
+        const a = v < 0 ? -v : v;
+        if (a > maxAbs) maxAbs = a;
+      }
     }
     this._maxAbs = maxAbs;
     this._writePos += n;

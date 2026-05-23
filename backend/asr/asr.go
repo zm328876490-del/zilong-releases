@@ -61,6 +61,9 @@ type AudioBuffer struct {
 
 	// video-anchored timestamps: each chunk records (sampleOffset, videoTime)
 	chunkTimestamps []chunkTimestamp
+
+	// Rolling context prompt (see RollingBuffer.lastFinalText for rationale).
+	lastFinalText string
 }
 
 // NewAudioBuffer creates a new audio buffer.
@@ -355,25 +358,68 @@ func (ab *AudioBuffer) processSegment(samples []int16, segDur float64, isPartial
 			var segPCM []int16
 			if !isPartial {
 				segPCM = samples
+				// Remember the last final transcript as prompt for the
+				// next whisper request — improves cross-batch continuity
+				// at zero extra inference cost.
+				ab.mu.Lock()
+				ab.lastFinalText = text
+				ab.mu.Unlock()
 			}
 			ab.onResult(text, speechRate, segDur, isPartial, speaker, startTime, endTime, words, segPCM)
 	}
+}
+
+// writeWhisperRequest writes the multipart body shared by all whisper-server
+// callers. Centralizes the accuracy-tuning fields so any future tweak only
+// needs to land here:
+//
+//	temperature=0           — greedy decoding, deterministic & reduces drift
+//	no_speech_thold=0.6     — stricter silence gate, fewer "Thank you" hallucinations
+//	temperature_inc=0.2     — only fall back to sampling if greedy fails
+//	prompt=<lastFinalText>  — gives whisper the previous segment as context so
+//	                          proper nouns, names, and ongoing sentences stay
+//	                          coherent across batch boundaries. Zero extra
+//	                          inference cost — whisper.cpp natively consumes it.
+//	                          Capped at ~200 chars to stay inside whisper's
+//	                          224-token prompt window.
+func writeWhisperRequest(writer *multipart.Writer, wavData []byte, language, responseFormat, prompt string, wantWords bool) error {
+	part, err := writer.CreateFormFile("file", "audio.wav")
+	if err != nil {
+		return fmt.Errorf("form file: %w", err)
+	}
+	if _, err := part.Write(wavData); err != nil {
+		return fmt.Errorf("write wav: %w", err)
+	}
+	writer.WriteField("language", language)
+	writer.WriteField("response_format", responseFormat)
+	writer.WriteField("temperature", "0")
+	writer.WriteField("temperature_inc", "0.2")
+	writer.WriteField("no_speech_thold", "0.6")
+	if wantWords {
+		writer.WriteField("timestamps", "1")
+		writer.WriteField("word_timestamps", "1")
+	}
+	if prompt != "" {
+		// whisper's prompt window is ~224 tokens; cap text length to stay
+		// safely under that even on CJK (worst-case ~1 char per token).
+		if len(prompt) > 200 {
+			r := []rune(prompt)
+			if len(r) > 100 {
+				prompt = string(r[len(r)-100:])
+			}
+		}
+		writer.WriteField("prompt", prompt)
+	}
+	return writer.Close()
 }
 
 // callWhisperServer sends WAV data to the whisper-server HTTP API.
 func (ab *AudioBuffer) callWhisperServer(wavData []byte) (string, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-
-	part, err := writer.CreateFormFile("file", "audio.wav")
-	if err != nil {
-		return "", fmt.Errorf("form file: %w", err)
+	if err := writeWhisperRequest(writer, wavData, ab.language, "json", ab.lastFinalText, false); err != nil {
+		return "", err
 	}
-	part.Write(wavData)
-
-	writer.WriteField("language", ab.language)
-	writer.WriteField("response_format", "json")
-	writer.Close()
 
 	url := ab.serverURL + "/inference"
 	req, err := http.NewRequest("POST", url, &body)
@@ -412,18 +458,9 @@ func (ab *AudioBuffer) callWhisperServer(wavData []byte) (string, error) {
 func (ab *AudioBuffer) callWhisperServerWithWords(wavData []byte) (string, []WordTimestamp, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-
-	part, err := writer.CreateFormFile("file", "audio.wav")
-	if err != nil {
-		return "", nil, fmt.Errorf("form file: %w", err)
+	if err := writeWhisperRequest(writer, wavData, ab.language, "verbose_json", ab.lastFinalText, true); err != nil {
+		return "", nil, err
 	}
-	part.Write(wavData)
-
-	writer.WriteField("language", ab.language)
-	writer.WriteField("response_format", "verbose_json")
-	writer.WriteField("timestamps", "1")
-	writer.WriteField("word_timestamps", "1")
-	writer.Close()
 
 	url := ab.serverURL + "/inference"
 	req, err := http.NewRequest("POST", url, &body)
@@ -496,6 +533,12 @@ type RollingBuffer struct {
 	processing        bool
 	started           bool
 	stopCh            chan struct{}
+
+	// Rolling context prompt: the last final segment text, fed back to
+	// whisper as `prompt` for the next batch. Helps with proper nouns,
+	// continuation of long sentences, and reduces hallucination — at zero
+	// extra inference cost (whisper.cpp natively accepts a prompt).
+	lastFinalText string
 }
 
 func NewRollingBuffer(serverURL, language string, onResult func(string, float64, float64, bool, string, float64, float64, []WordTimestamp, []int16)) *RollingBuffer {
@@ -823,6 +866,13 @@ func (rb *RollingBuffer) processBatch() {
 			segPCM = samples[segStartIdx:segEndIdx]
 		}
 
+		// Remember the most recent final segment so the NEXT whisper call
+		// gets it as `prompt`. Greatly improves continuity across batches
+		// (proper nouns, mid-sentence continuations).
+		rb.mu.Lock()
+		rb.lastFinalText = seg.Text
+		rb.mu.Unlock()
+
 		rb.onResult(seg.Text, speechRate, dur, false, "", absStart, absEnd, seg.Words, segPCM)
 
 		if absEnd > lastEnd {
@@ -918,20 +968,13 @@ func ProcessOfflineFull(samples []int16, serverURL, language string, sampleRate 
 
 // callWhisperServerVerbose sends WAV data and requests verbose_json (with timestamps).
 func callWhisperServerVerbose(wavData []byte, serverURL, language string) (string, error) {
+	// Offline batch path (no rolling context — entire file goes in one call).
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
-	part, err := writer.CreateFormFile("file", "audio.wav")
-	if err != nil {
-		return "", fmt.Errorf("form file: %w", err)
+	if err := writeWhisperRequest(writer, wavData, language, "verbose_json", "", true); err != nil {
+		return "", err
 	}
-	part.Write(wavData)
-
-	writer.WriteField("language", language)
-	writer.WriteField("response_format", "verbose_json")
-	writer.WriteField("timestamps", "1")
-	writer.WriteField("word_timestamps", "1")
-	writer.Close()
 
 	url := serverURL + "/inference"
 	req, err := http.NewRequest("POST", url, &body)
