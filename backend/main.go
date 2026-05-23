@@ -77,13 +77,27 @@ type Client struct {
 	stickyGender      string // last committed gender, "male" / "female" / ""
 	flipPendingGender string // candidate new gender accumulating evidence
 	flipPendingCount  int    // consecutive strong opposite detections
+	// Lifetime strong-detection tally per gender. Used as a "dominant speaker"
+	// guard — a brief flurry of opposite-strong detections can't flip the
+	// voice unless its tally has grown to a meaningful fraction of the
+	// current dominant gender's tally. See resolveStickyGender.
+	maleStrongCount   int
+	femaleStrongCount int
 }
 
 // flipConfirmCount is the number of consecutive strong opposite-gender
-// detections required before flipping the sticky gender. 2 strong hits in a
-// row beats one-off mis-detections without delaying real speaker changes
-// (typical multi-speaker dialogue has > 2 segments per speaker).
-const flipConfirmCount = 2
+// detections required before flipping the sticky gender. 3 strong hits in a
+// row resists one-off mis-detections (male speaker briefly excited above the
+// female threshold) while still allowing genuine speaker changes — a real new
+// speaker normally produces many more than 3 strong-confidence segments.
+const flipConfirmCount = 3
+
+// flipDominanceRatio: a candidate gender must have lifetime strong-detection
+// count >= (current dominant count × this ratio) before a flip is allowed.
+// 0.5 means "the challenger must be at least half as established as the
+// incumbent". Combined with flipConfirmCount, this makes "occasional female
+// segment in a male-dominated video" a no-op rather than a voice flip.
+const flipDominanceRatio = 0.5
 
 // Subtitle is a single subtitle cue extracted from a video platform.
 type Subtitle struct {
@@ -314,9 +328,21 @@ func (c *Client) resolveStickyGender(snap, conf string, startTime, endTime float
 	c.genderMu.Lock()
 	defer c.genderMu.Unlock()
 
+	// Update lifetime tally first — every strong detection (agreeing or not)
+	// counts toward establishing the dominant speaker. Weak detections are
+	// noise and never affect the tally.
+	if conf == "strong" {
+		if snap == "male" {
+			c.maleStrongCount++
+		} else if snap == "female" {
+			c.femaleStrongCount++
+		}
+	}
+
 	logCommit := func(reason string) {
-		log.Printf("[gender] %.2f-%.2f snap=%s/%s sticky=%s (%s) text=%q",
-			startTime, endTime, snap, conf, c.stickyGender, reason, text)
+		log.Printf("[gender] %.2f-%.2f snap=%s/%s sticky=%s tally m=%d f=%d (%s) text=%q",
+			startTime, endTime, snap, conf, c.stickyGender,
+			c.maleStrongCount, c.femaleStrongCount, reason, text)
 	}
 
 	// Rule 5: no detection — keep current sticky.
@@ -350,23 +376,47 @@ func (c *Client) resolveStickyGender(snap, conf string, startTime, endTime float
 		return c.stickyGender
 	}
 
-	// Rule 4: strong disagreement — accumulate evidence.
+	// Rule 4: strong disagreement — accumulate consecutive evidence.
 	if c.flipPendingGender == snap {
 		c.flipPendingCount++
 	} else {
 		c.flipPendingGender = snap
 		c.flipPendingCount = 1
 	}
-	if c.flipPendingCount >= flipConfirmCount {
-		log.Printf("[gender] %.2f-%.2f FLIP %s→%s after %d strong hits text=%q",
-			startTime, endTime, c.stickyGender, snap, c.flipPendingCount, text)
+
+	// Rule 4a: even if consecutive evidence threshold is met, the challenger
+	// must have a meaningful lifetime tally vs the incumbent. This blocks
+	// "occasional 3 strong female segments inside a 50-segment male video"
+	// from flipping the voice. A real new speaker will quickly accumulate
+	// enough tally to satisfy this; a sporadic mis-detection or one-off
+	// background voice will not.
+	var dominantCount, challengerCount int
+	if c.stickyGender == "male" {
+		dominantCount = c.maleStrongCount
+		challengerCount = c.femaleStrongCount
+	} else {
+		dominantCount = c.femaleStrongCount
+		challengerCount = c.maleStrongCount
+	}
+	requiredCount := int(float64(dominantCount) * flipDominanceRatio)
+	dominanceOK := challengerCount >= requiredCount
+
+	if c.flipPendingCount >= flipConfirmCount && dominanceOK {
+		log.Printf("[gender] %.2f-%.2f FLIP %s→%s after %d strong hits tally m=%d f=%d text=%q",
+			startTime, endTime, c.stickyGender, snap, c.flipPendingCount,
+			c.maleStrongCount, c.femaleStrongCount, text)
 		c.stickyGender = snap
 		c.flipPendingGender = ""
 		c.flipPendingCount = 0
 		return c.stickyGender
 	}
-	log.Printf("[gender] %.2f-%.2f strong-disagree %s vs sticky=%s pending=%d/%d text=%q",
-		startTime, endTime, snap, c.stickyGender, c.flipPendingCount, flipConfirmCount, text)
+	reason := "pending"
+	if c.flipPendingCount >= flipConfirmCount && !dominanceOK {
+		reason = fmt.Sprintf("blocked-dominance(%d<%d)", challengerCount, requiredCount)
+	}
+	log.Printf("[gender] %.2f-%.2f strong-disagree %s vs sticky=%s pending=%d/%d tally m=%d f=%d %s text=%q",
+		startTime, endTime, snap, c.stickyGender, c.flipPendingCount, flipConfirmCount,
+		c.maleStrongCount, c.femaleStrongCount, reason, text)
 	return c.stickyGender
 }
 

@@ -61,23 +61,27 @@ func DetectGender(samples []int16, sampleRate int) string {
 
 // DetectGenderConfidence returns gender plus a confidence label:
 //
-//	"strong" — pitch is clearly inside male (<145 Hz) or female (>185 Hz) zone
-//	"weak"   — pitch is in the ambiguous 145–185 Hz band; the snap decision
+//	"strong" — pitch is clearly inside male (<140 Hz) or female (>195 Hz) zone
+//	"weak"   — pitch is in the ambiguous 140–195 Hz band; the snap decision
 //	           is unreliable and callers should prefer prior history
 //	""       — no pitch found (silence / too short / noise)
 //
-// The wide ambiguous band exists because male fundamental commonly extends up
-// to ~180 Hz and female down to ~165 Hz; a single short segment cannot reliably
-// separate them in that overlap.
+// Why the bands are tight: male fundamental commonly extends up to ~180 Hz
+// when excited/raised, and female down to ~165 Hz when calm. An excited male
+// shouting can briefly hit 190 Hz, so we keep strong-female at >195 Hz to
+// avoid mis-flipping. The earlier 145/185 thresholds were too lenient — an
+// emphatic male voice would trip strong-female and cause sticky-flip
+// candidates to accumulate. With the wider ambiguous band the per-segment
+// "weak" verdict is suppressed by the sticky layer (see resolveStickyGender).
 func DetectGenderConfidence(samples []int16, sampleRate int) (gender, confidence string) {
 	pitch := EstimatePitch(samples, sampleRate)
 	if pitch <= 0 {
 		return "", ""
 	}
 	switch {
-	case pitch < 145:
+	case pitch < 140:
 		return "male", "strong"
-	case pitch > 185:
+	case pitch > 195:
 		return "female", "strong"
 	case pitch < 165:
 		return "male", "weak"
