@@ -15,6 +15,7 @@
   const ollamaConfirmBtn = document.getElementById('ollamaConfirm');
   const ttsVoiceSelect = document.getElementById('ttsVoice');
   const subtitleToggle = document.getElementById('subtitleToggle');
+  const subtitleSizeSection = document.getElementById('subtitleSizeSection');
   const subtitleSizeSlider = document.getElementById('subtitleSize');
   const subtitleSizeVal = document.getElementById('subtitleSizeVal');
   const originalVolumeSlider = document.getElementById('originalVolume');
@@ -142,6 +143,7 @@
     populateTTSVoices(targetLang);
     ttsVoiceSelect.value = settings.ttsVoice || 'default';
     subtitleToggle.checked = settings.subtitleEnabled !== false;
+    updateSubtitleSizeVisibility();
     subtitleSizeSlider.value = settings.subtitleSize || 50;
     subtitleSizeVal.textContent = subtitleSizeSlider.value + '%';
     originalVolumeSlider.value = settings.originalVolume || 30;
@@ -372,11 +374,16 @@
     }
   });
 
-  // Subtitle toggle: save and push immediately
+  // Subtitle toggle: save and push immediately; show/hide size slider
   subtitleToggle.addEventListener('change', function () {
+    updateSubtitleSizeVisibility();
     saveSettings();
     pushDisplaySettings();
   });
+
+  function updateSubtitleSizeVisibility() {
+    subtitleSizeSection.style.display = subtitleToggle.checked ? '' : 'none';
+  }
 
   // Sliders: update label + save
   subtitleSizeSlider.addEventListener('input', function () {

@@ -2,125 +2,145 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=320, initial-scale=1.0">
+  <meta name="viewport" content="width=360, initial-scale=1.0">
   <title>AI 实时翻译</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <div class="container">
     <header>
-      <h1>AI 实时翻译</h1>
+      <h1>🎙️ AI 实时翻译</h1>
       <div class="header-right">
         <div id="statusIndicator" class="status-idle">
           <span class="dot"></span>
           <span id="statusText">未连接</span>
         </div>
         <select id="translateEngine">
-          <option value="microsoft">微软翻译</option>
-          <option value="google">Google 翻译</option>
-          <option value="ollama">本地 (Ollama)</option>
+          <option value="microsoft">🌐 微软翻译</option>
+          <option value="google">🌐 Google 翻译</option>
+          <option value="ollama">🖥️ 本地 Ollama</option>
         </select>
       </div>
     </header>
 
     <main>
-      <div class="form-row">
+      <div class="form-row lang-row">
         <div class="form-group">
-          <label for="sourceLang">源语言</label>
+          <label for="sourceLang">🌐 源语言</label>
           <select id="sourceLang">
-            <option value="auto">自动检测</option>
-            <option value="en">English</option>
-            <option value="zh">中文</option>
-            <option value="ja">日本語</option>
-            <option value="ko">한국어</option>
-            <option value="fr">Français</option>
-            <option value="de">Deutsch</option>
-            <option value="es">Español</option>
-            <option value="pt">Português</option>
-            <option value="ru">Русский</option>
-            <option value="th">ไทย</option>
-            <option value="vi">Tiếng Việt</option>
+            <option value="auto">🌐 自动检测</option>
+            <option value="en">🇺🇸 English</option>
+            <option value="zh">🇨🇳 中文</option>
+            <option value="ja">🇯🇵 日本語</option>
+            <option value="ko">🇰🇷 한국어</option>
+            <option value="fr">🇫🇷 Français</option>
+            <option value="de">🇩🇪 Deutsch</option>
+            <option value="es">🇪🇸 Español</option>
+            <option value="pt">🇧🇷 Português</option>
+            <option value="ru">🇷🇺 Русский</option>
+            <option value="th">🇹🇭 ไทย</option>
+            <option value="vi">🇻🇳 Tiếng Việt</option>
           </select>
         </div>
         <div class="form-group">
-          <label for="targetLang">目标语言</label>
+          <label for="targetLang">🌐 目标语言</label>
           <select id="targetLang">
-            <option value="zh-Hans">中文(简体)</option>
-            <option value="en">English</option>
-            <option value="ja">日本語</option>
-            <option value="ko">한국어</option>
-            <option value="fr">Français</option>
-            <option value="de">Deutsch</option>
-            <option value="es">Español</option>
-            <option value="pt">Português</option>
-            <option value="ru">Русский</option>
-            <option value="th">ไทย</option>
-            <option value="vi">Tiếng Việt</option>
+            <option value="zh-Hans">🇨🇳 中文(简体)</option>
+            <option value="en">🇺🇸 English</option>
+            <option value="ja">🇯🇵 日本語</option>
+            <option value="ko">🇰🇷 한국어</option>
+            <option value="fr">🇫🇷 Français</option>
+            <option value="de">🇩🇪 Deutsch</option>
+            <option value="es">🇪🇸 Español</option>
+            <option value="pt">🇧🇷 Português</option>
+            <option value="ru">🇷🇺 Русский</option>
+            <option value="th">🇹🇭 ไทย</option>
+            <option value="vi">🇻🇳 Tiếng Việt</option>
           </select>
         </div>
       </div>
 
-      <div class="form-group">
-        <label for="ttsVoice">TTS 音色</label>
-        <select id="ttsVoice"></select>
-      </div>
-
-      <div class="form-group">
+      <div class="section-card glass-card">
+        <div class="section-label">📄 页面翻译设置</div>
         <div class="toggle-row">
-          <label for="subtitleToggle">字幕开关</label>
+          <span>🌍 打开浏览器自动翻译</span>
           <label class="switch">
-            <input type="checkbox" id="subtitleToggle" checked>
-            <span class="slider round"></span>
+            <input type="checkbox" id="toggleGlobal">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <span>📖 双语对照（保留原文）</span>
+          <label class="switch">
+            <input type="checkbox" id="toggleBilingualPage">
+            <span class="slider"></span>
           </label>
         </div>
       </div>
 
-      <div class="form-group">
-        <div class="slider-row">
-          <label for="subtitleSize">字幕大小 <span id="subtitleSizeVal">50%</span></label>
-          <input type="range" id="subtitleSize" min="30" max="200" value="50" step="5">
+      <div class="section-card glass-card">
+        <div class="section-label">🎙️ 视频翻译设置</div>
+
+        <div class="form-group">
+          <label for="ttsVoice">🗣️ TTS 音色</label>
+          <select id="ttsVoice"></select>
         </div>
-        <div id="subtitleSizeNote" style="display:none;color:#888;font-size:11px;margin-top:4px">浮窗模式下字幕由浮窗控制，此设置不生效</div>
+
+        <div class="form-group">
+          <div class="toggle-row">
+            <label for="subtitleToggle">💬 字幕开关</label>
+            <label class="switch">
+              <input type="checkbox" id="subtitleToggle" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-group" id="subtitleSizeSection">
+          <div class="slider-row">
+            <label for="subtitleSize">🔤 字幕大小 <span id="subtitleSizeVal">50%</span></label>
+            <input type="range" id="subtitleSize" min="30" max="200" value="50" step="5">
+          </div>
+          <div id="subtitleSizeNote" style="display:none;color:#888;font-size:11px;margin-top:4px">浮窗模式下字幕由浮窗控制，此设置不生效</div>
+        </div>
+
+        <div class="form-group">
+          <div class="slider-row">
+            <label for="originalVolume">🔈 原声音量 <span id="originalVolumeVal">30%</span></label>
+            <input type="range" id="originalVolume" min="1" max="100" value="30" step="5">
+          </div>
+          <div id="originalVolumeNote" style="display:none;color:#888;font-size:11px;margin-top:4px">浮窗模式下原声已压低（保留 10% 给 ASR），此设置不生效</div>
+        </div>
+
+        <div class="form-group">
+          <div class="slider-row">
+            <label for="ttsVolume">🎙️ TTS 音量 <span id="ttsVolumeVal">100%</span></label>
+            <input type="range" id="ttsVolume" min="0" max="100" value="100" step="5">
+          </div>
+        </div>
       </div>
 
-      <div class="form-group">
-        <div class="slider-row">
-          <label for="originalVolume">原声音量 <span id="originalVolumeVal">30%</span></label>
-          <input type="range" id="originalVolume" min="1" max="100" value="30" step="5">
-        </div>
-        <div id="originalVolumeNote" style="display:none;color:#888;font-size:11px;margin-top:4px">浮窗模式下原声已压低（保留 10% 给 ASR），此设置不生效</div>
-      </div>
-
-      <div class="form-group">
-        <div class="slider-row">
-          <label for="ttsVolume">TTS音量 <span id="ttsVolumeVal">100%</span></label>
-          <input type="range" id="ttsVolume" min="0" max="100" value="100" step="5">
-        </div>
-      </div>
-
-      <button id="toggleBtn" class="btn-start">
+      <button id="toggleBtn" class="btn-start" style="display:none">
         <span id="toggleIcon">▶</span>
         <span id="toggleText">开始翻译</span>
       </button>
 
       <div id="errorMsg" class="error-msg" style="display:none"></div>
     </main>
-  </div>
 
   <div id="ollamaModal" class="modal-overlay" style="display:none">
     <div class="modal-box">
-      <h3>Ollama 设置</h3>
+      <h3>🖥️ Ollama 设置</h3>
       <div class="form-group">
-        <label for="ollamaUrl">Ollama 地址</label>
+        <label for="ollamaUrl">🔗 Ollama 地址</label>
         <input type="text" id="ollamaUrl" placeholder="http://localhost:11434" spellcheck="false">
       </div>
       <div class="form-group">
-        <label for="ollamaModel">翻译模型</label>
+        <label for="ollamaModel">🧠 翻译模型</label>
         <input type="text" id="ollamaModel" placeholder="qwen2.5:7b" spellcheck="false">
       </div>
       <div class="modal-actions">
-        <button id="ollamaCancel" class="btn-cancel">取消</button>
-        <button id="ollamaConfirm" class="btn-confirm">确定</button>
+        <button id="ollamaCancel" class="btn-cancel">✕ 取消</button>
+        <button id="ollamaConfirm" class="btn-confirm">✓ 确定</button>
       </div>
     </div>
   </div>
