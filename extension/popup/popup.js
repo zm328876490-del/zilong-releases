@@ -17,6 +17,7 @@
   const originalVolumeSlider = document.getElementById('originalVolume');
   const originalVolumeVal = document.getElementById('originalVolumeVal');
   const originalVolumeNote = document.getElementById('originalVolumeNote');
+  const subtitleSizeNote = document.getElementById('subtitleSizeNote');
   const ttsVolumeSlider = document.getElementById('ttsVolume');
   const ttsVolumeVal = document.getElementById('ttsVolumeVal');
   const toggleBtn = document.getElementById('toggleBtn');
@@ -389,6 +390,12 @@
   // While the floating popup window is up, the source <video> is muted
   // (see floating-window.js). The "原声音量" slider therefore controls
   // nothing — disable it so the UI does not lie to the user.
+  function setSubtitleSizeDisabled(disabled) {
+    subtitleSizeSlider.disabled = !!disabled;
+    subtitleSizeSlider.style.opacity = disabled ? '0.4' : '1';
+    if (subtitleSizeNote) subtitleSizeNote.style.display = disabled ? 'block' : 'none';
+  }
+
   function setOriginalVolumeDisabled(disabled) {
     originalVolumeSlider.disabled = !!disabled;
     originalVolumeSlider.style.opacity = disabled ? '0.4' : '1';
@@ -405,6 +412,7 @@
         }
         break;
       case 'floatingModeChanged':
+        setSubtitleSizeDisabled(!!message.floating);
         setOriginalVolumeDisabled(!!message.floating);
         break;
     }
@@ -424,7 +432,8 @@
           updateButtonState();
           setStatus('listening');
         }
-        // Sync the 原声音量 slider's disabled state with floating mode.
+        // Sync slider disabled states with floating mode.
+        setSubtitleSizeDisabled(!!(response && response.floatingMode));
         setOriginalVolumeDisabled(!!(response && response.floatingMode));
       }
     } catch (e) {
