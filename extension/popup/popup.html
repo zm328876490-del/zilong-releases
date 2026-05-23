@@ -10,9 +10,16 @@
   <div class="container">
     <header>
       <h1>AI 实时翻译</h1>
-      <div id="statusIndicator" class="status-idle">
-        <span class="dot"></span>
-        <span id="statusText">未连接</span>
+      <div class="header-right">
+        <div id="statusIndicator" class="status-idle">
+          <span class="dot"></span>
+          <span id="statusText">未连接</span>
+        </div>
+        <select id="translateEngine">
+          <option value="microsoft">微软翻译</option>
+          <option value="google">Google 翻译</option>
+          <option value="ollama">本地 (Ollama)</option>
+        </select>
       </div>
     </header>
 
@@ -50,26 +57,6 @@
             <option value="th">ไทย</option>
             <option value="vi">Tiếng Việt</option>
           </select>
-        </div>
-      </div>
-
-      <div class="form-group">
-        <label for="translateEngine">翻译引擎</label>
-        <select id="translateEngine">
-          <option value="microsoft">微软翻译</option>
-          <option value="google">Google 翻译</option>
-          <option value="ollama">本地 (Ollama)</option>
-        </select>
-      </div>
-
-      <div id="ollamaFields" class="engine-fields" style="display:none">
-        <div class="form-group">
-          <label for="ollamaUrl">Ollama 地址</label>
-          <input type="text" id="ollamaUrl" placeholder="http://localhost:11434" spellcheck="false">
-        </div>
-        <div class="form-group">
-          <label for="ollamaModel">翻译模型</label>
-          <input type="text" id="ollamaModel" placeholder="qwen2.5:7b" spellcheck="false">
         </div>
       </div>
 
@@ -118,6 +105,24 @@
 
       <div id="errorMsg" class="error-msg" style="display:none"></div>
     </main>
+  </div>
+
+  <div id="ollamaModal" class="modal-overlay" style="display:none">
+    <div class="modal-box">
+      <h3>Ollama 设置</h3>
+      <div class="form-group">
+        <label for="ollamaUrl">Ollama 地址</label>
+        <input type="text" id="ollamaUrl" placeholder="http://localhost:11434" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="ollamaModel">翻译模型</label>
+        <input type="text" id="ollamaModel" placeholder="qwen2.5:7b" spellcheck="false">
+      </div>
+      <div class="modal-actions">
+        <button id="ollamaCancel" class="btn-cancel">取消</button>
+        <button id="ollamaConfirm" class="btn-confirm">确定</button>
+      </div>
+    </div>
   </div>
 
   <script src="popup.js"></script>

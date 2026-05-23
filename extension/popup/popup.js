@@ -7,9 +7,12 @@
   const sourceLangSelect = document.getElementById('sourceLang');
   const targetLangSelect = document.getElementById('targetLang');
   const translateEngineSelect = document.getElementById('translateEngine');
-  const ollamaFields = document.getElementById('ollamaFields');
+  let prevEngine = translateEngineSelect.value;
+  const ollamaModal = document.getElementById('ollamaModal');
   const ollamaUrlInput = document.getElementById('ollamaUrl');
   const ollamaModelInput = document.getElementById('ollamaModel');
+  const ollamaCancelBtn = document.getElementById('ollamaCancel');
+  const ollamaConfirmBtn = document.getElementById('ollamaConfirm');
   const ttsVoiceSelect = document.getElementById('ttsVoice');
   const subtitleToggle = document.getElementById('subtitleToggle');
   const subtitleSizeSlider = document.getElementById('subtitleSize');
@@ -135,7 +138,7 @@
     translateEngineSelect.value = settings.engine || DEFAULT_SETTINGS.engine;
     ollamaUrlInput.value = settings.ollamaUrl || DEFAULT_SETTINGS.ollamaUrl;
     ollamaModelInput.value = settings.ollamaModel || DEFAULT_SETTINGS.ollamaModel;
-    updateEngineFields();
+    prevEngine = settings.engine || DEFAULT_SETTINGS.engine;
     populateTTSVoices(targetLang);
     ttsVoiceSelect.value = settings.ttsVoice || 'default';
     subtitleToggle.checked = settings.subtitleEnabled !== false;
@@ -319,10 +322,14 @@
   // Target language change: rebuild TTS voices first, then save
   targetLangSelect.addEventListener('change', onTargetLangChange);
 
-  // Engine change: show/hide engine-specific fields, then save
+  // Engine change: open ollama modal when "本地" selected
   translateEngineSelect.addEventListener('change', function () {
-    updateEngineFields();
-    saveSettings();
+    if (translateEngineSelect.value === 'ollama') {
+      showOllamaModal();
+    } else {
+      prevEngine = translateEngineSelect.value;
+      saveSettings();
+    }
   });
 
   // Auto-save on input change
@@ -338,10 +345,32 @@
     el.addEventListener('input', saveSettings);
   });
 
-  function updateEngineFields() {
-    var engine = translateEngineSelect.value;
-    ollamaFields.style.display = (engine === 'ollama') ? '' : 'none';
+  function showOllamaModal() {
+    ollamaModal.style.display = 'flex';
   }
+
+  function hideOllamaModal() {
+    ollamaModal.style.display = 'none';
+  }
+
+  ollamaConfirmBtn.addEventListener('click', function () {
+    prevEngine = 'ollama';
+    hideOllamaModal();
+    saveSettings();
+  });
+
+  ollamaCancelBtn.addEventListener('click', function () {
+    translateEngineSelect.value = prevEngine;
+    hideOllamaModal();
+  });
+
+  // Click overlay to close
+  ollamaModal.addEventListener('click', function (e) {
+    if (e.target === ollamaModal) {
+      translateEngineSelect.value = prevEngine;
+      hideOllamaModal();
+    }
+  });
 
   // Subtitle toggle: save and push immediately
   subtitleToggle.addEventListener('change', function () {

@@ -37,6 +37,18 @@ header h1 {
   -webkit-text-fill-color: transparent;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+header select {
+  width: 120px;
+  padding: 4px 24px 4px 8px;
+  font-size: 12px;
+}
+
 .status-idle,
 .status-connected,
 .status-listening,
@@ -91,6 +103,11 @@ header h1 {
 }
 
 /* ─── Form ───────────────────────────────── */
+#statusIndicator {
+  justify-content: center;
+  margin-bottom: 14px;
+}
+
 .form-group {
   margin-bottom: 12px;
 }
@@ -334,4 +351,56 @@ input[type="range"]::-webkit-slider-thumb:hover {
 
 input[type="range"]:focus {
   box-shadow: none;
+}
+
+/* ─── Modal ──────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-box {
+  background: #fff;
+  border-radius: 10px;
+  padding: 20px;
+  width: 280px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+}
+
+.modal-box h3 {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 14px;
+  color: #1a1a2e;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.modal-actions button {
+  flex: 1;
+  padding: 8px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-cancel {
+  background: #eef0f5;
+  color: #4b5563;
+}
+
+.btn-confirm {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
 }
