@@ -355,7 +355,15 @@ func buildOllamaPrompt(to string) string {
 · 品牌名、缩写、专有名词保留原文
 
 禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰（~~！！）。
-上文是已翻译的句子，用于理解人称和语境。只翻译最后一句，一行输出。`, toName, filler)
+
+上文是同一段话已翻译的内容，用于保持语气、人称和语境的连贯。
+翻译最后一句时要与上文自然衔接：
+· 上文用"他/她"则继续用同一人称，不要换主语
+· 上文是问句则当前句可省略主语直接回答
+· 当前句若是上文的延续（开头是 and/but/so/because 等），用"而且/但是/所以/因为"承接，不要重起一句
+· 当前句若被切成半句（结尾没有标点），翻译时也不要硬补句号，用逗号或省略号自然衔接
+
+只翻译最后一句，一行输出。`, toName, filler)
 	}
 
 	// Generic localization prompt for all other target languages.
@@ -369,7 +377,12 @@ func buildOllamaPrompt(to string) string {
 · 品牌名、缩写、专有名词保留原文
 
 禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰。
-上文是已翻译的句子，用于理解人称和语境。只翻译最后一句，一行输出。`, toName, toName, toName, toName, filler)
+
+上文是同一段话已翻译的内容，用于保持语气、人称和语境的连贯。
+翻译最后一句时要与上文自然衔接：保持同一人称，承接上文的逻辑关系
+（and/but/so 等连接词译为对应承接词），半句话不要硬补句号。
+
+只翻译最后一句，一行输出。`, toName, toName, toName, toName, filler)
 }
 
 func (t *Translator) translateOllama(text, from, to string) (string, error) {

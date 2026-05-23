@@ -20,9 +20,16 @@ const (
 	bitsPerSample  = 16
 	numChannels    = 1
 	silenceThresh  = 0.005 // RMS threshold for silence
-	silenceTimeout = 600   // ms of silence before cutting
-	minSpeechLen   = 300   // ms minimum speech segment length
-	maxSpeechLen   = 5000  // ms maximum speech segment length (force cut)
+	// silenceTimeout: 900ms tolerates natural mid-sentence pauses
+	// ("so... I think... it's actually a good idea") instead of slicing
+	// one sentence into 2-3 fragments. Each fragment used to be sent to
+	// the LLM separately, so translations read disconnected. Cost: +300ms
+	// subtitle latency — invisible under the floating window's 6s buffer.
+	silenceTimeout = 900 // ms of silence before cutting
+	minSpeechLen   = 300 // ms minimum speech segment length
+	// maxSpeechLen: 8s lets long-but-coherent English sentences stay in
+	// one piece. Whisper handles 8s in ~60ms more than 5s — imperceptible.
+	maxSpeechLen = 8000 // ms maximum speech segment length (force cut)
 
 	streamFlushInterval = 300 // ms between streaming partial ASR flushes
 	streamMinWindow     = 500 // ms minimum speech before first streaming flush
