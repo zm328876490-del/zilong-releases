@@ -13,7 +13,6 @@
   const ollamaModelInput = document.getElementById('ollamaModel');
   const ollamaCancelBtn = document.getElementById('ollamaCancel');
   const ollamaConfirmBtn = document.getElementById('ollamaConfirm');
-  const ttsVoiceSelect = document.getElementById('ttsVoice');
   const subtitleToggle = document.getElementById('subtitleToggle');
   const subtitleSizeSection = document.getElementById('subtitleSizeSection');
   const subtitleSizeSlider = document.getElementById('subtitleSize');
@@ -41,94 +40,11 @@
     engine: 'microsoft',
     ollamaUrl: 'http://localhost:11434',
     ollamaModel: 'qwen2.5:7b',
-    ttsVoice: 'default',
     subtitleEnabled: true,
     subtitleSize: 50,
     originalVolume: 30,
     ttsVolume: 100,
   };
-
-  // Language-specific TTS voices. "default" resolves to VoiceForLang(targetLang) on backend.
-  const VOICE_MAP = {
-    'zh-Hans': [
-      { value: 'default', label: '默认女声 (晓晓)' },
-      { value: 'xiaoxiao', label: '晓晓 (女·温柔)' },
-      { value: 'yunxi', label: '云希 (男)' },
-      { value: 'xiaoyi', label: '晓伊 (女·活泼)' },
-      { value: 'yunyang', label: '云扬 (男·新闻)' },
-    ],
-    en: [
-      { value: 'default', label: 'Default (Jenny)' },
-      { value: 'jenny', label: 'Jenny (Female)' },
-      { value: 'guy', label: 'Guy (Male)' },
-      { value: 'aria', label: 'Aria (Female)' },
-    ],
-    ja: [
-      { value: 'default', label: 'デフォルト (Nanami)' },
-      { value: 'nanami', label: 'Nanami (Female)' },
-      { value: 'keita', label: 'Keita (Male)' },
-    ],
-    ko: [
-      { value: 'default', label: '기본 (SunHi)' },
-      { value: 'sunhi', label: 'SunHi (Female)' },
-      { value: 'injoon', label: 'InJoon (Male)' },
-    ],
-    fr: [
-      { value: 'default', label: 'Défaut (Denise)' },
-      { value: 'denise', label: 'Denise (Female)' },
-      { value: 'henri', label: 'Henri (Male)' },
-    ],
-    de: [
-      { value: 'default', label: 'Standard (Katja)' },
-      { value: 'katja', label: 'Katja (Female)' },
-      { value: 'conrad', label: 'Conrad (Male)' },
-    ],
-    es: [
-      { value: 'default', label: 'Predeterminado (Elvira)' },
-      { value: 'elvira', label: 'Elvira (Female)' },
-      { value: 'alvaro', label: 'Álvaro (Male)' },
-    ],
-    pt: [
-      { value: 'default', label: 'Padrão (Francisca)' },
-      { value: 'francisca', label: 'Francisca (Female)' },
-      { value: 'antonio', label: 'Antônio (Male)' },
-    ],
-    ru: [
-      { value: 'default', label: 'По умолчанию (Svetlana)' },
-      { value: 'svetlana', label: 'Svetlana (Female)' },
-      { value: 'dmitry', label: 'Dmitry (Male)' },
-    ],
-    th: [
-      { value: 'default', label: 'ค่าเริ่มต้น (Premwadee)' },
-      { value: 'premwadee', label: 'Premwadee (Female)' },
-      { value: 'niwat', label: 'Niwat (Male)' },
-    ],
-    vi: [
-      { value: 'default', label: 'Mặc định (HoaiMy)' },
-      { value: 'hoaimy', label: 'HoaiMy (Female)' },
-      { value: 'namminh', label: 'NamMinh (Male)' },
-    ],
-  };
-
-  function populateTTSVoices(lang) {
-    const voices = VOICE_MAP[lang] || VOICE_MAP['en'];
-    const prev = ttsVoiceSelect.value;
-    ttsVoiceSelect.innerHTML = '';
-    voices.forEach(function (v) {
-      var opt = document.createElement('option');
-      opt.value = v.value;
-      opt.textContent = v.label;
-      ttsVoiceSelect.appendChild(opt);
-    });
-    // Restore previous value if still valid, otherwise fall to first (default)
-    var found = voices.some(function (v) { return v.value === prev; });
-    ttsVoiceSelect.value = found ? prev : voices[0].value;
-  }
-
-  function onTargetLangChange() {
-    populateTTSVoices(targetLangSelect.value);
-    saveSettings();
-  }
 
   async function loadSettings() {
     const result = await chrome.storage.local.get('translationSettings');
@@ -140,8 +56,6 @@
     ollamaUrlInput.value = settings.ollamaUrl || DEFAULT_SETTINGS.ollamaUrl;
     ollamaModelInput.value = settings.ollamaModel || DEFAULT_SETTINGS.ollamaModel;
     prevEngine = settings.engine || DEFAULT_SETTINGS.engine;
-    populateTTSVoices(targetLang);
-    ttsVoiceSelect.value = settings.ttsVoice || 'default';
     subtitleToggle.checked = settings.subtitleEnabled !== false;
     updateSubtitleSizeVisibility();
     subtitleSizeSlider.value = settings.subtitleSize || 50;
@@ -161,7 +75,6 @@
       engine: translateEngineSelect.value,
       ollamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
       ollamaModel: ollamaModelInput.value.trim() || 'qwen2.5:7b',
-      ttsVoice: ttsVoiceSelect.value,
       subtitleEnabled: subtitleToggle.checked,
       subtitleSize: parseInt(subtitleSizeSlider.value, 10),
       originalVolume: parseInt(originalVolumeSlider.value, 10),
@@ -322,7 +235,7 @@
   });
 
   // Target language change: rebuild TTS voices first, then save
-  targetLangSelect.addEventListener('change', onTargetLangChange);
+  targetLangSelect.addEventListener('change', saveSettings);
 
   // Engine change: open ollama modal when "本地" selected
   translateEngineSelect.addEventListener('change', function () {
@@ -335,7 +248,7 @@
   });
 
   // Auto-save on input change
-  [sourceLangSelect, ttsVoiceSelect].forEach(
+  [sourceLangSelect].forEach(
     (el) => {
       el.addEventListener('change', saveSettings);
       el.addEventListener('input', saveSettings);
