@@ -7,12 +7,13 @@ import (
 )
 
 type Config struct {
-	Port        string
-	WhisperExe  string // path to whisper-cli.exe (whisper-server.exe is derived from this)
-	ModelPath   string
-	ModelDir    string
-	OllamaUrl   string
-	OllamaModel string
+	Port         string
+	WhisperExe   string // path to whisper-cli.exe (whisper-server.exe is derived from this)
+	ModelPath    string
+	ModelDir     string
+	VadModelPath string // path to ggml-vad.bin (Silero VAD model for whisper)
+	OllamaUrl    string
+	OllamaModel  string
 }
 
 // WhisperPort returns the port for whisper-server (different from our WS port).
@@ -72,6 +73,20 @@ func Load() *Config {
 	for _, c := range modelCandidates {
 		if _, err := os.Stat(c); err == nil {
 			cfg.ModelPath = c
+			break
+		}
+	}
+
+	// VAD model candidates
+	vadCandidates := []string{
+		filepath.Join(cfg.ModelDir, "ggml-vad.bin"),
+	}
+	if envVad := os.Getenv("WHISPER_VAD_MODEL"); envVad != "" {
+		vadCandidates = append([]string{envVad}, vadCandidates...)
+	}
+	for _, c := range vadCandidates {
+		if _, err := os.Stat(c); err == nil {
+			cfg.VadModelPath = c
 			break
 		}
 	}

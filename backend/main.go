@@ -1226,6 +1226,9 @@ func startWhisperServer(cfg *config.Config) (*exec.Cmd, error) {
 		"--port", whisperPort,
 		"--host", "127.0.0.1",
 	}
+	if cfg.VadModelPath != "" {
+		args = append(args, "--vad", "-vm", cfg.VadModelPath)
+	}
 
 	cmd := exec.Command(serverExe, args...)
 	cmd.Stderr = os.Stderr
