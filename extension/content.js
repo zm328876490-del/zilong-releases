@@ -3498,7 +3498,7 @@ function generateSessionId() {
         break;
 
       case 'getStatus':
-        sendResponse({ isRunning });
+        sendResponse({ isRunning, floatingMode });
         break;
 
       case 'updateSettings':

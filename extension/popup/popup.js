@@ -16,6 +16,7 @@
   const subtitleSizeVal = document.getElementById('subtitleSizeVal');
   const originalVolumeSlider = document.getElementById('originalVolume');
   const originalVolumeVal = document.getElementById('originalVolumeVal');
+  const originalVolumeNote = document.getElementById('originalVolumeNote');
   const ttsVolumeSlider = document.getElementById('ttsVolume');
   const ttsVolumeVal = document.getElementById('ttsVolumeVal');
   const toggleBtn = document.getElementById('toggleBtn');
@@ -384,6 +385,16 @@
     } catch (_) {}
   }
 
+  // ─── Floating-mode slider gating ──────────────────────────────────
+  // While the floating popup window is up, the source <video> is muted
+  // (see floating-window.js). The "原声音量" slider therefore controls
+  // nothing — disable it so the UI does not lie to the user.
+  function setOriginalVolumeDisabled(disabled) {
+    originalVolumeSlider.disabled = !!disabled;
+    originalVolumeSlider.style.opacity = disabled ? '0.4' : '1';
+    if (originalVolumeNote) originalVolumeNote.style.display = disabled ? 'block' : 'none';
+  }
+
   // ─── Listen for status updates from content script ────────────────
   chrome.runtime.onMessage.addListener((message) => {
     switch (message.type) {
@@ -392,6 +403,9 @@
         if (message.status === 'error') {
           showError(message.message);
         }
+        break;
+      case 'floatingModeChanged':
+        setOriginalVolumeDisabled(!!message.floating);
         break;
     }
   });
@@ -410,6 +424,8 @@
           updateButtonState();
           setStatus('listening');
         }
+        // Sync the 原声音量 slider's disabled state with floating mode.
+        setOriginalVolumeDisabled(!!(response && response.floatingMode));
       }
     } catch (e) {
       // Content script not injected yet, that's fine

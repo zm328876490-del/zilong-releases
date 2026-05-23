@@ -57,6 +57,20 @@
   var _videoSavedFilter = null;
   var _keyBlockHandler = null;
   var _mouseBlockHandler = null;
+  // Floating mode ducks the source video to near-silent (1%) so the user
+  // only hears translated TTS, but ASR can still capture the source audio
+  // (full mute would starve the ASR pipeline). Cache pre-floating volume
+  // + muted so closeFloatingWindow can put the page back exactly as we
+  // found it.
+  var _videoSavedMuted = null;
+  var _videoSavedVolume = null;
+  var _volumeGuardInterval = null;
+  var _volumeGuardListener = null;
+  var _volumeGuardTarget = null;
+  // 10% (-20 dB): inaudible to the user in practice, but well above the
+  // backend VAD energy threshold so ASR keeps working. 1% was too aggressive
+  // — it starved the VAD on quiet sources and caused dropped segments.
+  var FLOATING_DUCKED_VOLUME = 0.1;
 
   // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -357,8 +371,36 @@
     // Clear stay-on-top interval
     if (_stayOnTopInterval) { clearInterval(_stayOnTopInterval); _stayOnTopInterval = null; }
 
+    // Capture the video element BEFORE removeVideoOverlay clears _lockedVideo,
+    // so we can restore its pre-floating muted state below.
+    var _videoForMuteRestore = _lockedVideo || ai.offlineVideo || null;
+
     // Remove video lock overlay + restore video controls
     removeVideoOverlay();
+
+    // Tear down volume guards BEFORE restoring volume/muted, otherwise the
+    // listener or next interval tick immediately re-ducks the video.
+    if (_volumeGuardInterval) { clearInterval(_volumeGuardInterval); _volumeGuardInterval = null; }
+    if (_volumeGuardListener && _volumeGuardTarget) {
+      try { _volumeGuardTarget.removeEventListener('volumechange', _volumeGuardListener); } catch (_) {}
+    }
+    _volumeGuardListener = null;
+    _volumeGuardTarget = null;
+
+    // Restore source video's pre-floating volume + muted state.
+    if (_videoForMuteRestore) {
+      if (_videoSavedVolume !== null) {
+        try { _videoForMuteRestore.volume = _videoSavedVolume; } catch (_) {}
+      }
+      if (_videoSavedMuted !== null) {
+        try { _videoForMuteRestore.muted = _videoSavedMuted; } catch (_) {}
+      }
+    }
+    _videoSavedMuted = null;
+    _videoSavedVolume = null;
+
+    // Tell popup the slider can be enabled again.
+    try { chrome.runtime.sendMessage({ type: 'floatingModeChanged', floating: false }); } catch (_) {}
 
     // Remove visibility listener
     if (_visibilityHandler) {
@@ -1336,8 +1378,72 @@
 
     createVideoOverlay(video);
 
+    // Duck the source video to near-silent (1%) — full mute would kill
+    // the ASR pipeline because backend Whisper reads from the same audio
+    // track. 1% is inaudible to the user but the signal still flows.
+    //
+    // Many sites (YouTube/B站/TikTok-style MSE players) listen to
+    // `volumechange` and immediately reset volume/muted from their own
+    // state, so a one-shot assignment isn't enough. Guard with both a
+    // `volumechange` listener (catches synchronous flips) AND a 250ms
+    // poller (catches async flips and players that swap the audio track).
+    _videoSavedMuted = video.muted;
+    _videoSavedVolume = video.volume;
+    _volumeGuardTarget = video;
+    try { video.muted = false; } catch (_) {}
+    try { video.volume = FLOATING_DUCKED_VOLUME; } catch (_) {}
+    console.log('[floating-window] source video ducked to ' +
+      (FLOATING_DUCKED_VOLUME * 100) + '% (saved muted=' + _videoSavedMuted +
+      ' vol=' + _videoSavedVolume + ')');
+
+    _volumeGuardListener = function () {
+      if (!_volumeGuardTarget) return;
+      if (_volumeGuardTarget.muted) {
+        try { _volumeGuardTarget.muted = false; } catch (_) {}
+      }
+      if (Math.abs(_volumeGuardTarget.volume - FLOATING_DUCKED_VOLUME) > 0.005) {
+        try { _volumeGuardTarget.volume = FLOATING_DUCKED_VOLUME; } catch (_) {}
+      }
+    };
+    try { video.addEventListener('volumechange', _volumeGuardListener); } catch (_) {}
+
+    if (_volumeGuardInterval) { clearInterval(_volumeGuardInterval); }
+    _volumeGuardInterval = setInterval(function () {
+      if (!_volumeGuardTarget) return;
+      var changed = false;
+      if (_volumeGuardTarget.muted) {
+        try { _volumeGuardTarget.muted = false; } catch (_) {}
+        changed = true;
+      }
+      if (Math.abs(_volumeGuardTarget.volume - FLOATING_DUCKED_VOLUME) > 0.005) {
+        try { _volumeGuardTarget.volume = FLOATING_DUCKED_VOLUME; } catch (_) {}
+        changed = true;
+      }
+      if (changed) console.log('[floating-window] volume-guard re-ducked source video');
+    }, 250);
+
+    // Tell the popup to disable the "原声音量" slider — it's meaningless
+    // while floating because nothing is playing the source audio.
+    try { chrome.runtime.sendMessage({ type: 'floatingModeChanged', floating: true }); } catch (_) {}
+
     if (!openFloatingWindow(video)) {
       removeVideoOverlay();
+      // Pop-up blocked — tear down volume guards + undo the duck + notify popup.
+      if (_volumeGuardInterval) { clearInterval(_volumeGuardInterval); _volumeGuardInterval = null; }
+      if (_volumeGuardListener && _volumeGuardTarget) {
+        try { _volumeGuardTarget.removeEventListener('volumechange', _volumeGuardListener); } catch (_) {}
+      }
+      _volumeGuardListener = null;
+      _volumeGuardTarget = null;
+      if (_videoSavedVolume !== null) {
+        try { video.volume = _videoSavedVolume; } catch (_) {}
+        _videoSavedVolume = null;
+      }
+      if (_videoSavedMuted !== null) {
+        try { video.muted = _videoSavedMuted; } catch (_) {}
+        _videoSavedMuted = null;
+      }
+      try { chrome.runtime.sendMessage({ type: 'floatingModeChanged', floating: false }); } catch (_) {}
       ai.floatingMode = false;
       ai.offlineMode = false;
       ai.offlineVideo = null;
