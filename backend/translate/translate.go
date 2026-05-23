@@ -314,6 +314,64 @@ type ollamaChatResponse struct {
 	} `json:"choices"`
 }
 
+func buildOllamaPrompt(to string) string {
+	langNames := map[string]string{
+		"zh-Hans": "简体中文", "zh-Hant": "繁體中文", "zh": "中文",
+		"en": "English", "ja": "日本語", "ko": "한국어",
+		"fr": "Français", "de": "Deutsch", "es": "Español",
+		"pt": "Português", "ru": "Русский", "ar": "العربية",
+		"th": "ไทย", "vi": "Tiếng Việt",
+	}
+	toName := langNames[to]
+	if toName == "" {
+		toName = to
+	}
+
+	fillerByLang := map[string]string{
+		"zh-Hans": "呀哦哈啦", "zh-Hant": "呀哦哈啦", "zh": "呀哦哈啦",
+		"ja": "あの、ええと、まあ", "ko": "음, 그, 저, 뭐",
+	}
+	filler := fillerByLang[to]
+	if filler == "" {
+		filler = "无意义语气词堆砌"
+	}
+
+	// Chinese targets get few-shot examples tuned for English→Chinese localization.
+	if to == "zh-Hans" || to == "zh-Hant" || to == "zh" {
+		return fmt.Sprintf(`你是视频字幕本地化专家。将英文口语翻译为地道自然的%s字幕——不是机械翻译，而是让中文观众觉得这句话本来就是用中文说的。
+
+翻译示例（注意风格，不只是意思对，更要像中文）：
+  "I'm not sure about that."   → "不太好说。"
+  "What the hell is going on?" → "怎么回事？"
+  "That's a great idea!"       → "好主意！"
+  "To be honest, I don't think so." → "说实话，我觉得不行。"
+  "Come on, you gotta be kidding me." → "别闹，开玩笑的吧。"
+
+本地化原则：
+· 英文填充词（well, you know, I mean, like, basically, actually）直接省略，不翻译
+· 英文习语用中文对应表达，不要字面直译（如 kidding→开玩笑，not sure→不好说）
+· 英文长句拆成短句，中文不习惯一句话塞太多信息
+· 感叹和语气通过标点和措辞自然体现，不要括号注释
+· 品牌名、缩写、专有名词保留原文
+
+禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰（~~！！）。
+上文是已翻译的句子，用于理解人称和语境。只翻译最后一句，一行输出。`, toName, filler)
+	}
+
+	// Generic localization prompt for all other target languages.
+	return fmt.Sprintf(`你是视频字幕本地化专家。将英文口语翻译为地道自然的%s字幕——不是机械翻译，而是让%s观众觉得这就是母语者说的话。
+
+本地化原则：
+· 英文填充词（well, you know, I mean, like, basically, actually）直接省略，不翻译
+· 英文习语用%s的地道对应表达，不要字面直译
+· 英文长句拆成短句，%s不习惯一句话塞太多信息
+· 感叹和语气通过标点和措辞自然体现，不要括号注释
+· 品牌名、缩写、专有名词保留原文
+
+禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰。
+上文是已翻译的句子，用于理解人称和语境。只翻译最后一句，一行输出。`, toName, toName, toName, toName, filler)
+}
+
 func (t *Translator) translateOllama(text, from, to string) (string, error) {
 	if t.ollamaUrl == "" {
 		return "", fmt.Errorf("ollama URL not configured")
@@ -327,22 +385,7 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 		log.Printf("[ollama]   text: %q", text)
 	}
 
-	langNames := map[string]string{
-		"zh-Hans": "简体中文", "zh-Hant": "繁體中文", "zh": "中文",
-		"en": "English", "ja": "日本語", "ko": "한국어",
-		"fr": "Français", "de": "Deutsch", "es": "Español",
-		"pt": "Português", "ru": "Русский", "ar": "العربية",
-		"th": "ไทย", "vi": "Tiếng Việt",
-	}
-	toName := langNames[to]
-	if toName == "" {
-		toName = to
-	}
-
-	systemPrompt := fmt.Sprintf(
-		"你是视频字幕翻译专家。将用户输入的英文口语翻译为简洁自然的%s字幕。"+
-			"要求：口语化，符合中文表达习惯；每句不超过25字；保留原文语气（疑问/感叹/否定）；"+
-			"人名地名直接音译；只输出译文，不要任何解释或额外内容。", toName)
+	systemPrompt := buildOllamaPrompt(to)
 
 	// Build messages with context window (last 3 pairs)
 	t.ctxMu.Lock()
