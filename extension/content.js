@@ -509,7 +509,7 @@ function generateSessionId() {
           try { floatingWindow.close(); } catch (_) {}
           floatingWindow = null;
         }
-        var FIXED_W = 480, FIXED_H = 400;
+        var FIXED_W = 480, FIXED_H = 780;
         var left = Math.max(0, screen.width - FIXED_W - 40);
         var top = Math.max(0, (screen.height - FIXED_H) / 2);
         var pw = window.open('about:blank', 'ai_translation_overlay',
