@@ -221,11 +221,11 @@
     if (isRunning) {
       toggleBtn.className = 'btn-stop';
       toggleIcon.textContent = '■';
-      toggleText.textContent = '停止翻译';
+      toggleText.textContent = '停止视频翻译';
     } else {
       toggleBtn.className = 'btn-start';
       toggleIcon.textContent = '▶';
-      toggleText.textContent = '开始翻译';
+      toggleText.textContent = '开始视频翻译';
     }
   }
 

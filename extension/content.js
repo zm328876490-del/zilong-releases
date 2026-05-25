@@ -427,10 +427,50 @@ function generateSessionId() {
         pointer-events: none !important;
         opacity: 0.55 !important;
       }
+      #__ai_fab__.disabled {
+        background: linear-gradient(180deg, #6b7280 0%, #4b5563 50%, #374151 100%) !important;
+        box-shadow: -3px 0 10px rgba(107, 114, 128, 0.25) !important;
+        cursor: default !important;
+        opacity: 0.65 !important;
+      }
+      #__ai_fab__.disabled:hover {
+        width: 50px !important;
+      }
+      #__ai_fab__.disabled::before { border-right-color: #1e1b2e !important; }
+      #__ai_fab__ .fab-tooltip {
+        display: none !important;
+        position: absolute !important;
+        right: 58px !important;
+        top: 50% !important;
+        transform: translateY(-50%) !important;
+        background: rgba(30, 27, 46, 0.95) !important;
+        color: #d1d5db !important;
+        font-size: 12px !important;
+        font-family: -apple-system, 'Microsoft YaHei', 'PingFang SC', sans-serif !important;
+        white-space: nowrap !important;
+        padding: 8px 14px !important;
+        border-radius: 8px !important;
+        writing-mode: horizontal-tb !important;
+        letter-spacing: 0.5px !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
+        pointer-events: none !important;
+        z-index: 1 !important;
+      }
+      #__ai_fab__.disabled .fab-tooltip::after {
+        content: '' !important;
+        position: absolute !important;
+        left: 100% !important;
+        top: 50% !important;
+        transform: translateY(-50%) !important;
+        border: 6px solid transparent !important;
+        border-left-color: rgba(30, 27, 46, 0.95) !important;
+      }
+      #__ai_fab__.disabled:hover .fab-tooltip { display: block !important; }
     </style>
     <svg class="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
     <svg class="pause-icon" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
-    <span class="fab-label">翻译</span>
+    <span class="fab-label">视频</span>
+    <span class="fab-tooltip">当前页面未检测到视频</span>
   `;
 
   // ─── Subtitle Overlay ─────────────────────────────────────────────
@@ -479,6 +519,20 @@ function generateSessionId() {
   document.body.appendChild(overlay);
   document.body.appendChild(fab);
 
+  // ─── FAB disabled state when no video detected ──────────────────────
+  function updateFabVideoState() {
+    var hasVideo = findVideoElement();
+    if (!hasVideo && !isRunning) {
+      fab.classList.add('disabled');
+      fab.title = '当前页面未检测到视频';
+    } else {
+      fab.classList.remove('disabled');
+      fab.title = 'AI 视频翻译';
+    }
+  }
+
+  updateFabVideoState();
+
   // Reposition subtitle on fullscreen change or window resize
   document.addEventListener('fullscreenchange', function () {
     if (isRunning) updateSubtitlePosition();
@@ -490,6 +544,7 @@ function generateSessionId() {
   // FAB click handler
   fab.addEventListener('click', function () {
     if (fab.classList.contains('loading')) return;
+    if (fab.classList.contains('disabled')) return;
     if (isRunning) {
       stop();
     } else {
@@ -1668,12 +1723,14 @@ function generateSessionId() {
               tryResumeOrCapture(v);
             }
           }
+          if (videos.length > 0) updateFabVideoState();
         }
 
         // Detect removed video elements — soft cleanup on swipe/scroll (keep running)
         for (var r = 0; r < m.removedNodes.length; r++) {
           var removed = m.removedNodes[r];
           if (removed.nodeType !== 1) continue;
+          var isVideoNode = (removed.tagName === 'VIDEO') || (removed.querySelectorAll && removed.querySelectorAll('video').length > 0);
           if (removed === activeVideo || (removed.contains && removed.contains(activeVideo)) ||
               removed === syncVideo || (removed.contains && removed.contains(syncVideo)) ||
               removed === offlineVideo || (removed.contains && removed.contains(offlineVideo))) {
@@ -1688,6 +1745,7 @@ function generateSessionId() {
               cleanupOffline();
             }
           }
+          if (isVideoNode) updateFabVideoState();
         }
       }
     });
