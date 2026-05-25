@@ -844,11 +844,26 @@
   }
 
   function updateSettings(settings) {
+    var langChanged = settings.targetLang !== undefined && settings.targetLang !== targetLang;
+    if (langChanged) clearPageCache();
     if (settings.targetLang !== undefined) targetLang = settings.targetLang;
     if (settings.engine !== undefined) engine = settings.engine;
     if (settings.sourceLang !== undefined) sourceLang = settings.sourceLang;
     if (settings.ollamaUrl !== undefined) ollamaUrl = settings.ollamaUrl;
     if (settings.ollamaModel !== undefined) ollamaModel = settings.ollamaModel;
+    if (langChanged && isActive) {
+      stop();
+      start();
+    }
+  }
+
+  function clearPageCache() {
+    memCache.clear();
+    openDB().then(function (db) {
+      var tx = db.transaction([SNAP_STORE, STORE], 'readwrite');
+      tx.objectStore(SNAP_STORE).clear();
+      tx.objectStore(STORE).clear();
+    }).catch(function () {});
   }
 
   function setBilingual(enabled) {
