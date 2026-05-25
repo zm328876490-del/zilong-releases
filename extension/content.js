@@ -3177,6 +3177,10 @@ function generateSessionId() {
     processGeneration++;
   }
 
+  function notifyPageTranslate(paused) {
+    window.postMessage({ source: '__ai_video_translate__', type: paused ? 'video_started' : 'video_stopped' }, '*');
+  }
+
   async function start() {
     // Full cleanup if already running from a previous video
     if (isRunning) {
@@ -3191,6 +3195,7 @@ function generateSessionId() {
       chrome.runtime.sendMessage({ type: 'stopped' }).catch(function () {});
     }
     isRunning = true;
+    notifyPageTranslate(true);
     fab.classList.add('running');
     warmupDone = false;
     syncLoadingHidden = false;
@@ -3336,6 +3341,8 @@ function generateSessionId() {
     disconnectWebSocket();
     destroyPipeline();
     finishWarmup();
+
+    notifyPageTranslate(false);
 
     chrome.runtime.sendMessage({ type: 'stopped' }).catch(function () {});
   }

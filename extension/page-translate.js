@@ -54,6 +54,7 @@
   let dbReady = false;
   let snapshotDirty = false;
   let snapshotTimer = null;
+  let pausedByVideo = false;
 
   let targetLang = 'zh-Hans';
   let engine = 'microsoft';
@@ -415,11 +416,11 @@
     pump();
     var id = setInterval(function () {
       if (!isActive) { clearInterval(id); return; }
-      if (!document.hidden) pump();
+      if (!pausedByVideo && !document.hidden) pump();
     }, 150);
     // Idle pre-translation: process bgQ during browser idle time
     (function scheduleIdle() {
-      if (!isActive || document.hidden) return;
+      if (!isActive || pausedByVideo || document.hidden) return;
       idleCB(function () {
         if (bgQ.length > 0 && activeRequests < CONCURRENCY + 2) pump();
         scheduleIdle();
@@ -428,7 +429,7 @@
   }
 
   function pump() {
-    if (!isActive || pumping || document.hidden) return;
+    if (!isActive || pausedByVideo || pumping || document.hidden) return;
     pumping = true;
     try {
       var hasViewQ = viewQ.length > 0;
@@ -853,6 +854,46 @@
   function setBilingual(enabled) {
     bilingualMode = enabled;
     refreshBilingualRender();
+  }
+
+  // ─── Video translation coordination ─────────────────────────────────
+  window.addEventListener('message', function (e) {
+    if (!e.data || e.data.source !== '__ai_video_translate__') return;
+    if (e.data.type === 'video_started') {
+      if (isActive) pauseForVideo();
+    } else if (e.data.type === 'video_stopped') {
+      if (pausedByVideo) resumeFromVideo();
+    }
+  });
+
+  function showToast(msg) {
+    var toast = document.createElement('div');
+    toast.textContent = msg;
+    toast.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(30,27,46,0.95);color:#e5e7eb;font-size:13px;font-family:-apple-system,"Microsoft YaHei","PingFang SC",sans-serif;white-space:nowrap;padding:10px 20px;border-radius:10px;z-index:2147483647;box-shadow:0 4px 16px rgba(0,0,0,0.35);pointer-events:none;opacity:0;transition:opacity 0.3s;';
+    document.body.appendChild(toast);
+    requestAnimationFrame(function () { toast.style.opacity = '1'; });
+    setTimeout(function () {
+      toast.style.opacity = '0';
+      setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+    }, 2500);
+  }
+
+  function pauseForVideo() {
+    pausedByVideo = true;
+    pumping = false;
+    if (pumpTimer) { clearTimeout(pumpTimer); pumpTimer = null; }
+    viewQ = [];
+    bgQ = [];
+    pendingCount = 0;
+    activeRequests = 0;
+    showToast('视频翻译进行中，页面翻译已暂停');
+  }
+
+  function resumeFromVideo() {
+    pausedByVideo = false;
+    scanDOM(document.body);
+    startPump();
+    showToast('视频翻译已结束，页面翻译已恢复');
   }
 
   // ─── Message handlers ───────────────────────────────────────────────
