@@ -25,9 +25,6 @@
   const ttsVolumeVal = document.getElementById('ttsVolumeVal');
   const toggleGlobal = document.getElementById('toggleGlobal');
   const toggleBilingualPage = document.getElementById('toggleBilingualPage');
-  const toggleBtn = document.getElementById('toggleBtn');
-  const toggleIcon = document.getElementById('toggleIcon');
-  const toggleText = document.getElementById('toggleText');
   const statusIndicator = document.getElementById('statusIndicator');
   const statusText = document.getElementById('statusText');
   const errorMsg = document.getElementById('errorMsg');
@@ -131,113 +128,7 @@
     }, 5000);
   }
 
-  // ─── Button actions ───────────────────────────────────────────────
-  async function sendWithRetry(tabId, message, maxRetries = 5) {
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        return await chrome.tabs.sendMessage(tabId, message);
-      } catch (e) {
-        if (i < maxRetries - 1) {
-          // Content script might not be loaded yet, inject and wait
-          try {
-            await chrome.scripting.executeScript({
-              target: { tabId: tabId },
-              files: ['content.js'],
-            });
-          } catch (injectErr) {
-            // If injection fails, try pinging background to wake SW
-            try { await chrome.runtime.sendMessage({ type: 'ping' }); } catch (_) {}
-          }
-          await new Promise((r) => setTimeout(r, 500));
-        } else {
-          throw e;
-        }
-      }
-    }
-  }
-
-  async function startTranslation() {
-    const settings = await saveSettings();
-
-    setStatus('starting');
-    toggleBtn.disabled = true;
-
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab) {
-        showError('无法获取当前标签页');
-        return;
-      }
-
-      // Restricted URLs (chrome://, edge://, etc.)
-      if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') ||
-          tab.url.startsWith('about:') || tab.url.startsWith('chrome-extension://'))) {
-        showError('此页面不支持翻译（系统页面）');
-        return;
-      }
-
-      const response = await sendWithRetry(tab.id, {
-        type: 'start',
-        settings: settings,
-      });
-
-      if (response && response.success) {
-        isRunning = true;
-        updateButtonState();
-        setStatus('listening');
-      } else {
-        showError('启动失败，请刷新页面后重试');
-        setStatus('error', '启动失败');
-      }
-    } catch (err) {
-      // Check if the error is a connection error with the tab
-      if (err.message && err.message.indexOf('Receiving end does not exist') !== -1) {
-        showError('无法连接：请刷新视频页面后重试（按 F5 刷新当前页面，然后重新点击翻译）');
-      } else {
-        showError('无法连接: ' + err.message + '。请刷新页面后重试。');
-      }
-      setStatus('error', '启动失败');
-    } finally {
-      toggleBtn.disabled = false;
-    }
-  }
-
-  async function stopTranslation() {
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab) {
-        await chrome.tabs.sendMessage(tab.id, { type: 'stop' }).catch(() => {});
-      }
-    } catch (e) {
-      // ignore
-    }
-
-    isRunning = false;
-    updateButtonState();
-    setStatus('idle');
-  }
-
-  function updateButtonState() {
-    if (isRunning) {
-      toggleBtn.className = 'btn-stop';
-      toggleIcon.textContent = '■';
-      toggleText.textContent = '停止视频翻译';
-    } else {
-      toggleBtn.className = 'btn-start';
-      toggleIcon.textContent = '▶';
-      toggleText.textContent = '开始视频翻译';
-    }
-  }
-
   // ─── Event listeners ──────────────────────────────────────────────
-  toggleBtn.addEventListener('click', () => {
-    if (isRunning) {
-      stopTranslation();
-    } else {
-      startTranslation();
-    }
-  });
-
   // Target language change: rebuild TTS voices first, then save
   targetLangSelect.addEventListener('change', function () {
     saveSettings();
@@ -436,7 +327,6 @@
         const response = await chrome.tabs.sendMessage(tab.id, { type: 'getStatus' });
         if (response && response.isRunning) {
           isRunning = true;
-          updateButtonState();
           setStatus('listening');
         }
         // Sync slider disabled states with floating mode.

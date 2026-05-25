@@ -45,8 +45,6 @@
     set floatingTimelineCursor(v) { floatingTimelineCursor = v; },
     get syncMode() { return syncMode; },
     set syncMode(v) { syncMode = v; },
-    get subtitleMode() { return subtitleMode; },
-    set subtitleMode(v) { subtitleMode = v; },
     get preprocessedItems() { return preprocessedItems; },
     set preprocessedItems(v) { preprocessedItems = v; },
     get currentSessionId() { return currentSessionId; },
@@ -143,7 +141,6 @@
 
   // ─── Sync mode state (subtitle hijacking) ───────────────────────────
   let syncMode = false;           // true = subtitle sync mode, false = ASR mode
-  let pendingSubs = null;         // extracted subtitles waiting for WS to connect
   let preprocessedItems = [];     // [{original, translation, audioB64, start, end, played, audioEl}]
   let currentSessionId = '';     // unique per video session, echoed by backend for validation
   let processGeneration = 0;     // incremented on cleanup, prevents stale preprocess results
@@ -183,18 +180,6 @@ function generateSessionId() {
   let syncLastCleanup = 0;        // last time sliding window cleanup ran
   let syncPrevActiveItem = null;  // detect activeItem transitions for word highlight reset
   let currentSyncAudio = null;    // (managed by queue, kept for backward compat)
-
-  // DOM subtitle observer state
-  let subtitleMode = false;       // true = DOM caption extraction mode
-  let domObserver = null;         // MutationObserver for caption elements
-  let ccClickHandler = null;      // capture-phase click handler on CC button
-  let ccClickTarget = null;       // CC button element the handler is attached to
-  let ccKeyHandler = null;        // capture-phase keydown handler to block 'c' hotkey
-  let ccAttrObserver = null;      // watches aria-pressed, re-enables CC if YouTube resets it
-  let captionStyleEl = null;      // (unused, kept for compat)
-  let lastDOMSubtitle = '';       // deduplicate consecutive identical captions
-  let ccMuteUntil = 0;           // mute DOM capture for N ms after CC click
-  let subtitleModeTimer = null;  // timeout: fallback to ASR if no captions
 
   // Offline ASR state
   let offlineMode = false;        // true = offline full-audio ASR mode
@@ -503,13 +488,30 @@ function generateSessionId() {
   // FAB click handler
   fab.addEventListener('click', function () {
     if (fab.classList.contains('loading')) return;
-    if (!findVideoElement()) {
+    var video = findVideoElement();
+    if (!video) {
       showFabToast('当前页面未检测到视频');
       return;
     }
     if (isRunning) {
       stop();
     } else {
+      // Pre-open floating window while user gesture is active.
+      // window.open() called deep in an async call chain loses the
+      // user gesture and gets blocked by Chrome's popup blocker.
+      if (window.startFloatingWindowMode && !isLiveStream(video)) {
+        console.log('[AI] FAB click: pre-opening floating window...');
+        var w = Math.round((video.videoWidth || 640) * 0.7) || 480;
+        var h = Math.round((video.videoHeight || 360) * 0.7) + 100 || 400;
+        var left = Math.max(0, screen.width - w - 40);
+        var top = Math.max(0, (screen.height - h) / 2);
+        console.log('[AI] popup dimensions:', w, 'x', h, 'pos:', left, ',', top);
+        var pw = window.open('about:blank', 'ai_translation_overlay',
+          'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top +
+          ',resizable=1,scrollbars=0,status=0,toolbar=0,menubar=0,location=0');
+        console.log('[AI] window.open returned:', pw);
+        if (pw) window.__ai_preopened_window__ = pw;
+      }
       start();
     }
   });
@@ -683,24 +685,7 @@ function generateSessionId() {
       .trim();
   }
 
-  // Detect if text is already in the target language (character-range heuristic)
-  function isTargetLanguage(text, targetLang) {
-    if (!text || !targetLang) return false;
-    var hasCJK = /[一-鿿]/.test(text);
-    var hasKana = /[぀-ヿ]/.test(text);
-    var hasHangul = /[가-힯]/.test(text);
-    var asciiRatio = (text.match(/[\x00-\x7f]/g) || []).length / text.length;
-
-    switch (targetLang) {
-      case 'zh-Hans': case 'zh-Hant': case 'zh': return hasCJK;
-      case 'ja': return hasKana;
-      case 'ko': return hasHangul;
-      case 'en': return asciiRatio >= 0.95;
-      default:  return false; // conservative: only auto-skip for known lang pairs
-    }
-  }
-
-  // ─── TTS (queue-based playback, no cutting) ──────────────────────
+// ─── TTS (queue-based playback, no cutting) ──────────────────────
   let lastSpokenText = '';
   const SHORT_VIDEO_DURATION = 60; // videos under 60s skip TTS dedup
 
@@ -936,333 +921,14 @@ function generateSessionId() {
 
   function isLiveStream(video) {
     if (!video) return false;
+    // YouTube/Bilibili live streams have infinite duration
     if (!isFinite(video.duration)) return true;
-    if (document.querySelector('.ytp-live-badge')) return true;
-    if (document.querySelector('.live-status-icon') || document.querySelector('.bilibili-live-player')) return true;
+    // Bilibili: some live streams report finite duration, check player wrapper
+    if (location.hostname.includes('bilibili') && document.querySelector('.bilibili-live-player')) return true;
     return false;
   }
 
 
-  // ─── DOM Subtitle Observer (YouTube caption element scraping) ──────────
-  // Watches YouTube's built-in caption display elements and extracts text
-  // in real-time. This bypasses YouTube's timedtext API blocks.
-
-  function canObserveDOMSubtitles() {
-    var player = document.querySelector("#movie_player") ||
-                 document.querySelector(".html5-video-player");
-    return !!player;
-  }
-
-  // Dispatch a full MouseEvent on the CC button. Using dispatchEvent
-  // instead of .click() is more compatible with YouTube's React handlers.
-  function clickCCButton(btn) {
-    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    ccMuteUntil = Date.now() + 2000;
-  }
-
-  // Try to force CC on, with retry. Returns true once aria-pressed is 'true'.
-  function forceEnableCC(btn, player) {
-    if (!btn) return false;
-    if (btn.getAttribute('aria-pressed') === 'true') return true;
-
-    var tries = 0;
-    function attempt() {
-      if (!subtitleMode || !isRunning) return;
-      var b = player.querySelector('.ytp-subtitles-button');
-      if (!b) return;
-      if (b.getAttribute('aria-pressed') === 'true') return;
-      tries++;
-      clickCCButton(b);
-      if (tries < 5) {
-        setTimeout(function () {
-          if (b.getAttribute('aria-pressed') !== 'true') attempt();
-        }, 600);
-      }
-    }
-    attempt();
-    return false; // async, result not immediately known
-  }
-
-  function setupCCButton(btn, player) {
-    if (!btn) return;
-    forceEnableCC(btn, player);
-
-    // Intercept user clicks to prevent turning CC off
-    ccClickHandler = function (e) {
-      var b = player.querySelector('.ytp-subtitles-button');
-      if (b && b.getAttribute('aria-pressed') === 'true') {
-        e.stopImmediatePropagation();
-        e.preventDefault();
-      }
-    };
-    ccClickTarget = btn;
-    btn.addEventListener('click', ccClickHandler, true);
-
-    // Block 'c' keyboard shortcut (YouTube CC toggle) — allow programmatic events
-    ccKeyHandler = function (e) {
-      if (!e.isTrusted) return;
-      var tag = (e.target.tagName || '').toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
-      if (e.key === 'c' || e.key === 'C') {
-        e.stopImmediatePropagation();
-        e.preventDefault();
-      }
-    };
-    document.addEventListener('keydown', ccKeyHandler, true);
-
-    // Watch aria-pressed — YouTube may reset it after ads or rebinds
-    if (ccAttrObserver) ccAttrObserver.disconnect();
-    ccAttrObserver = new MutationObserver(function (mutations) {
-      for (var i = 0; i < mutations.length; i++) {
-        var m = mutations[i];
-        if (m.type === 'attributes' && m.attributeName === 'aria-pressed') {
-          var b = m.target;
-          if (b.getAttribute('aria-pressed') === 'false' && subtitleMode && isRunning) {
-            forceEnableCC(b, player);
-          }
-        }
-      }
-    });
-    ccAttrObserver.observe(btn, { attributes: true, attributeFilter: ['aria-pressed'] });
-  }
-
-  function startDOMSubtitleObserver() {
-    // Clean up any previous observers (safe to call multiple times)
-    if (domObserver) { domObserver.disconnect(); domObserver = null; }
-    if (ccClickHandler && ccClickTarget) {
-      ccClickTarget.removeEventListener('click', ccClickHandler, true);
-      ccClickHandler = null;
-      ccClickTarget = null;
-    }
-    if (ccAttrObserver) { ccAttrObserver.disconnect(); ccAttrObserver = null; }
-    if (ccKeyHandler) { document.removeEventListener('keydown', ccKeyHandler, true); ccKeyHandler = null; }
-
-    var player = document.querySelector('#movie_player') ||
-                 document.querySelector('.html5-video-player');
-    if (!player) {
-      return false;
-    }
-
-    var ccBtn = player.querySelector('.ytp-subtitles-button');
-    if (ccBtn) {
-      setupCCButton(ccBtn, player);
-    }
-
-    // MutationObserver to catch CC button appearing later (infinite patience)
-    var ccBtnWatcher = new MutationObserver(function (mutations) {
-      for (var i = 0; i < mutations.length; i++) {
-        for (var j = 0; j < mutations[i].addedNodes.length; j++) {
-          var node = mutations[i].addedNodes[j];
-          if (node.nodeType !== 1) continue;
-          var btn = node.classList && node.classList.contains('ytp-subtitles-button')
-            ? node : node.querySelector && node.querySelector('.ytp-subtitles-button');
-          if (btn && btn.getAttribute('aria-pressed') === 'false') {
-            setupCCButton(btn, player);
-            ccBtnWatcher.disconnect();
-            return;
-          }
-        }
-      }
-    });
-    ccBtnWatcher.observe(player, { childList: true, subtree: true });
-
-    // Native captions remain visible — overlay sits below the video
-
-    function getCurrentCaptionText() {
-      // YouTube caption segments
-      var segments = player.querySelectorAll('.ytp-caption-segment');
-      if (segments.length === 0) {
-        segments = player.querySelectorAll('.caption-window span');
-      }
-      var texts = [];
-      for (var i = 0; i < segments.length; i++) {
-        var t = (segments[i].textContent || '').trim();
-        if (t) texts.push(t);
-      }
-      return texts.join(' ');
-    }
-
-    var captionsRecovered = false;
-    function checkAndSend() {
-      if (!isRunning || !ws || ws.readyState !== WebSocket.OPEN) return;
-      if (Date.now() < ccMuteUntil) return;
-      var text = getCurrentCaptionText();
-      text = stripCCAnnouncement(text);
-      if (!text) return;
-      if (text !== lastDOMSubtitle && text.length >= 2) {
-        // First caption after ASR fallback — kill ASR audio pipeline
-        if (!captionsRecovered && activeStream) {
-          captionsRecovered = true;
-          var tracks = activeStream.getAudioTracks();
-          for (var k = 0; k < tracks.length; k++) {
-            tracks[k].stop();
-          }
-          activeStream = null;
-        }
-        lastDOMSubtitle = text;
-        var skip = isTargetLanguage(text, settings.targetLang);
-        showSubtitle(skip ? null : text, skip ? text : null);
-        sendWS({ type: 'subtitle', text: text, skipTranslate: skip });
-      }
-    }
-
-    // Throttle to avoid spamming during rapid updates
-    var throttleTimer = null;
-    var lastCheckTime = 0;
-    function throttledCheck() {
-      var now = Date.now();
-      if (now - lastCheckTime > 150) {
-        lastCheckTime = now;
-        checkAndSend();
-      } else {
-        clearTimeout(throttleTimer);
-        throttleTimer = setTimeout(checkAndSend, 150);
-      }
-    }
-
-    domObserver = new MutationObserver(function (mutations) {
-      for (var i = 0; i < mutations.length; i++) {
-        var m = mutations[i];
-        // Text content changes in caption segments
-        if (m.type === 'characterData') {
-          var parent = m.target.parentElement;
-          if (parent && (parent.classList.contains('ytp-caption-segment') ||
-              (parent.closest && parent.closest('.caption-window')))) {
-            throttledCheck();
-            return;
-          }
-        }
-        // New nodes added
-        for (var j = 0; j < m.addedNodes.length; j++) {
-          var node = m.addedNodes[j];
-          if (node.nodeType !== 1) continue;
-          if (node.classList && (node.classList.contains('caption-window') ||
-              node.classList.contains('ytp-caption-segment'))) {
-            throttledCheck();
-            return;
-          }
-          if (node.querySelectorAll) {
-            var segs = node.querySelectorAll('.ytp-caption-segment, .caption-window');
-            if (segs.length > 0) {
-              throttledCheck();
-              return;
-            }
-          }
-        }
-      }
-    });
-
-    domObserver.observe(player, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    });
-
-    // Initial check
-    setTimeout(checkAndSend, 500);
-    return true;
-  }
-
-  function stopDOMSubtitleObserver() {
-    clearTimeout(subtitleModeTimer);
-    subtitleModeTimer = null;
-    if (domObserver) {
-      domObserver.disconnect();
-      domObserver = null;
-    }
-    if (ccClickHandler && ccClickTarget) {
-      ccClickTarget.removeEventListener('click', ccClickHandler, true);
-      ccClickHandler = null;
-      ccClickTarget = null;
-    }
-    if (ccAttrObserver) {
-      ccAttrObserver.disconnect();
-      ccAttrObserver = null;
-    }
-    if (ccKeyHandler) {
-      document.removeEventListener('keydown', ccKeyHandler, true);
-      ccKeyHandler = null;
-    }
-    lastDOMSubtitle = '';
-    subtitleMode = false;
-  }
-
-
-  // ─── Subtitle Extraction ───────────────────────────────────────────
-  // Content scripts run in ISOLATED world by default, so we can't read
-  // window.ytInitialPlayerResponse / __INITIAL_STATE__ directly.
-  // Instead we inject a tiny script into MAIN world that posts the data
-  // back via a CustomEvent on document (DOM is shared between worlds).
-
-  async function tryExtractBilibiliSubs() {
-    if (location.hostname.includes('bilibili.com')) return extractBilibiliSubs();
-    return null;
-  }
-
-  // readPageVar finds a <script> tag containing the given JS variable name,
-  // reads its textContent (CSP only blocks execution, not textContent reading),
-  // and extracts the JSON value using a regex.
-  function readPageVar(varName) {
-    var scripts = document.querySelectorAll('script');
-    for (var i = 0; i < scripts.length; i++) {
-      var text = scripts[i].textContent || '';
-      if (text.indexOf(varName) === -1) continue;
-      // Extract the JSON: var varName = {...}; or window.varName = {...};
-      var re = new RegExp('(?:window\\.)?' + varName.replace(/\$/g, '\\$') + '\\s*=\\s*(\\{[\\s\\S]*?\\});');
-      var m = text.match(re);
-      if (!m) continue;
-      try {
-        return JSON.parse(m[1]);
-      } catch (_) {
-        // The JSON might be too large or contain trailing data; try a simpler approach
-        return null;
-      }
-    }
-    return null;
-  }
-
-  async function extractBilibiliSubs() {
-    // Step 1: try reading subtitle URL from page's __INITIAL_STATE__
-    var s = readPageVar('__INITIAL_STATE__');
-    var subData = s && s.videoInfo && s.videoInfo.subtitle && s.videoInfo.subtitle.subtitles;
-    var subUrl = subData && subData.length > 0 ? (subData[0].subtitle_url || subData[0].sub_url) : null;
-
-    // Step 2: if not found, try Bilibili API
-    if (!subUrl) {
-      try {
-        var bvid = location.pathname.split('/video/')[1];
-        if (bvid) {
-          bvid = bvid.split('/')[0].split('?')[0];
-          var apiResp = await fetch('https://api.bilibili.com/x/player/v2?bvid=' + bvid);
-          var apiJson = await apiResp.json();
-          var subtitleData = apiJson && apiJson.data && apiJson.data.subtitle && apiJson.data.subtitle.subtitles;
-          if (subtitleData && subtitleData.length > 0) {
-            subUrl = subtitleData[0].subtitle_url || subtitleData[0].sub_url;
-          }
-        }
-      } catch (_) {}
-    }
-
-    if (!subUrl) return null;
-
-    // Step 3: fetch and parse the subtitle JSON
-    try {
-      var fullUrl = subUrl.indexOf('//') === 0 ? 'https:' + subUrl : subUrl;
-      var resp = await fetch(fullUrl);
-      var json = await resp.json();
-      var body = json.body || json;
-      var subs = [];
-      for (var i = 0; i < body.length; i++) {
-        var text = (body[i].content || '').replace(/<[^>]*>/g, '').trim();
-        if (text.length >= 2) {
-          subs.push({ text: text, start: body[i].from, end: body[i].to });
-        }
-      }
-      return subs.length > 0 ? subs : null;
-    } catch (e) {
-      return null;
-    }
-  }
 
 
   // ─── Persistent Audio Pipeline ─────────────────────────────────────
@@ -1814,7 +1480,6 @@ function generateSessionId() {
         }
 
         // Fully clean up current session
-        stopDOMSubtitleObserver();
         cleanupOffline();
         cleanupDisplayState();
         disconnectWebSocket();
@@ -1977,17 +1642,6 @@ function generateSessionId() {
         ollamaUrl: settings.ollamaUrl,
         ollamaModel: settings.ollamaModel,
       });
-
-      // In sync mode: send preprocess right after config (server processes sequentially)
-      if (syncMode && pendingSubs) {
-        activeProcessGeneration = processGeneration;
-        waitingPreprocess = true;
-        sendWS({
-          type: 'preprocess',
-          subs: pendingSubs,
-        });
-        pendingSubs = null;
-      }
 
       // Offline ASR: signal start of audio streaming
       if (offlineMode && offlineRecording) {
@@ -2321,34 +1975,20 @@ function generateSessionId() {
           if (preheatActive) {
             preheatPhase2();
           } else if (!startSent && !syncMode && !offlineRecording) {
-            if (subtitleMode) {
-              // DOM subtitle mode: no audio capture, just activate
-              startSent = true;
-              sendWS({ type: 'start', rolling: floatingFallback });
-              chrome.runtime.sendMessage({ type: 'started' }).catch(() => {});
+            var video = window.__ai__._captureVideo || findVideoElement();
+            if (video) {
+              captureVideoAudio(video).then(function (ok) {
+                if (ok) {
+                  activatePipeline();
+                } else {
+                  isRunning = false;
+                  finishWarmup();
+                }
+              });
             } else {
-              var video = window.__ai__._captureVideo || findVideoElement();
-              if (video) {
-                captureVideoAudio(video).then(function (ok) {
-                  if (ok) {
-                    activatePipeline();
-                  } else {
-                    isRunning = false;
-                    finishWarmup();
-                  }
-                });
-              } else {
-                isRunning = false;
-                finishWarmup();
-              }
+              isRunning = false;
+              finishWarmup();
             }
-          }
-        } else if (msg.status === "listening" && subtitleMode && !domObserver) {
-          if (!startDOMSubtitleObserver()) {
-            sendStatus('error', '无法启用字幕捕获，回退到 ASR');
-            fallbackToASR();
-          } else {
-            sendStatus(msg.status);
           }
         } else {
           sendStatus(msg.status);
@@ -2899,61 +2539,11 @@ function generateSessionId() {
       }
     }
     preprocessedItems = [];
-    pendingSubs = null;
     syncMode = false;
-  }
-
-  function fallbackToASR() {
-    // Real-time ASR is ONLY allowed for live streams.
-    // VOD must go through floating window or offline recording — never VAD-based ASR.
-    var video = findVideoElement();
-    if (video && !isLiveStream(video) && video.duration > 0) {
-      stopSyncPlayback();
-      if (window.startFloatingWindowMode) {
-        window.startFloatingWindowMode(video);
-        return;
-      }
-      // Fallback: offline recording (no floating window available)
-      startOfflineRecording(video);
-      if (ws) {
-        ws.onclose = null;
-        try { ws.close(); } catch (_) {}
-        ws = null;
-      }
-      preheatReady = false;
-      preheatActive = false;
-      connectWebSocket();
-      return;
-    }
-
-    // Live stream (or no video element) — real-time VAD-based ASR
-    stopSyncPlayback();
-    // Start ASR in parallel but keep DOM subtitle observer alive.
-    // DO NOT set subtitleMode = false — captions may appear later and
-    // the existing domObserver will pick them up automatically.
-    startSent = false;
-    warmupDone = false;
-    syncLoadingHidden = false;
-    preheatReady = false;
-    preheatActive = false;
-
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      startVideoWatcher();
-      duckVideoAudio();
-      showLoading();
-      sendWS({ type: 'warmup' });
-      return;
-    }
-
-    startVideoWatcher();
-    duckVideoAudio();
-    showLoading();
-    connectWebSocket();
   }
 
   function startASRMode() {
     syncMode = false;
-    subtitleMode = false;
     startSent = false;
     warmupDone = false;
     syncLoadingHidden = false;
@@ -3168,7 +2758,6 @@ function generateSessionId() {
       item.audio = null;
     }
     preprocessedItems = [];
-    pendingSubs = null;
     syncPrevActiveItem = null;
     lastSpokenText = '';
     currentUtteranceId = '';
@@ -3184,7 +2773,6 @@ function generateSessionId() {
   async function start() {
     // Full cleanup if already running from a previous video
     if (isRunning) {
-      stopDOMSubtitleObserver();
       cleanupOffline();
       cleanupDisplayState();
       disconnectWebSocket();
@@ -3202,30 +2790,21 @@ function generateSessionId() {
     startSent = false;
     syncMode = false;
     waitingPreprocess = false;
-    subtitleMode = false;
-    pendingSubs = null;
     if (!currentSessionId) currentSessionId = generateSessionId();
 
     lastUrl = location.href;
     startUrlWatcher();
     sendStatus('starting', '连接中...');
 
-    // Kill preheat state (but keep audio pipeline alive if it exists)
-    stopDOMSubtitleObserver();
     preheatReady = false;
 
     // Stop preheat active — if there's a preheat WS in flight, kill it
-    // (but don't kill an already-established pipeline WS)
     if (preheatActive && ws) {
       ws.onclose = null;
       try { ws.close(); } catch (_) {}
       ws = null;
     }
     preheatActive = false;
-
-    // Defer ducking — we don't know yet if we're going into floating mode
-    // (where TTS plays in a separate popup window). Both calls are guarded
-    // inside startASRMode() with !floatingFallback checks.
 
     // Safety timeout (loadingOverlay might not exist yet if showLoading deferred)
     if (loadingOverlay) {
@@ -3236,81 +2815,16 @@ function generateSessionId() {
       }, 15000);
     }
 
-    // Try Bilibili subtitle extraction for sync mode
-    var subs = await tryExtractBilibiliSubs();
-    if (subs && subs.length > 0) {
-      syncMode = true;
-      pendingSubs = subs;
-      duckVideoAudio();
-      showLoading();
-
-      // Sync mode needs fresh WS for preprocess pipeline
-      if (ws) {
-        ws.onclose = null;
-        try { ws.close(); } catch (_) {}
-        ws = null;
-      }
-      preheatReady = false;
-      preheatActive = false;
-      connectWebSocket();
-      return;
-    }
-
-    // Bilibili extraction failed or not Bilibili — try DOM subtitle observer for YouTube
-    subtitleMode = canObserveDOMSubtitles();
-    if (subtitleMode) {
-      // Check IndexedDB cache first — resume if we've processed this video before
-      var youtubeVideo = findVideoElement();
-      if (youtubeVideo) {
-        loadPreprocessedFromCache(youtubeVideo).then(function (cached) {
-          if (cached && cached.length > 0) {
-            // Cache hit — skip subtitle processing, resume playback directly
-            preprocessedItems = cached;
-            syncMode = true;
-            syncVideo = youtubeVideo;
-            updateLoadingText('本地缓存匹配', '即时加载');
-            sendStatus('playing');
-            startSyncPlayback();
-            return;
-          }
-          // Cache miss — fall through to normal subtitle mode
-          doSubtitleModeStart();
-        });
-        return;
-      }
-      doSubtitleModeStart();
-      return;
-    }
-
-    function doSubtitleModeStart() {
-      duckVideoAudio();
-      showLoading();
-      // Kick CC button immediately — don't wait for WS warmup chain
-      startDOMSubtitleObserver();
-      clearTimeout(subtitleModeTimer);
-      subtitleModeTimer = setTimeout(function () {
-        if (subtitleMode && isRunning && !lastDOMSubtitle) {
-          sendStatus('error', '字幕捕获超时，回退到 ASR');
-          fallbackToASR();
-        }
-      }, 12000);
-      // DOM subtitle mode needs fresh WS
-      if (ws) {
-        ws.onclose = null;
-        try { ws.close(); } catch (_) {}
-        ws = null;
-      }
-      preheatReady = false;
-      preheatActive = false;
-      connectWebSocket();
-    }
-
-    // Not YouTube/Bilibili DOM — check VOD vs live
+    // VOD → floating window or offline recording; live → real-time ASR
     var video = findVideoElement();
-    if (video && !isLiveStream(video) && video.duration > 0) {
+    console.log('[AI] start: video =', video ? (video.tagName + ' ' + video.videoWidth + 'x' + video.videoHeight + ' dur=' + video.duration + ' paused=' + video.paused) : null);
+    console.log('[AI] start: isLiveStream =', isLiveStream(video), 'startFloatingWindowMode =', !!window.startFloatingWindowMode);
+    if (video && !isLiveStream(video)) {
       if (window.startFloatingWindowMode) {
+        console.log('[AI] start: taking floating window path');
         window.startFloatingWindowMode(video);
       } else {
+        console.log('[AI] start: taking offline recording path');
         startOfflineRecording(video);
         if (ws) {
           ws.onclose = null;
@@ -3324,7 +2838,7 @@ function generateSessionId() {
       return;
     }
 
-    // Live stream — real-time ASR
+    // No video or live stream — real-time ASR
     startASRMode();
   }
 
@@ -3335,7 +2849,6 @@ function generateSessionId() {
     startSent = false;
 
     stopUrlWatcher();
-    stopDOMSubtitleObserver();
     cleanupOffline();
     cleanupDisplayState();
     disconnectWebSocket();
@@ -3507,13 +3020,8 @@ function generateSessionId() {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message.type) {
       case 'start':
-        updateSettings(message.settings || {});
-        start();
-        sendResponse({ success: true });
-        break;
-
       case 'stop':
-        stop();
+        // No-op: start/stop now handled by FAB button on page
         sendResponse({ success: true });
         break;
 
@@ -3584,38 +3092,12 @@ function generateSessionId() {
 
   // Auto-start disabled — user triggers manually via popup button
 
-  // YouTube SPA navigation: re-enable CC on the new player
+  // YouTube SPA navigation: detach stale state on page change
   document.addEventListener('yt-navigate-finish', function () {
     if (!isRunning) return;
-
-    // Detach old observer (old player is destroyed)
-    if (domObserver) { domObserver.disconnect(); domObserver = null; }
-    if (ccClickHandler && ccClickTarget) {
-      ccClickTarget.removeEventListener('click', ccClickHandler, true);
-      ccClickHandler = null;
-      ccClickTarget = null;
-    }
-    if (ccAttrObserver) { ccAttrObserver.disconnect(); ccAttrObserver = null; }
-    if (ccKeyHandler) { document.removeEventListener('keydown', ccKeyHandler, true); ccKeyHandler = null; }
-    lastDOMSubtitle = '';
-
     if (syncMode) {
       stopSyncPlayback();
     }
-
-    if (!subtitleMode) return;
-
-    // Watch body for the new player to appear, then restart observer
-    var bodyWatcher = new MutationObserver(function (mutations) {
-      var p = document.querySelector('#movie_player') || document.querySelector('.html5-video-player');
-      if (p && p.querySelector('.ytp-subtitles-button')) {
-        bodyWatcher.disconnect();
-        startDOMSubtitleObserver();
-      }
-    });
-    bodyWatcher.observe(document.body, { childList: true, subtree: true });
-    // Safety cleanup after 30s
-    setTimeout(function () { bodyWatcher.disconnect(); }, 30000);
   });
 
   // Notify that content script is ready

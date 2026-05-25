@@ -196,15 +196,25 @@
       try { ai.floatingWindow.close(); } catch (_) {}
     }
 
-    var w = Math.round((video.videoWidth || 640) * 0.7) || 480;
-    var h = Math.round((video.videoHeight || 360) * 0.7) + 100 || 400;
-    var left = Math.max(0, screen.width - w - 40);
-    var top = Math.max(0, (screen.height - h) / 2);
-
-    ai.floatingWindow = window.open('about:blank', 'ai_translation_overlay',
-      'width=' + w + ',height=' + h +
-      ',left=' + left + ',top=' + top +
-      ',resizable=1,scrollbars=0,status=0,toolbar=0,menubar=0,location=0');
+    // Use pre-opened window from FAB click handler (preserves user gesture).
+    var preOpened = window.__ai_preopened_window__;
+    console.log('[AI] openFloatingWindow: preOpened =', preOpened, 'closed =', preOpened && preOpened.closed);
+    if (preOpened && !preOpened.closed) {
+      ai.floatingWindow = preOpened;
+      window.__ai_preopened_window__ = undefined;
+      console.log('[AI] openFloatingWindow: using pre-opened window');
+    } else {
+      window.__ai_preopened_window__ = undefined;
+      console.log('[AI] openFloatingWindow: pre-opened window not available, trying direct window.open');
+      var w = Math.round((video.videoWidth || 640) * 0.7) || 480;
+      var h = Math.round((video.videoHeight || 360) * 0.7) + 100 || 400;
+      var left = Math.max(0, screen.width - w - 40);
+      var top = Math.max(0, (screen.height - h) / 2);
+      ai.floatingWindow = window.open('about:blank', 'ai_translation_overlay',
+        'width=' + w + ',height=' + h +
+        ',left=' + left + ',top=' + top +
+        ',resizable=1,scrollbars=0,status=0,toolbar=0,menubar=0,location=0');
+    }
 
     if (!ai.floatingWindow) {
       ai.sendStatus('error', '弹窗被浏览器拦截，请允许弹窗后刷新页面');
@@ -1435,7 +1445,6 @@
     ai.floatingMode = true;
     ai.offlineMode = true;
     ai.syncMode = false;
-    ai.subtitleMode = false;
     ai.floatingFallback = true;
     ai.floatingTimeline = [];
     ai.floatingTimelineCursor = 0;
@@ -1502,7 +1511,9 @@
     // while floating because nothing is playing the source audio.
     try { chrome.runtime.sendMessage({ type: 'floatingModeChanged', floating: true }); } catch (_) {}
 
+    console.log('[AI] startFloatingWindowMode: calling openFloatingWindow...');
     if (!openFloatingWindow(video)) {
+      console.log('[AI] startFloatingWindowMode: openFloatingWindow returned false, falling back');
       removeVideoOverlay();
       // Pop-up blocked — tear down volume guards + undo the duck + notify popup.
       if (_volumeGuardInterval) { clearInterval(_volumeGuardInterval); _volumeGuardInterval = null; }

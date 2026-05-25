@@ -278,31 +278,6 @@ button {
   font-family: inherit;
 }
 
-.btn-start {
-  background: linear-gradient(135deg, rgba(255,110,180,0.88), rgba(232,62,140,0.9));
-  color: #fff;
-  box-shadow: 0 4px 16px rgba(232,62,140,0.25);
-  border: 1px solid rgba(255,255,255,0.3);
-}
-
-.btn-start:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 22px rgba(232,62,140,0.35);
-}
-
-.btn-stop {
-  background: rgba(254,226,226,0.7);
-  color: #dc2626;
-  border: 1px solid rgba(252,165,165,0.4);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-}
-
-.btn-stop:hover {
-  background: rgba(254,226,226,0.85);
-  transform: translateY(-1px);
-}
-
 button:active {
   transform: scale(0.98);
 }
