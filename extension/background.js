@@ -126,7 +126,6 @@ async function ensureOffscreenDocument() {
     offscreenReady = true;
     return true;
   } catch (e) {
-    console.error('Failed to create offscreen document:', e);
     offscreenReady = false;
     return false;
   } finally {

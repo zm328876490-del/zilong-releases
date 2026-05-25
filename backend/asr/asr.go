@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -737,8 +736,6 @@ func (rb *RollingBuffer) processBatch() {
 	if startSample >= len(rb.samples) {
 		// lastEmittedSample has drifted past the buffer (e.g. buffer was
 		// trimmed). Reset and reprocess from the beginning.
-		log.Printf("[rolling] startSample %d >= buffer len %d, resetting cursor",
-			startSample, len(rb.samples))
 		rb.lastEmittedSample = 0
 		rb.lastEmittedEnd = 0
 		startSample = 0
@@ -779,7 +776,6 @@ func (rb *RollingBuffer) processBatch() {
 
 	segs, err := ProcessOfflineFull(samples, rb.serverURL, rb.language, sampleRate)
 	if err != nil {
-		log.Printf("[rolling] whisper batch failed: %v", err)
 		return
 	}
 
@@ -1075,8 +1071,6 @@ func ProcessOfflineFullChunked(samples []int16, serverURL, language string, samp
 	}
 
 	totalSec := float64(len(samples)) / float64(sampleRate)
-	log.Printf("[chunked-asr] total duration: %.1fs, splitting into %ds windows with %ds overlap",
-		totalSec, chunkWindowSec, chunkOverlap)
 
 	// Short audio — use single-shot
 	if totalSec <= float64(chunkWindowSec+chunkOverlap) {
@@ -1109,7 +1103,6 @@ func ProcessOfflineFullChunked(samples []int16, serverURL, language string, samp
 			break
 		}
 	}
-	log.Printf("[chunked-asr] %d windows to process", len(windows))
 
 	// Process windows (limited concurrency)
 	type result struct {
@@ -1142,9 +1135,7 @@ func ProcessOfflineFullChunked(samples []int16, serverURL, language string, samp
 			}
 			results[idx] = result{idx: idx, segs: segs, err: err}
 			if err != nil {
-				log.Printf("[chunked-asr] window %d/%d error: %v", idx+1, len(windows), err)
 			} else {
-				log.Printf("[chunked-asr] window %d/%d done: %d segments", idx+1, len(windows), len(segs))
 			}
 		}(w, i)
 	}
@@ -1182,7 +1173,6 @@ func ProcessOfflineFullChunked(samples []int16, serverURL, language string, samp
 		}
 	}
 
-	log.Printf("[chunked-asr] merged: %d total segments from %d windows", len(allSegs), len(windows))
 	return allSegs, nil
 }
 

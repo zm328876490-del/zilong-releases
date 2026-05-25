@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -393,9 +392,7 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 		return "", fmt.Errorf("ollama model not configured")
 	}
 
-	log.Printf("[ollama] translating %d chars with model %s → %s", len(text), t.ollamaModel, to)
 	if len(text) < 80 {
-		log.Printf("[ollama]   text: %q", text)
 	}
 
 	systemPrompt := buildOllamaPrompt(to)
@@ -449,7 +446,6 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 
 	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
 	result = strings.Trim(result, "\"'")
-	log.Printf("[ollama] result: %q", result)
 
 	// Store in context ring buffer for the next translation
 	t.ctxMu.Lock()

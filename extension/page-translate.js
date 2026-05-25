@@ -2,7 +2,6 @@
 (function () {
   'use strict';
 
-  console.log('[page-translate] script loaded');
 
   if (window.__ai_page_translate_loaded__) return;
   window.__ai_page_translate_loaded__ = true;
@@ -231,13 +230,11 @@
       var snapPairs = await dbLoadPageSnapshot(location.href);
       if (snapPairs.length > 0) {
         snapPairs.forEach(function (r) { if (r.src && r.dst) cacheSet(r.src, r.dst); });
-        console.log('[page-translate] warmup: loaded ' + snapPairs.length + ' snapshot entries for ' + location.href);
       }
       // 2. Load domain phrases (cross-page reuse)
       var rows = await dbExportDomain(host);
       rows.sort(function (a, b) { return b.hits - a.hits; });
       rows.forEach(function (r) { if (r.src && r.dst && !memCache.has(r.src)) cacheSet(r.src, r.dst); });
-      if (rows.length > 0) console.log('[page-translate] warmup: loaded ' + rows.length + ' domain entries for ' + host);
     } catch (_) {}
     dbReady = true;
   }
@@ -302,7 +299,6 @@
     if (el._otDone) return false;
 
     if (!isVisible(el)) {
-      if (debugLeafLog++ < 10) console.log('[page-translate] leaf rejected: <' + el.tagName + '> not visible, text=' + JSON.stringify((el.textContent || '').trim().slice(0, 50)));
       return false;
     }
 
@@ -322,30 +318,25 @@
     }
     text = text.trim();
     if (text.length < 2) {
-      if (debugLeafLog++ < 10) console.log('[page-translate] leaf rejected: <' + el.tagName + '> text too short, text=' + JSON.stringify(text));
       return false;
     }
 
     // Pure numeric / emoji / symbols
     var stripped = text.replace(/[\s\d\p{P}\p{S}]+/gu, '');
     if (stripped.length < 1) {
-      if (debugLeafLog++ < 10) console.log('[page-translate] leaf rejected: <' + el.tagName + '> pure numeric/symbol, text=' + JSON.stringify(text));
       return false;
     }
 
     // Skip if text is already in target language
     if (isTargetLanguage(stripped)) {
-      if (debugLeafLog++ < 10) console.log('[page-translate] leaf rejected: <' + el.tagName + '> is target language, text=' + JSON.stringify(text));
       return false;
     }
 
     // Don't translate elements that have translatable block children
     if (hasBlockChild) {
-      if (debugLeafLog++ < 10) console.log('[page-translate] leaf rejected: <' + el.tagName + '> has block child, text=' + JSON.stringify(text));
       return false;
     }
 
-    if (debugLeafLog++ < 5) console.log('[page-translate] leaf ACCEPTED: <' + el.tagName + '> text=' + JSON.stringify(text.slice(0, 60)));
     return true;
   }
 
@@ -536,7 +527,6 @@
   }
 
   async function fetchTranslationBatch(texts) {
-    console.log('[page-translate] fetchTranslationBatch: ' + texts.length + ' texts to=' + targetLang + ' engine=' + engine);
     return new Promise(function (resolve) {
       chrome.runtime.sendMessage({
         type: 'PAGE_FETCH_TRANSLATION',
@@ -547,16 +537,13 @@
         },
       }, function (resp) {
         if (chrome.runtime.lastError) {
-          console.error('[page-translate] SW proxy error:', chrome.runtime.lastError.message);
           resolve(new Array(texts.length).fill(''));
           return;
         }
         if (!resp || !resp.ok) {
-          console.error('[page-translate] SW proxy response not ok, status=' + (resp && resp.status));
           resolve(new Array(texts.length).fill(''));
           return;
         }
-        console.log('[page-translate] SW proxy results:', resp.results);
         resolve(resp.results || new Array(texts.length).fill(''));
       });
     });
@@ -706,7 +693,6 @@
         if (!isActive || document.hidden) return;
         var batch = pendingMutations;
         pendingMutations = [];
-        console.log('[page-translate] mutation processing: ' + batch.length + ' records');
         for (var i = 0; i < batch.length; i++) {
           var m = batch[i];
           for (var j = 0; j < m.addedNodes.length; j++) {
@@ -721,7 +707,6 @@
             }
           }
         }
-        console.log('[page-translate] mutation scan done, pendingCount=' + pendingCount + ' visited=' + scanVisited + ' leaf=' + scanLeaf);
       }, 100);
     });
 
@@ -761,9 +746,7 @@
   function start() {
     if (isActive) return;
     isActive = true;
-    console.log('[page-translate] start(), targetLang=' + targetLang + ' engine=' + engine + ' bilingual=' + bilingualMode);
     scanDOM(document.body);
-    console.log('[page-translate] scanDOM done, pendingCount=' + pendingCount + ' viewQ=' + viewQ.length + ' bgQ=' + bgQ.length + ' stats={visited:' + scanVisited + ' skipped:' + scanSkipped + ' leaf:' + scanLeaf + ' recurse:' + scanRecurse + '}');
     startPump();
     watchMutations();
     watchScroll();
@@ -826,7 +809,6 @@
 
   // ─── Auto-start on load ─────────────────────────────────────────────
   chrome.storage.local.get('pageGlobalEnabled', function (result) {
-    console.log('[page-translate] storage read, pageGlobalEnabled:', result.pageGlobalEnabled);
     if (result.pageGlobalEnabled !== false) {
       chrome.storage.local.get(
         ['pageBilingual', 'pageTargetLang', 'pageEngine', 'pageOllamaUrl', 'pageOllamaModel', 'pageSourceLang', 'translationSettings'],

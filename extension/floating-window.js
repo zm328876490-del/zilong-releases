@@ -249,7 +249,6 @@
         '</body>\n</html>');
       ai.floatingWindow.document.close();
     } catch (e) {
-      console.error('[floating-window] document.write failed:', e.message);
       try { ai.floatingWindow.close(); } catch (_) {}
       ai.floatingWindow = null;
       ai.sendStatus('error', '浮窗初始化失败');
@@ -521,7 +520,6 @@
     var scale = Math.min(1, MAX_DIM / Math.max(vw, vh));
     var w = Math.round(vw * scale);
     var h = Math.round(vh * scale);
-    console.log('[floating-window] frame buffer canvas: ' + w + 'x' + h + ' (scale ' + scale.toFixed(2) + ' from ' + vw + 'x' + vh + ')');
 
     stagingCanvas = document.createElement('canvas');
     stagingCanvas.width = w; stagingCanvas.height = h;
@@ -581,7 +579,7 @@
       try {
         stagingCtx.drawImage(captureVideoEl, 0, 0, stagingCanvas.width, stagingCanvas.height);
       } catch (e) {
-        if (tickCount === 1) console.error('[floating-window] drawImage failed:', e.message);
+        if (tickCount === 1) {}
         captureRafId = requestAnimationFrame(tick);
         return;
       }
@@ -594,7 +592,6 @@
         var newW = Math.round(newVw * newScale);
         var newH = Math.round(newVh * newScale);
         if (newW !== stagingCanvas.width || newH !== stagingCanvas.height) {
-          console.log('[floating-window] resizing canvases: ' + stagingCanvas.width + 'x' + stagingCanvas.height + ' -> ' + newW + 'x' + newH);
           stagingCanvas.width = newW; stagingCanvas.height = newH;
           stagingCtx = stagingCanvas.getContext('2d');
           if (outputCanvas) {
@@ -621,13 +618,11 @@
 
         if (bmpFailCount > 0) {
           bmpFailCount = 0;
-          console.log('[floating-window] createImageBitmap recovered');
         }
 
         // Use wall-clock elapsed time since first frame (decoupled from frame rate)
         if (!ai.floatingBufferFilled && bufferStartTime && t - bufferStartTime >= FRAME_DELAY_MS) {
           ai.floatingBufferFilled = true;
-          console.log('[floating-window] Buffer filled after ' + (t - bufferStartTime).toFixed(0) + 'ms, ' + frameBufCount + ' frames');
           // Hide loading animation — frame buffer is ready
           var loadingEl = ai.floatingWindow && !ai.floatingWindow.closed ? ai.floatingWindow.document.getElementById('loading-overlay') : null;
           if (loadingEl) loadingEl.classList.add('hidden');
@@ -650,7 +645,6 @@
       }).catch(function (e) {
         bmpFailCount++;
         if (bmpFailCount === 1) {
-          console.error('[floating-window] createImageBitmap failed (canvas tainted?):', e.message);
           var sEl = ai.floatingWindow && !ai.floatingWindow.closed ? ai.floatingWindow.document.getElementById('audio-status') : null;
           if (sEl) sEl.textContent = '视频镜像不可用 (跨域限制)';
         }
@@ -734,7 +728,6 @@
           var lastSubDone = (_vt > (_lastItemEndTime || 0));
           var ttsDone = !ai._currentTtsEntry;
           if (lastSubDone && ttsDone) {
-            console.log('[floating-window] full playthrough complete, auto-closing');
             renderRafId = null;
             // Schedule on next tick so this RAF can exit cleanly first.
             setTimeout(function () {
@@ -941,7 +934,6 @@
           if (timeline[s].start >= refTime) { cutIdx = s; break; }
         }
         if (cutIdx < timeline.length) {
-          console.log('[floating-window] seek detected, trimming ' + (timeline.length - cutIdx) + ' stale entries after refTime=' + refTime.toFixed(1));
           timeline.splice(cutIdx, timeline.length - cutIdx);
         }
         _lastDisplayedItem = null;
@@ -1113,8 +1105,6 @@
     }
 
     if (newDelay !== oldDelay) {
-      console.log('[floating-window] adaptive delay: ' + oldDelay + 'ms → ' + newDelay +
-        'ms (headroom=' + headroomSec.toFixed(2) + 's)');
       FRAME_DELAY_MS = newDelay;
       _lastDelayChangeAt = nowMs;
       _lowHeadroomStreak = 0;
@@ -1124,7 +1114,6 @@
       var neededFrames = Math.ceil((newDelay + 2000) / 33);
       if (neededFrames > FRAME_BUF_MAX) {
         FRAME_BUF_MAX = neededFrames;
-        console.log('[floating-window] frame buffer expanded to ' + FRAME_BUF_MAX + ' frames');
       }
 
       // Update status text in popup.
@@ -1235,7 +1224,6 @@
     function onErr(e) {
       if (ended) return;
       var msg = (a.error && a.error.message) || 'unknown';
-      console.error('[floating-window] TTS play error:', msg);
       onEnd();
     }
     a.addEventListener('ended', onEnd);
@@ -1244,7 +1232,6 @@
     var playPromise = a.play();
     if (playPromise !== undefined) {
       playPromise.catch(function (e) {
-        console.error('[floating-window] TTS play() rejected:', e.message);
         if (!ended) {
           // If user hasn't interacted yet, prompt and skip this clip
           var sEl = ai.floatingWindow.document.getElementById('audio-status');
@@ -1336,12 +1323,6 @@
   // ─── Main entry: startFloatingWindowMode ────────────────────────────
 
   window.startFloatingWindowMode = function (video) {
-    console.log('[floating-window] startFloatingWindowMode called, video:', {
-      src: video.currentSrc || video.src,
-      width: video.videoWidth,
-      height: video.videoHeight,
-      duration: video.duration,
-    });
 
     // Defensive: drain any leftover listeners from a previous session
     // that didn't go through closeFloatingWindow (e.g. user clicked the
@@ -1392,9 +1373,6 @@
     _volumeGuardTarget = video;
     try { video.muted = false; } catch (_) {}
     try { video.volume = FLOATING_DUCKED_VOLUME; } catch (_) {}
-    console.log('[floating-window] source video ducked to ' +
-      (FLOATING_DUCKED_VOLUME * 100) + '% (saved muted=' + _videoSavedMuted +
-      ' vol=' + _videoSavedVolume + ')');
 
     _volumeGuardListener = function () {
       if (!_volumeGuardTarget) return;
@@ -1419,7 +1397,7 @@
         try { _volumeGuardTarget.volume = FLOATING_DUCKED_VOLUME; } catch (_) {}
         changed = true;
       }
-      if (changed) console.log('[floating-window] volume-guard re-ducked source video');
+      if (changed) {}
     }, 250);
 
     // Tell the popup to disable the "原声音量" slider — it's meaningless
@@ -1504,8 +1482,6 @@
         // startFloatingWindowMode immediately calls onFloatingVideoEnded
         // → audioFrozen=true → every PCM batch is dropped.
         if (_hasPlayedThroughOnce && _lastObservedTime > 1.0 && t < 0.5 && !_floatingEnded) {
-          console.log('[floating-window] source video looped (currentTime ' +
-            _lastObservedTime.toFixed(1) + ' → ' + t.toFixed(1) + '), stopping audio capture');
           try { ai.sendWS && ai.sendWS({ type: 'session_split' }); } catch (_) {}
           onFloatingVideoEnded();
           _lastObservedTime = t;
@@ -1522,8 +1498,6 @@
         // Reached near end without 'ended' firing
         if (_hasPlayedThroughOnce && isFinite(dur) && dur > 1 &&
             t >= dur - 0.2 && !_floatingEnded) {
-          console.log('[floating-window] source video reached end (currentTime ' +
-            t.toFixed(2) + ' / ' + dur.toFixed(2) + '), stopping audio capture');
           onFloatingVideoEnded();
         }
 
@@ -1583,7 +1557,6 @@
     // briefly output audio from the old position, corrupting timestamps.
     function startVideoPlayback() {
       video.play().catch(function (e) {
-        console.error('[floating-window] video.play() rejected:', e.message);
         video.muted = true;
         video.play().catch(function () {});
         var sEl = ai.floatingWindow && !ai.floatingWindow.closed
@@ -1616,7 +1589,6 @@
     // everything desyncs. Clean shutdown avoids wasted whisper compute.
     _visibilityHandler = function () {
       if (document.hidden) {
-        console.log('[floating-window] page hidden, stopping translation');
         try { video.pause(); } catch (_) {}
         closeFloatingWindow();
       }

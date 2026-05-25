@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"log"
 	"math"
 	"net/http"
 	"os"
@@ -58,17 +57,6 @@ type Client struct {
 	offlineBuf        []int16
 	offlineSpeed      float64 // playback speed during recording (for timestamp scaling)
 	offlineSampleRate int     // actual AudioContext sample rate from frontend
-
-	// audio-in debug stats (aggregated, printed once per second)
-	dbgBytesIn      int64
-	dbgChunksIn     int64
-	dbgSamplesIn    int64
-	dbgLastVideoT   float64
-	dbgLastFlushMs  int64
-	dbgRouteRolling int64
-	dbgRouteAudio   int64
-	dbgRouteOffline int64
-	dbgRouteDrop    int64
 
 	// Gender stickiness — Edge TTS sounds jarring when voice flips mid-session
 	// for the same speaker. Track the last *strong* detection and the count of
@@ -340,9 +328,6 @@ func (c *Client) resolveStickyGender(snap, conf string, startTime, endTime float
 	}
 
 	logCommit := func(reason string) {
-		log.Printf("[gender] %.2f-%.2f snap=%s/%s sticky=%s tally m=%d f=%d (%s) text=%q",
-			startTime, endTime, snap, conf, c.stickyGender,
-			c.maleStrongCount, c.femaleStrongCount, reason, text)
 	}
 
 	// Rule 5: no detection — keep current sticky.
@@ -402,21 +387,11 @@ func (c *Client) resolveStickyGender(snap, conf string, startTime, endTime float
 	dominanceOK := challengerCount >= requiredCount
 
 	if c.flipPendingCount >= flipConfirmCount && dominanceOK {
-		log.Printf("[gender] %.2f-%.2f FLIP %s→%s after %d strong hits tally m=%d f=%d text=%q",
-			startTime, endTime, c.stickyGender, snap, c.flipPendingCount,
-			c.maleStrongCount, c.femaleStrongCount, text)
 		c.stickyGender = snap
 		c.flipPendingGender = ""
 		c.flipPendingCount = 0
 		return c.stickyGender
 	}
-	reason := "pending"
-	if c.flipPendingCount >= flipConfirmCount && !dominanceOK {
-		reason = fmt.Sprintf("blocked-dominance(%d<%d)", challengerCount, requiredCount)
-	}
-	log.Printf("[gender] %.2f-%.2f strong-disagree %s vs sticky=%s pending=%d/%d tally m=%d f=%d %s text=%q",
-		startTime, endTime, snap, c.stickyGender, c.flipPendingCount, flipConfirmCount,
-		c.maleStrongCount, c.femaleStrongCount, reason, text)
 	return c.stickyGender
 }
 
@@ -445,8 +420,6 @@ func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, is
 	if voice == "" {
 		voice = defaultVoice
 	}
-
-	ttsStart := time.Now()
 
 	// Check cancellation before sending audio_start
 	select {
@@ -514,7 +487,6 @@ func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, is
 	}
 
 	sentBytes, err := trySynth(voice)
-	usedVoice := voice
 
 	// Fallback: retry with default voice if the gender-aware voice produced
 	// zero audio (and we actually had a different default to try). This is
@@ -522,22 +494,17 @@ func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, is
 	// the language or got rate-limited, Edge TTS closed with turn.end + 0
 	// chunks, the user got silence.
 	if err == nil && sentBytes == 0 && voice != defaultVoice && defaultVoice != "" {
-		log.Printf("[tts-fallback] zero audio with voice=%s text=%q — retrying with default voice=%s", voice, text, defaultVoice)
 		select {
 		case <-cancel:
 			return
 		default:
 		}
 		sentBytes, err = trySynth(defaultVoice)
-		usedVoice = defaultVoice
 	}
 
 	if err != nil {
-		log.Printf("[tts-error] voice=%s text=%q err=%v", usedVoice, text, err)
 	} else if sentBytes == 0 {
-		log.Printf("[tts-empty] voice=%s text=%q produced 0 audio bytes (upstream silently closed)", usedVoice, text)
 	} else if !isPartial {
-		log.Printf("[stats] tts_done: voice=%s total=%v bytes=%d text_len=%d", usedVoice, time.Since(ttsStart), sentBytes, len(text))
 	}
 
 	// Always send audio_end so the frontend doesn't wait forever — even on
@@ -570,8 +537,6 @@ func (c *Client) processOfflineASR(samples []int16, sampleRate int) {
 			nonZero++
 		}
 	}
-	log.Printf("[offline-asr] PCM stats: samples=%d max=%d avg_abs=%d nonZero=%d/%d",
-		len(samples), maxVal, sumAbs/int64(len(samples)), nonZero, len(samples))
 
 	if maxVal < 50 {
 		c.sendJSON(OutMsg{Type: "error", Message: "捕获音频静音，请检查站点是否允许音频捕获"})
@@ -596,10 +561,8 @@ func (c *Client) processOfflineASR(samples []int16, sampleRate int) {
 		return
 	}
 
-	log.Printf("[offline-asr] whisper returned %d segments", len(segs))
-	for i, s := range segs {
+	for i := range segs {
 		if i < 5 {
-			log.Printf("[offline-asr]   seg[%d]: [%.1f-%.1f] %q", i, s.Start, s.End, s.Text)
 		}
 	}
 
@@ -656,7 +619,6 @@ func (c *Client) processOfflineASR(samples []int16, sampleRate int) {
 		}
 		subs[i] = Subtitle{Text: s.Text, Start: s.Start * speed, End: s.End * speed, Words: words, Gender: gender}
 	}
-	log.Printf("[offline-asr] speed=%.1fx, sending %d subs to frontend", speed, len(subs))
 	c.sendJSON(OutMsg{Type: "offline_asr_result", Subs: subs})
 }
 
@@ -704,7 +666,6 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 		return
 	}
 
-	log.Printf("[preprocess] %d subtitles", len(subs))
 	c.sendJSON(OutMsg{Type: "preprocess_start", Total: len(subs)})
 
 	voice := tts.ResolveVoice(c.ttsVoice, c.targetLang) // fallback default
@@ -831,8 +792,6 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 	}
 	mu.Unlock()
 
-	transCount := total
-	log.Printf("[preprocess] done: %d subtitles, %d translated, %d items with audio/TTS", len(subs), transCount, total)
 	c.sendJSON(OutMsg{Type: "preprocess_complete"})
 }
 
@@ -1091,8 +1050,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					}
 					client.rollingBuf.Start()
 				}
-				log.Printf("[ctrl] start: rolling=%v sourceLang=%s targetLang=%s rollingBuf!=nil=%v",
-					msg.Rolling, client.sourceLang, client.targetLang, client.rollingBuf != nil)
 				client.sendJSON(OutMsg{Type: "status", Status: "listening"})
 
 			case "stop":
@@ -1100,7 +1057,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if client.rollingBuf != nil {
 					client.rollingBuf.Stop()
 				}
-				log.Printf("[ctrl] stop: active->false")
 				client.sendJSON(OutMsg{Type: "status", Status: "stopped"})
 
 			case "flush_tail":
@@ -1169,56 +1125,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			samples := make([]int16, sampleCount)
 			for i := 0; i < sampleCount; i++ {
 				samples[i] = int16(binary.LittleEndian.Uint16(data[8+i*2 : 8+(i+1)*2]))
-			}
-
-			// ── DEBUG: per-chunk + 1Hz aggregate audio-in log ──
-			client.dbgBytesIn += int64(len(data))
-			client.dbgChunksIn++
-			client.dbgSamplesIn += int64(sampleCount)
-			client.dbgLastVideoT = videoTime
-			route := "drop"
-			if client.offlineASR {
-				route = "offline"
-				client.dbgRouteOffline++
-			} else if client.rollingBuf != nil {
-				route = "rolling"
-				client.dbgRouteRolling++
-			} else if client.audioBuf != nil {
-				route = "audio"
-				client.dbgRouteAudio++
-			} else {
-				client.dbgRouteDrop++
-			}
-			// Per-chunk minimal log (first byte sample value to verify non-zero)
-			var peak int16
-			for _, s := range samples {
-				if s > peak {
-					peak = s
-				} else if -s > peak {
-					peak = -s
-				}
-			}
-			log.Printf("[audio-in] chunk=%dB samples=%d vt=%.2f peak=%d route=%s active=%v rollingBuf=%v audioBuf=%v",
-				len(data), sampleCount, videoTime, peak, route,
-				client.active, client.rollingBuf != nil, client.audioBuf != nil)
-
-			// Aggregate flush every 1s
-			nowMs := time.Now().UnixMilli()
-			if client.dbgLastFlushMs == 0 {
-				client.dbgLastFlushMs = nowMs
-			}
-			if nowMs-client.dbgLastFlushMs >= 1000 {
-				log.Printf("[audio-in/agg] last1s: chunks=%d samples=%d bytes=%d vt=%.2f routes={rolling:%d audio:%d offline:%d drop:%d}",
-					client.dbgChunksIn, client.dbgSamplesIn, client.dbgBytesIn, client.dbgLastVideoT,
-					client.dbgRouteRolling, client.dbgRouteAudio, client.dbgRouteOffline, client.dbgRouteDrop)
-				client.dbgBytesIn = 0
-				client.dbgChunksIn = 0
-				client.dbgSamplesIn = 0
-				client.dbgRouteRolling = 0
-				client.dbgRouteAudio = 0
-				client.dbgRouteOffline = 0
-				client.dbgRouteDrop = 0
-				client.dbgLastFlushMs = nowMs
 			}
 
 			if client.offlineASR {
@@ -1446,6 +1352,5 @@ func main() {
 
 	handler := corsMiddleware(mux)
 	if err := http.ListenAndServe(addr, handler); err != nil {
-		log.Fatalf("server error: %v", err)
 	}
 }

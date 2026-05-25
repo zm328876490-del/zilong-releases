@@ -1261,10 +1261,6 @@ function generateSessionId() {
               // cause of any alignment drift.
               if (data.overflow) {
                 _audioHoleCount++;
-                console.warn('[content] AUDIO HOLE: worklet dropped ' +
-                  data.droppedSamples + ' samples (' +
-                  (data.droppedSamples * 1000 / 16000).toFixed(0) + 'ms) at seq ' +
-                  data.atSampleSeq + ' (total holes: ' + _audioHoleCount + ')');
                 return;
               }
 
@@ -1278,8 +1274,6 @@ function generateSessionId() {
                 if (_lastSampleSeqEnd !== 0 &&
                     data.sampleStartSeq !== _lastSampleSeqEnd) {
                   var gap = data.sampleStartSeq - _lastSampleSeqEnd;
-                  console.warn('[content] AUDIO HOLE: ' + gap + ' samples skipped between batches (~' +
-                    (gap * 1000 / 16000).toFixed(0) + 'ms)');
                 }
                 _lastSampleSeqEnd = data.sampleStartSeq + (data.sampleCount || pcm.length);
               }
@@ -1332,15 +1326,6 @@ function generateSessionId() {
               var _now = Date.now();
               if (_dbgLastFlushMs === 0) _dbgLastFlushMs = _now;
               if (_now - _dbgLastFlushMs >= 1000) {
-                console.log('[audio-out/agg] last1s: chunks=' + _dbgSentChunks +
-                  ' bytes=' + _dbgSentBytes +
-                  ' peakMax=' + _dbgSentPeakMax +
-                  ' frozenDrops=' + _dbgFrozenDrops +
-                  ' wsBuffered=' + _dbgWsBuffered +
-                  ' vt=' + vt.toFixed(2) +
-                  ' wsState=' + (ws ? ws.readyState : 'null') +
-                  ' frozen=' + window.__ai__.audioFrozen +
-                  ' floating=' + floatingFallback);
                 _dbgSentChunks = 0;
                 _dbgSentBytes = 0;
                 _dbgSentPeakMax = 0;
@@ -1374,7 +1359,6 @@ function generateSessionId() {
 
             pipelineActive = true;
             workletReady = true;
-            console.log('[content] AudioWorklet ready');
             resolve(true);
           })
           .catch(function (err) {
@@ -1911,11 +1895,9 @@ function generateSessionId() {
       return;
     }
 
-    console.log('[content] connectWebSocket: connecting to ' + settings.wsUrl);
     try {
       ws = new WebSocket(settings.wsUrl);
     } catch (err) {
-      console.error('[content] connectWebSocket: new WebSocket failed', err.message);
       scheduleReconnect();
       return;
     }
@@ -1923,7 +1905,6 @@ function generateSessionId() {
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
-      console.log('[content] WebSocket connected');
       reconnectAttempts = 0;
       sendStatus('connected');
 
@@ -1967,7 +1948,6 @@ function generateSessionId() {
     };
 
     ws.onclose = (event) => {
-      console.log('[content] WebSocket closed, code=' + event.code + ', wasClean=' + event.wasClean);
       ws = null;
       if (isRunning) {
         scheduleReconnect();
@@ -1978,7 +1958,6 @@ function generateSessionId() {
     };
 
     ws.onerror = (err) => {
-      console.error('[content] WebSocket error');
     };
   }
 
@@ -2216,17 +2195,6 @@ function generateSessionId() {
         break;
 
       case 'preprocess_result':
-        console.log('[DEBUG] preprocess_result received:', {
-          genMatch: activeProcessGeneration === processGeneration,
-          activeGen: activeProcessGeneration,
-          curGen: processGeneration,
-          hasItems: !!msg.items,
-          itemCount: msg.items ? msg.items.length : 0,
-          ready: msg.ready,
-          syncRafId: !!syncRafId,
-          offlineMode: offlineMode,
-          offlineVideo: !!offlineVideo
-        });
         if (activeProcessGeneration !== processGeneration) break; // stale results from previous video
         if (msg.items) {
           for (const item of msg.items) {
@@ -2243,15 +2211,6 @@ function generateSessionId() {
         break;
 
       case 'preprocess_complete':
-        console.log('[DEBUG] preprocess_complete received:', {
-          genMatch: activeProcessGeneration === processGeneration,
-          activeGen: activeProcessGeneration,
-          curGen: processGeneration,
-          syncRafId: !!syncRafId,
-          offlineMode: offlineMode,
-          offlineVideo: !!offlineVideo,
-          preprocessedItemsCount: preprocessedItems.length
-        });
         if (activeProcessGeneration !== processGeneration) break;
         waitingPreprocess = false;
         if (offlineVideo) {
@@ -2430,8 +2389,6 @@ function generateSessionId() {
     sendWS({ type: 'start', rolling: floatingFallback });
 
     if (pcmBuffer.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
-      console.log('[content] flushing ' + pcmBuffer.length + ' buffered PCM chunks (' +
-        (pcmBuffer.length * 8192 / 16000).toFixed(1) + 's of audio)');
       for (var i = 0; i < pcmBuffer.length; i++) {
         ws.send(pcmBuffer[i].buffer);
       }
@@ -2938,7 +2895,6 @@ function generateSessionId() {
   }
 
   function startASRMode() {
-    console.log('[content] startASRMode: floatingFallback=' + floatingFallback + ', ws=' + !!(ws && ws.readyState === WebSocket.OPEN));
     syncMode = false;
     subtitleMode = false;
     startSent = false;
