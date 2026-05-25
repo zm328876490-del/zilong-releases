@@ -253,6 +253,7 @@
 
   function shouldSkipEl(el) {
     if (SKIP_TAGS.has(el.tagName)) return true;
+    if (el.id && (el.id.startsWith('__ai_') || el.id === 'ai-video-lock-overlay')) return true;
     if (el.getAttribute('aria-hidden') === 'true') return true;
     if (el.getAttribute('translate') === 'no') return true;
     if (el.classList.contains('notranslate')) return true;

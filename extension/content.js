@@ -427,50 +427,10 @@ function generateSessionId() {
         pointer-events: none !important;
         opacity: 0.55 !important;
       }
-      #__ai_fab__.disabled {
-        background: linear-gradient(180deg, #6b7280 0%, #4b5563 50%, #374151 100%) !important;
-        box-shadow: -3px 0 10px rgba(107, 114, 128, 0.25) !important;
-        cursor: default !important;
-        opacity: 0.65 !important;
-      }
-      #__ai_fab__.disabled:hover {
-        width: 50px !important;
-      }
-      #__ai_fab__.disabled::before { border-right-color: #1e1b2e !important; }
-      #__ai_fab__ .fab-tooltip {
-        display: none !important;
-        position: absolute !important;
-        right: 58px !important;
-        top: 50% !important;
-        transform: translateY(-50%) !important;
-        background: rgba(30, 27, 46, 0.95) !important;
-        color: #d1d5db !important;
-        font-size: 12px !important;
-        font-family: -apple-system, 'Microsoft YaHei', 'PingFang SC', sans-serif !important;
-        white-space: nowrap !important;
-        padding: 8px 14px !important;
-        border-radius: 8px !important;
-        writing-mode: horizontal-tb !important;
-        letter-spacing: 0.5px !important;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
-        pointer-events: none !important;
-        z-index: 1 !important;
-      }
-      #__ai_fab__.disabled .fab-tooltip::after {
-        content: '' !important;
-        position: absolute !important;
-        left: 100% !important;
-        top: 50% !important;
-        transform: translateY(-50%) !important;
-        border: 6px solid transparent !important;
-        border-left-color: rgba(30, 27, 46, 0.95) !important;
-      }
-      #__ai_fab__.disabled:hover .fab-tooltip { display: block !important; }
     </style>
     <svg class="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
     <svg class="pause-icon" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
     <span class="fab-label">视频</span>
-    <span class="fab-tooltip">当前页面未检测到视频</span>
   `;
 
   // ─── Subtitle Overlay ─────────────────────────────────────────────
@@ -519,20 +479,6 @@ function generateSessionId() {
   document.body.appendChild(overlay);
   document.body.appendChild(fab);
 
-  // ─── FAB disabled state when no video detected ──────────────────────
-  function updateFabVideoState() {
-    var hasVideo = findVideoElement();
-    if (!hasVideo && !isRunning) {
-      fab.classList.add('disabled');
-      fab.title = '当前页面未检测到视频';
-    } else {
-      fab.classList.remove('disabled');
-      fab.title = 'AI 视频翻译';
-    }
-  }
-
-  updateFabVideoState();
-
   // Reposition subtitle on fullscreen change or window resize
   document.addEventListener('fullscreenchange', function () {
     if (isRunning) updateSubtitlePosition();
@@ -541,10 +487,26 @@ function generateSessionId() {
     if (isRunning) updateSubtitlePosition();
   });
 
+  // ─── Toast notification ─────────────────────────────────────────────
+  function showFabToast(msg) {
+    var toast = document.createElement('div');
+    toast.textContent = msg;
+    toast.style.cssText = 'position:fixed;right:62px;top:50%;transform:translateY(-50%);background:rgba(30,27,46,0.95);color:#d1d5db;font-size:12px;font-family:-apple-system,"Microsoft YaHei","PingFang SC",sans-serif;white-space:nowrap;padding:8px 14px;border-radius:8px;z-index:2147483647;box-shadow:0 4px 12px rgba(0,0,0,0.3);pointer-events:none;opacity:0;transition:opacity 0.3s;';
+    document.body.appendChild(toast);
+    requestAnimationFrame(function () { toast.style.opacity = '1'; });
+    setTimeout(function () {
+      toast.style.opacity = '0';
+      setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+    }, 2000);
+  }
+
   // FAB click handler
   fab.addEventListener('click', function () {
     if (fab.classList.contains('loading')) return;
-    if (fab.classList.contains('disabled')) return;
+    if (!findVideoElement()) {
+      showFabToast('当前页面未检测到视频');
+      return;
+    }
     if (isRunning) {
       stop();
     } else {
@@ -742,6 +704,45 @@ function generateSessionId() {
   let lastSpokenText = '';
   const SHORT_VIDEO_DURATION = 60; // videos under 60s skip TTS dedup
 
+  // E6 字幕模式：被切断时不要硬 pause，而是 80ms 内音量渐变到 0 再 pause。
+  // 配合下一句立刻开播 → 形成 ~80ms 交叉淡化，消除"咔嗒"硬切感。
+  // 字幕模式没有 ASR 时间窗信息，无法预测，只能在切断瞬间做。
+  const TTS_FADE_MS = 80;
+  function softStopTtsAudio(audio, fadeMs) {
+    if (!audio) return;
+    try {
+      if (audio.paused || audio.ended) {
+        try { audio.pause(); } catch (_) {}
+        return;
+      }
+      var startVol = audio.volume || 0;
+      if (startVol <= 0.01) { try { audio.pause(); } catch (_) {} return; }
+      var startT = performance.now();
+      var ms = fadeMs || TTS_FADE_MS;
+      // 标记，避免对同一 audio 同时跑多个 fade
+      if (audio._fadingOut) return;
+      audio._fadingOut = true;
+      var step = function () {
+        var elapsed = performance.now() - startT;
+        var k = Math.min(1, elapsed / ms);
+        try {
+          audio.volume = Math.max(0, startVol * (1 - k));
+        } catch (_) {}
+        if (k < 1 && !audio.paused && !audio.ended) {
+          requestAnimationFrame(step);
+        } else {
+          try { audio.pause(); } catch (_) {}
+          try { audio.volume = startVol; } catch (_) {} // 恢复，防止 audio 被复用
+          audio._fadingOut = false;
+        }
+      };
+      requestAnimationFrame(step);
+    } catch (_) {
+      try { audio.pause(); } catch (_) {}
+    }
+  }
+
+
   function isShortVideo() {
     return activeVideo && activeVideo.duration > 0 && activeVideo.duration < SHORT_VIDEO_DURATION;
   }
@@ -808,13 +809,14 @@ function generateSessionId() {
   }
 
   function stopTTS(all) {
-    // Stop currently playing audio immediately
+    // E6: 当前正在播的句子做 80ms 平滑淡出，不硬切
     if (ttsAudio) {
-      try { ttsAudio.pause(); } catch (_) {}
+      softStopTtsAudio(ttsAudio, TTS_FADE_MS);
+      // 立刻让出引用 — 下一句 enqueue 能马上接力 (形成交叉淡化效果)
       ttsAudio = null;
       ttsAudioUrl = null;
     }
-    // Clear queued items
+    // 队列里还没开播的直接清掉 (硬 pause 无所谓，本来就没出声)
     for (const item of ttsQueue) {
       URL.revokeObjectURL(item.url);
       if (item.audio) {
@@ -1723,14 +1725,12 @@ function generateSessionId() {
               tryResumeOrCapture(v);
             }
           }
-          if (videos.length > 0) updateFabVideoState();
         }
 
         // Detect removed video elements — soft cleanup on swipe/scroll (keep running)
         for (var r = 0; r < m.removedNodes.length; r++) {
           var removed = m.removedNodes[r];
           if (removed.nodeType !== 1) continue;
-          var isVideoNode = (removed.tagName === 'VIDEO') || (removed.querySelectorAll && removed.querySelectorAll('video').length > 0);
           if (removed === activeVideo || (removed.contains && removed.contains(activeVideo)) ||
               removed === syncVideo || (removed.contains && removed.contains(syncVideo)) ||
               removed === offlineVideo || (removed.contains && removed.contains(offlineVideo))) {
@@ -1745,7 +1745,6 @@ function generateSessionId() {
               cleanupOffline();
             }
           }
-          if (isVideoNode) updateFabVideoState();
         }
       }
     });

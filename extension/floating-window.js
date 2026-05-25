@@ -1150,6 +1150,90 @@
   // _currentTtsEntry: the timeline entry whose TTS is currently playing
   // (or just queued). Used by the timeline loop to know whether to cut
   // when a new segment becomes current.
+  // ─── E6: TTS Audio Graph (lazy init, reusable) ───────────────────────
+  // 用 WebAudio 接管 <audio>，便于"末尾弱化"：超长 TTS 触发动态加速 +
+  // 最后 200ms gain 平滑淡出，避免被下一句硬切产生的"咔嗒"和半截词。
+  var _ttsAudioCtx = null;
+  var _ttsSource = null;
+  var _ttsGain = null;
+  var _ttsFadeTimer = null;
+
+  function ensureTtsGraph(audioEl) {
+    if (_ttsSource) return true; // 已建好 (同一 element 只能 createMediaElementSource 一次)
+    try {
+      var Ctx = ai.floatingWindow.AudioContext || ai.floatingWindow.webkitAudioContext;
+      if (!Ctx) return false;
+      _ttsAudioCtx = new Ctx();
+      _ttsSource = _ttsAudioCtx.createMediaElementSource(audioEl);
+      _ttsGain = _ttsAudioCtx.createGain();
+      _ttsSource.connect(_ttsGain);
+      _ttsGain.connect(_ttsAudioCtx.destination);
+      return true;
+    } catch (_) {
+      _ttsSource = null;
+      _ttsGain = null;
+      _ttsAudioCtx = null;
+      return false;
+    }
+  }
+
+  // 当 entry 提供 ASR 时间窗时，根据 audio duration 决定是否调速 + 末尾淡出。
+  // 阈值：超出预算 >10% 才介入。
+  function planTtsFadeAndRate(audioEl, entry) {
+    if (_ttsFadeTimer) { clearTimeout(_ttsFadeTimer); _ttsFadeTimer = null; }
+    if (!entry || typeof entry.end !== 'number' || typeof entry.start !== 'number') return;
+
+    var d = audioEl.duration;
+    if (!isFinite(d) || d <= 0) return;
+
+    // 时间预算：以 entry 时间窗为基准，加 200ms 缓冲允许自然结尾溢出
+    var budgetSec = Math.max(0.3, (entry.end - entry.start) + 0.2);
+
+    // 在 10% 容忍内不动 — 短句小幅超时听感更自然
+    if (d <= budgetSec * 1.10) return;
+
+    // 计算所需 playbackRate (不超过 1.4，否则音质会变怪)
+    var FADE_SEC = 0.20;
+    var targetDur = budgetSec; // 加速到刚好塞进预算
+    var rate = d / targetDur;
+    rate = Math.min(1.4, Math.max(1.0, rate));
+    audioEl.playbackRate = rate;
+
+    // 真实播放时长 (按调速后)
+    var realDur = d / rate;
+
+    // 最后 200ms 做线性 fade-out (在调速后时间轴上)
+    var fadeStart = Math.max(0, realDur - FADE_SEC) * 1000;
+
+    if (!_ttsGain) return; // 没有 graph 就跳过淡出 (退化为纯加速)
+
+    // 先把 gain 重置为正常音量
+    var vol = audioEl.volume; // audio.volume 已设过
+    try {
+      _ttsGain.gain.cancelScheduledValues(_ttsAudioCtx.currentTime);
+      _ttsGain.gain.setValueAtTime(1.0, _ttsAudioCtx.currentTime);
+    } catch (_) {}
+
+    _ttsFadeTimer = setTimeout(function () {
+      _ttsFadeTimer = null;
+      if (!_ttsGain || !_ttsAudioCtx) return;
+      try {
+        var t0 = _ttsAudioCtx.currentTime;
+        _ttsGain.gain.setValueAtTime(1.0, t0);
+        _ttsGain.gain.linearRampToValueAtTime(0.0001, t0 + FADE_SEC);
+      } catch (_) {}
+    }, fadeStart);
+  }
+
+  function resetTtsGain() {
+    if (_ttsFadeTimer) { clearTimeout(_ttsFadeTimer); _ttsFadeTimer = null; }
+    if (!_ttsGain || !_ttsAudioCtx) return;
+    try {
+      _ttsGain.gain.cancelScheduledValues(_ttsAudioCtx.currentTime);
+      _ttsGain.gain.setValueAtTime(1.0, _ttsAudioCtx.currentTime);
+    } catch (_) {}
+  }
+
   function playFloatingTTS(base64, mimeType, entry) {
     if (!ai.floatingWindow || ai.floatingWindow.closed || !ai.floatingLoaded) return;
     if (!_audioReady) {
@@ -1175,17 +1259,30 @@
     a.volume = (s.ttsVolume || 100) / 100;
     a.playbackRate = 1.0;
 
+    // E6: 接入 WebAudio (首次)；之后重置 gain 为 1.0 给本句一个干净起点
+    ensureTtsGraph(a);
+    resetTtsGain();
+
     ai._currentTtsEntry = entry || null;
 
     a.onended = function () {
       ai._currentTtsEntry = null;
+      resetTtsGain();
     };
+
+    // E6: duration 在 loadedmetadata 后才可用 — 用一次性 listener
+    var onMeta = function () {
+      a.removeEventListener('loadedmetadata', onMeta);
+      planTtsFadeAndRate(a, entry);
+    };
+    a.addEventListener('loadedmetadata', onMeta);
 
     a.src = 'data:' + (mimeType || 'audio/mpeg') + ';base64,' + base64;
     var p = a.play();
     if (p !== undefined) {
       p.catch(function (e) {
         ai._currentTtsEntry = null;
+        a.removeEventListener('loadedmetadata', onMeta);
         if (e && e.name === 'NotAllowedError') {
           _audioReady = false;
           var sEl2 = ai.floatingWindow.document.getElementById('audio-status');
@@ -1251,6 +1348,7 @@
     ai._currentTtsEntry = null;
     ai.floatingTtsQueue = [];
     ai.floatingTtsPlaying = false;
+    resetTtsGain(); // E6: 防止下一句开播时残留 fade-out 后的 gain=0
   }
 
   function handleFloatingAudioStart(msg) {
