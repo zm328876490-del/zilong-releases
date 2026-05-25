@@ -500,12 +500,11 @@ function generateSessionId() {
       // window.open() called deep in an async call chain loses the
       // user gesture and gets blocked by Chrome's popup blocker.
       if (window.startFloatingWindowMode && !isLiveStream(video)) {
-        var w = Math.round((video.videoWidth || 640) * 0.7) || 480;
-        var h = Math.round((video.videoHeight || 360) * 0.7) + 100 || 400;
-        var left = Math.max(0, screen.width - w - 40);
-        var top = Math.max(0, (screen.height - h) / 2);
+        var FIXED_W = 480, FIXED_H = 400;
+        var left = Math.max(0, screen.width - FIXED_W - 40);
+        var top = Math.max(0, (screen.height - FIXED_H) / 2);
         var pw = window.open('about:blank', 'ai_translation_overlay',
-          'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top +
+          'width=' + FIXED_W + ',height=' + FIXED_H + ',left=' + left + ',top=' + top +
           ',resizable=1,scrollbars=0,status=0,toolbar=0,menubar=0,location=0');
         if (pw) window.__ai_preopened_window__ = pw;
       }

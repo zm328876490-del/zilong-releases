@@ -191,7 +191,7 @@
 
   // ─── Popup window management ─────────────────────────────────────────
 
-  function openFloatingWindow(video) {
+  function openFloatingWindow() {
     if (ai.floatingWindow && !ai.floatingWindow.closed) {
       try { ai.floatingWindow.close(); } catch (_) {}
     }
@@ -203,12 +203,11 @@
       window.__ai_preopened_window__ = undefined;
     } else {
       window.__ai_preopened_window__ = undefined;
-      var w = Math.round((video.videoWidth || 640) * 0.7) || 480;
-      var h = Math.round((video.videoHeight || 360) * 0.7) + 100 || 400;
-      var left = Math.max(0, screen.width - w - 40);
-      var top = Math.max(0, (screen.height - h) / 2);
+      var FIXED_W = 780, FIXED_H = 400;
+      var left = Math.max(0, screen.width - FIXED_W - 40);
+      var top = Math.max(0, (screen.height - FIXED_H) / 2);
       ai.floatingWindow = window.open('about:blank', 'ai_translation_overlay',
-        'width=' + w + ',height=' + h +
+        'width=' + FIXED_W + ',height=' + FIXED_H +
         ',left=' + left + ',top=' + top +
         ',resizable=1,scrollbars=0,status=0,toolbar=0,menubar=0,location=0');
     }
@@ -1508,7 +1507,7 @@
     // while floating because nothing is playing the source audio.
     try { chrome.runtime.sendMessage({ type: 'floatingModeChanged', floating: true }); } catch (_) {}
 
-    if (!openFloatingWindow(video)) {
+    if (!openFloatingWindow()) {
       removeVideoOverlay();
       // Pop-up blocked — tear down volume guards + undo the duck + notify popup.
       if (_volumeGuardInterval) { clearInterval(_volumeGuardInterval); _volumeGuardInterval = null; }
