@@ -500,6 +500,15 @@ function generateSessionId() {
       // window.open() called deep in an async call chain loses the
       // user gesture and gets blocked by Chrome's popup blocker.
       if (window.startFloatingWindowMode && !isLiveStream(video)) {
+        // Ensure only one window — close any stale pre-opened or existing window
+        if (window.__ai_preopened_window__ && !window.__ai_preopened_window__.closed) {
+          try { window.__ai_preopened_window__.close(); } catch (_) {}
+        }
+        window.__ai_preopened_window__ = undefined;
+        if (floatingWindow && !floatingWindow.closed) {
+          try { floatingWindow.close(); } catch (_) {}
+          floatingWindow = null;
+        }
         var FIXED_W = 480, FIXED_H = 400;
         var left = Math.max(0, screen.width - FIXED_W - 40);
         var top = Math.max(0, (screen.height - FIXED_H) / 2);
