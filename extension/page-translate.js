@@ -7,6 +7,14 @@
   if (window.__ai_page_translate_loaded__) return;
   window.__ai_page_translate_loaded__ = true;
 
+  // ─── CSS injection ────────────────────────────────────────────────────
+  if (!document.getElementById('ot-page-style')) {
+    const style = document.createElement('style');
+    style.id = 'ot-page-style';
+    style.textContent = '@keyframes ot-spin{to{transform:rotate(360deg)}}';
+    (document.head || document.documentElement).appendChild(style);
+  }
+
   // ─── Constants ──────────────────────────────────────────────────────
   const SKIP_TAGS = new Set([
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME', 'SVG', 'CANVAS',
@@ -31,6 +39,7 @@
   const MAX_RETRIES = 3;
   const MAX_CACHE = 5000;
   const API = 'http://localhost:29527/translate/page';
+  const host = location.hostname;
 
   // ─── State ──────────────────────────────────────────────────────────
   let isActive = false;
@@ -43,6 +52,9 @@
   let scrollTicking = false;
   let mutationTimer = null;
   let pumpTimer = null;
+  let dbReady = false;
+  let snapshotDirty = false;
+  let snapshotTimer = null;
 
   let targetLang = 'zh-Hans';
   let engine = 'microsoft';
@@ -51,6 +63,7 @@
   let ollamaModel = 'qwen2.5:7b';
 
   const memCache = new Map();
+  const idleCB = window.requestIdleCallback || function (cb, opts) { return setTimeout(cb, (opts && opts.timeout) || 100); };
 
   // ─── Cache helpers ──────────────────────────────────────────────────
   function cacheGet(key) {
@@ -70,12 +83,171 @@
     }
   }
 
+  // ─── IndexedDB ──────────────────────────────────────────────────────
+  const DB_NAME = 'OtTranslateDB';
+  const DB_VERSION = 2;
+  const STORE = 'phrases';
+  const SNAP_STORE = 'snapshots';
+  const MAX_DB_ENTRIES = 50000;
+  const MAX_SNAPSHOTS = 100;
+
+  let _db = null;
+
+  function openDB() {
+    if (_db) return Promise.resolve(_db);
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = function (e) {
+        var db = e.target.result;
+        if (e.oldVersion < 1 && !db.objectStoreNames.contains(STORE)) {
+          var store = db.createObjectStore(STORE, { keyPath: 'key' });
+          store.createIndex('host', 'host', { unique: false });
+          store.createIndex('hits', 'hits', { unique: false });
+          store.createIndex('updatedAt', 'updatedAt', { unique: false });
+        }
+        if (e.oldVersion < 2 && !db.objectStoreNames.contains(SNAP_STORE)) {
+          var snapStore = db.createObjectStore(SNAP_STORE, { keyPath: 'url' });
+          snapStore.createIndex('host', 'host', { unique: false });
+          snapStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+        }
+      };
+      req.onsuccess = function (e) { _db = e.target.result; resolve(_db); };
+      req.onerror = function (e) { reject(e.target.error); };
+    });
+  }
+
+  function makeKey(h, src) {
+    return h + '::' + src;
+  }
+
+  async function dbLookup(h, srcs) {
+    try {
+      var db = await openDB();
+      var result = new Map();
+      var tx = db.transaction(STORE, 'readonly');
+      var store = tx.objectStore(STORE);
+      await Promise.all(srcs.map(function (src) {
+        return new Promise(function (resolve) {
+          var r = store.get(makeKey(h, src));
+          r.onsuccess = function (e) { var row = e.target.result; if (row && row.dst) result.set(src, row.dst); resolve(); };
+          r.onerror = function () { resolve(); };
+        });
+      }));
+      return result;
+    } catch (_) { return new Map(); }
+  }
+
+  async function dbSave(h, pairs) {
+    if (!pairs.length) return;
+    try {
+      var db = await openDB();
+      var tx = db.transaction(STORE, 'readwrite');
+      var store = tx.objectStore(STORE);
+      var now = Date.now();
+      for (var i = 0; i < pairs.length; i++) {
+        var src = pairs[i].src, dst = pairs[i].dst;
+        if (!src || !dst) continue;
+        var key = makeKey(h, src);
+        var existing = await new Promise(function (resolve) {
+          var r = store.get(key);
+          r.onsuccess = function (e) { resolve(e.target.result); };
+          r.onerror = function () { resolve(null); };
+        });
+        store.put({
+          key: key, host: h, src: src, dst: dst,
+          hits: (existing && existing.hits || 0) + 1,
+          updatedAt: now,
+        });
+      }
+    } catch (_) {}
+  }
+
+  function dbPrune() {
+    openDB().then(function (db) {
+      var tx = db.transaction(STORE, 'readwrite');
+      var store = tx.objectStore(STORE);
+      var countReq = store.count();
+      countReq.onsuccess = function (e) {
+        var count = e.target.result;
+        if (count <= MAX_DB_ENTRIES) return;
+        var allReq = store.getAll();
+        allReq.onsuccess = function (e2) {
+          var all = e2.target.result;
+          all.sort(function (a, b) { return a.hits - b.hits || a.updatedAt - b.updatedAt; });
+          var toDelete = all.slice(0, Math.floor(count * 0.1));
+          for (var i = 0; i < toDelete.length; i++) store.delete(toDelete[i].key);
+        };
+      };
+    }).catch(function () {});
+  }
+
+  // ─── Page Snapshots ─────────────────────────────────────────────────
+  async function dbSavePageSnapshot(h, url, pairs) {
+    if (!pairs.length) return;
+    try {
+      var db = await openDB();
+      var tx = db.transaction(SNAP_STORE, 'readwrite');
+      var store = tx.objectStore(SNAP_STORE);
+      var capped = pairs.slice(0, 500);
+      store.put({ url: url, host: h, pairs: capped, count: capped.length, updatedAt: Date.now() });
+      var total = await new Promise(function (r) { var q = store.count(); q.onsuccess = function (e) { r(e.target.result); }; });
+      if (total > MAX_SNAPSHOTS) {
+        var all = await new Promise(function (r) { var q = store.getAll(); q.onsuccess = function (e) { r(e.target.result); }; });
+        all.sort(function (a, b) { return a.updatedAt - b.updatedAt; });
+        for (var i = 0; i < total - MAX_SNAPSHOTS; i++) store.delete(all[i].url);
+      }
+    } catch (_) {}
+  }
+
+  async function dbLoadPageSnapshot(url) {
+    try {
+      var db = await openDB();
+      var tx = db.transaction(SNAP_STORE, 'readonly');
+      var store = tx.objectStore(SNAP_STORE);
+      return new Promise(function (resolve) {
+        var req = store.get(url);
+        req.onsuccess = function (e) { resolve((e.target.result && e.target.result.pairs) || []); };
+        req.onerror = function () { resolve([]); };
+      });
+    } catch (_) { return []; }
+  }
+
+  async function dbExportDomain(h) {
+    try {
+      var db = await openDB();
+      var tx = db.transaction(STORE, 'readonly');
+      var idx = tx.objectStore(STORE).index('host');
+      return new Promise(function (resolve) {
+        var req = idx.getAll(IDBKeyRange.only(h));
+        req.onsuccess = function (e) { resolve(e.target.result); };
+        req.onerror = function () { resolve([]); };
+      });
+    } catch (_) { return []; }
+  }
+
+  async function warmupCache() {
+    try {
+      // 1. Load page snapshot (instant restore for revisit)
+      var snapPairs = await dbLoadPageSnapshot(location.href);
+      if (snapPairs.length > 0) {
+        snapPairs.forEach(function (r) { if (r.src && r.dst) cacheSet(r.src, r.dst); });
+        console.log('[page-translate] warmup: loaded ' + snapPairs.length + ' snapshot entries for ' + location.href);
+      }
+      // 2. Load domain phrases (cross-page reuse)
+      var rows = await dbExportDomain(host);
+      rows.sort(function (a, b) { return b.hits - a.hits; });
+      rows.forEach(function (r) { if (r.src && r.dst && !memCache.has(r.src)) cacheSet(r.src, r.dst); });
+      if (rows.length > 0) console.log('[page-translate] warmup: loaded ' + rows.length + ' domain entries for ' + host);
+    } catch (_) {}
+    dbReady = true;
+  }
+
   // ─── Helpers ────────────────────────────────────────────────────────
   function isVisible(el) {
-    const style = window.getComputedStyle(el);
+    var style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
     if (parseFloat(style.opacity) === 0) return false;
-    const rect = el.getBoundingClientRect();
+    var rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return false;
     return true;
   }
@@ -86,8 +258,9 @@
     if (el.getAttribute('translate') === 'no') return true;
     if (el.classList.contains('notranslate')) return true;
     if (el.hasAttribute('data-ot-translated')) return true;
+    if (el._otTranslated) return true;
     if (el.isContentEditable) return true;
-    const role = el.getAttribute('role');
+    var role = el.getAttribute('role');
     if (role && SKIP_ROLES.has(role)) return true;
     if (el.closest('[contenteditable="true"]')) return true;
     return false;
@@ -100,11 +273,10 @@
   }
 
   function isTargetLanguage(text) {
-    const stripped = text.replace(/[\s\d\p{P}]+/gu, '');
+    var stripped = text.replace(/[\s\d\p{P}]+/gu, '');
     if (stripped.length === 0) return false;
 
-    const t = targetLang;
-    let re;
+    var t = targetLang, re;
     if (t === 'zh' || t === 'zh-Hans' || t === 'zh-Hant') {
       re = /\p{Script=Han}/u;
     } else if (t === 'ja') {
@@ -116,25 +288,28 @@
     } else if (t === 'ru') {
       re = /\p{Script=Cyrillic}/u;
     } else {
-      const letters = (stripped.match(/[a-zA-Z]/g) || []).length;
+      var letters = (stripped.match(/[a-zA-Z]/g) || []).length;
       return letters / stripped.length > 0.8;
     }
 
-    const matching = (stripped.match(new RegExp(re.source, 'gu')) || []).length;
+    var matching = (stripped.match(new RegExp(re.source, 'gu')) || []).length;
     return matching / stripped.length > 0.5;
   }
 
-  let debugLeafLog = 0;
+  var debugLeafLog = 0;
   function isTranslatableLeaf(el) {
+    // Prevent re-scanning already-queued elements
+    if (el._otDone) return false;
+
     if (!isVisible(el)) {
       if (debugLeafLog++ < 10) console.log('[page-translate] leaf rejected: <' + el.tagName + '> not visible, text=' + JSON.stringify((el.textContent || '').trim().slice(0, 50)));
       return false;
     }
 
     // Collect direct text (excluding deeply nested block elements)
-    let text = '';
-    let hasBlockChild = false;
-    for (const child of el.childNodes) {
+    var text = '', hasBlockChild = false;
+    for (var ci = 0; ci < el.childNodes.length; ci++) {
+      var child = el.childNodes[ci];
       if (child.nodeType === Node.TEXT_NODE) {
         text += child.textContent;
       } else if (child.nodeType === Node.ELEMENT_NODE) {
@@ -152,7 +327,7 @@
     }
 
     // Pure numeric / emoji / symbols
-    const stripped = text.replace(/[\s\d\p{P}\p{S}]+/gu, '');
+    var stripped = text.replace(/[\s\d\p{P}\p{S}]+/gu, '');
     if (stripped.length < 1) {
       if (debugLeafLog++ < 10) console.log('[page-translate] leaf rejected: <' + el.tagName + '> pure numeric/symbol, text=' + JSON.stringify(text));
       return false;
@@ -175,7 +350,7 @@
   }
 
   // ─── Scan DOM ────────────────────────────────────────────────────────
-  let scanVisited = 0, scanSkipped = 0, scanLeaf = 0, scanRecurse = 0;
+  var scanVisited = 0, scanSkipped = 0, scanLeaf = 0, scanRecurse = 0;
   function scanDOM(root, _inHidden) {
     if (!root || !root.tagName) return;
     if (shouldSkipEl(root)) { scanVisited++; scanSkipped++; return; }
@@ -184,19 +359,22 @@
     scanVisited++;
     if (isTranslatableLeaf(root)) {
       scanLeaf++;
+      root._otDone = true;
       enqueue(root);
       return;
     }
 
-    const children = root.children;
+    var children = root.children;
     if (!children || children.length === 0) return;
     scanRecurse++;
-    for (const child of children) {
+    for (var i = 0; i < children.length; i++) {
+      var child = children[i];
       if (!child.tagName) continue;
       if (shouldSkipEl(child) || isSubtreeSkippable(child)) { scanVisited++; scanSkipped++; continue; }
       scanVisited++;
       if (isTranslatableLeaf(child)) {
         scanLeaf++;
+        child._otDone = true;
         enqueue(child);
       } else if (child.children && child.children.length > 0) {
         scanRecurse++;
@@ -206,11 +384,11 @@
   }
 
   function enqueue(el) {
-    if (el.hasAttribute('data-ot-queued')) return;
-    el.setAttribute('data-ot-queued', '');
+    if (el._otQueued) return;
+    el._otQueued = true;
     el._otRetries = 0;
 
-    const rect = el.getBoundingClientRect();
+    var rect = el.getBoundingClientRect();
     if (rect.top >= 0 && rect.bottom <= window.innerHeight) {
       viewQ.push(el);
     } else {
@@ -221,43 +399,51 @@
 
   // ─── Pump ────────────────────────────────────────────────────────────
   function startPump() {
-    pumping = true;
-    schedulePump();
-  }
-
-  function schedulePump() {
-    if (!pumping) return;
-    pumpTimer = setTimeout(() => {
-      pump();
-      schedulePump();
+    pump();
+    var id = setInterval(function () {
+      if (!isActive) { clearInterval(id); return; }
+      if (!document.hidden) pump();
     }, 150);
+    // Idle pre-translation: process bgQ during browser idle time
+    (function scheduleIdle() {
+      if (!isActive || document.hidden) return;
+      idleCB(function () {
+        if (bgQ.length > 0 && activeRequests < CONCURRENCY + 2) pump();
+        scheduleIdle();
+      }, { timeout: 2000 });
+    })();
   }
 
-  async function pump() {
-    if (!isActive || activeRequests >= CONCURRENCY) return;
-
-    let batch = takeBatch(viewQ, BATCH_SIZE);
-    if (batch.length === 0) batch = takeBatch(bgQ, BATCH_SIZE);
-    if (batch.length === 0) return;
-
-    activeRequests++;
-    console.log('[page-translate] pump: batch=' + batch.length + ' viewQ=' + viewQ.length + ' bgQ=' + bgQ.length);
+  function pump() {
+    if (!isActive || pumping || document.hidden) return;
+    pumping = true;
     try {
-      await translateBatch(batch);
+      var hasViewQ = viewQ.length > 0;
+      var maxConcurrency = hasViewQ ? CONCURRENCY : CONCURRENCY + 2;
+      while (activeRequests < maxConcurrency) {
+        var q = hasViewQ ? viewQ : bgQ;
+        if (q.length === 0) break;
+        var batch = takeBatch(q, BATCH_SIZE);
+        if (batch.length === 0) break;
+        activeRequests++;
+        translateBatch(batch).finally(function () { activeRequests--; });
+      }
+      // All queues drained: flush snapshot for next visit
+      if (viewQ.length === 0 && bgQ.length === 0 && activeRequests === 0 && snapshotDirty) {
+        if (snapshotTimer) clearTimeout(snapshotTimer);
+        snapshotTimer = setTimeout(saveSnapshot, 3000);
+      }
     } finally {
-      activeRequests--;
+      pumping = false;
     }
   }
 
   function takeBatch(q, maxCount) {
-    const batch = [];
-    let chars = 0;
+    var batch = [], chars = 0;
     while (q.length > 0 && batch.length < maxCount && chars < CHAR_LIMIT) {
-      const el = q.shift();
-      if (!el.isConnected) {
-        pendingCount--;
-        continue;
-      }
+      var el = q[0];
+      if (!el.isConnected || el._otTranslated) { q.shift(); continue; }
+      q.shift();
       batch.push(el);
       chars += (el.textContent || '').length;
     }
@@ -266,115 +452,176 @@
 
   // ─── Translate ───────────────────────────────────────────────────────
   async function translateBatch(leaves) {
-    const texts = leaves.map(function (el) {
-      return (el.textContent || '').trim();
-    });
+    // Filter dead / already-translated nodes
+    var valid = [];
+    for (var i = 0; i < leaves.length; i++) {
+      if (leaves[i].isConnected && !leaves[i]._otTranslated) valid.push(leaves[i]);
+    }
+    if (!valid.length) return;
 
-    const cached = [];
-    const uncachedIdx = [];
-    const uncachedTexts = [];
-
-    for (let i = 0; i < texts.length; i++) {
-      const key = texts[i].toLowerCase();
-      const hit = cacheGet(key);
+    // ── L1: memory cache ──────────────────────────────────────────────
+    var texts = valid.map(function (el) { return (el.textContent || '').trim(); });
+    var needModel = [];
+    for (var j = 0; j < valid.length; j++) {
+      var key = texts[j].toLowerCase();
+      var hit = cacheGet(key);
       if (hit !== undefined) {
-        cached.push({ idx: i, translation: hit });
+        applyTranslation(valid[j], hit);
       } else {
-        uncachedIdx.push(i);
-        uncachedTexts.push(texts[i]);
+        needModel.push(valid[j]);
       }
     }
+    if (!needModel.length) return;
 
-    let translations = new Array(texts.length).fill('');
-
-    if (uncachedTexts.length > 0) {
-      const results = await fetchTranslationBatch(uncachedTexts);
-      for (let i = 0; i < uncachedIdx.length; i++) {
-        const idx = uncachedIdx[i];
-        const result = results[i] || '';
-        translations[idx] = result;
-        if (result) cacheSet(texts[idx].toLowerCase(), result);
+    // ── L2: IndexedDB ─────────────────────────────────────────────────
+    var needTexts = needModel.map(function (el) { return (el.textContent || '').trim(); });
+    var uniqueTexts = [];
+    var seenTexts = {};
+    for (var ui = 0; ui < needTexts.length; ui++) {
+      if (!seenTexts[needTexts[ui]]) { seenTexts[needTexts[ui]] = true; uniqueTexts.push(needTexts[ui]); }
+    }
+    if (dbReady) {
+      var dbHits = await dbLookup(host, uniqueTexts);
+      if (dbHits.size > 0) {
+        var stillNeed = [];
+        for (var k = 0; k < needModel.length; k++) {
+          var t = needTexts[k];
+          if (dbHits.has(t)) {
+            var dst = dbHits.get(t);
+            cacheSet(t.toLowerCase(), dst);
+            applyTranslation(needModel[k], dst);
+          } else {
+            stillNeed.push(needModel[k]);
+          }
+        }
+        needModel = stillNeed;
+        needTexts = needModel.map(function (el) { return (el.textContent || '').trim(); });
       }
     }
+    if (!needModel.length) return;
 
-    for (const c of cached) {
-      translations[c.idx] = c.translation;
+    // ── L3: API ───────────────────────────────────────────────────────
+    needModel.forEach(function (el) { addSpinner(el); });
+
+    var results;
+    try {
+      results = await fetchTranslationBatch(needTexts);
+    } catch (_) {
+      results = new Array(needTexts.length).fill('');
     }
 
-    for (let i = 0; i < leaves.length; i++) {
-      const el = leaves[i];
-      if (!el.isConnected) continue;
-      if (translations[i]) {
-        applyTranslation(el, translations[i]);
-      } else {
-        requeueOrGiveUp(el);
-      }
+    needModel.forEach(function (el) { removeSpinner(el); });
+
+    if (!results || !Array.isArray(results)) {
+      needModel.forEach(function (el) { removeSpinner(el); requeueOrGiveUp(el); });
+      return;
+    }
+
+    var toSave = [];
+    for (var mi = 0; mi < needModel.length; mi++) {
+      var el = needModel[mi];
+      var translation = results[mi] || '';
+      var src = needTexts[mi];
+      if (!translation) { requeueOrGiveUp(el); continue; }
+      cacheSet(src.toLowerCase(), translation);
+      toSave.push({ src: src, dst: translation });
+      applyTranslation(el, translation);
+    }
+
+    if (toSave.length > 0) {
+      dbSave(host, toSave).catch(function () {});
+      snapshotDirty = true;
+      if (Math.random() < 0.02) dbPrune();
     }
   }
 
   async function fetchTranslationBatch(texts) {
     console.log('[page-translate] fetchTranslationBatch: ' + texts.length + ' texts to=' + targetLang + ' engine=' + engine);
-    try {
-      const resp = await fetch(API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          texts: texts,
-          from: sourceLang,
-          to: targetLang,
-          engine: engine,
-          ollamaUrl: ollamaUrl,
-          ollamaModel: ollamaModel,
-        }),
+    return new Promise(function (resolve) {
+      chrome.runtime.sendMessage({
+        type: 'PAGE_FETCH_TRANSLATION',
+        url: API,
+        body: {
+          texts: texts, from: sourceLang, to: targetLang,
+          engine: engine, ollamaUrl: ollamaUrl, ollamaModel: ollamaModel,
+        },
+      }, function (resp) {
+        if (chrome.runtime.lastError) {
+          console.error('[page-translate] SW proxy error:', chrome.runtime.lastError.message);
+          resolve(new Array(texts.length).fill(''));
+          return;
+        }
+        if (!resp || !resp.ok) {
+          console.error('[page-translate] SW proxy response not ok, status=' + (resp && resp.status));
+          resolve(new Array(texts.length).fill(''));
+          return;
+        }
+        console.log('[page-translate] SW proxy results:', resp.results);
+        resolve(resp.results || new Array(texts.length).fill(''));
       });
-      console.log('[page-translate] fetch response status=' + resp.status);
-      if (!resp.ok) return new Array(texts.length).fill('');
-      const data = await resp.json();
-      console.log('[page-translate] fetch results:', data.results);
-      return data.results || new Array(texts.length).fill('');
-    } catch (e) {
-      console.error('[page-translate] fetch error:', e.message || e);
-      return new Array(texts.length).fill('');
-    }
+    });
   }
 
   function requeueOrGiveUp(el) {
+    removeSpinner(el);
     el._otRetries = (el._otRetries || 0) + 1;
     if (el._otRetries >= MAX_RETRIES) {
+      el._otDone = false;
+      el._otQueued = false;
       pendingCount--;
       return;
     }
     viewQ.push(el);
   }
 
+  // ─── Spinner ─────────────────────────────────────────────────────────
+  function addSpinner(el) {
+    if (el.querySelector && el.querySelector('.ot-sp')) return;
+    var s = document.createElement('span');
+    s.className = 'ot-sp';
+    s.style.cssText = 'display:inline-block;width:9px;height:9px;margin-left:3px;'
+      + 'border:2px solid #fce7f3;border-top-color:#e83e8c;border-radius:50%;'
+      + 'animation:ot-spin .6s linear infinite;vertical-align:middle;flex-shrink:0';
+    el.appendChild(s);
+  }
+
+  function removeSpinner(el) {
+    if (el.querySelector) {
+      var s = el.querySelector('.ot-sp');
+      if (s) s.remove();
+    }
+  }
+
   // ─── Apply Translation ──────────────────────────────────────────────
   function applyTranslation(el, translation) {
+    if (!el.isConnected || el._otTranslated) return;
     el.setAttribute('data-ot-translated', '');
     el.setAttribute('data-ot-original', el.textContent.trim());
     el.setAttribute('data-ot-translation', translation);
+    el._otTranslated = true;
     pendingCount--;
     translatedCount++;
     safeReplace(el, translation);
   }
 
   function safeReplace(el, translation) {
-    const original = el.getAttribute('data-ot-original') || el.textContent.trim();
+    var original = el.getAttribute('data-ot-original') || el.textContent.trim();
     if (!bilingualMode) {
       el.textContent = translation;
       return;
     }
 
     // Build bilingual DOM: .ot-orig + .ot-trans inside .ot-bi-wrap
-    const frag = document.createDocumentFragment();
-    const origSpan = document.createElement('span');
+    var frag = document.createDocumentFragment();
+    var origSpan = document.createElement('span');
     origSpan.className = 'ot-orig';
     origSpan.textContent = original;
 
-    const transSpan = document.createElement('span');
+    var transSpan = document.createElement('span');
     transSpan.className = 'ot-trans';
     transSpan.textContent = translation;
 
-    const wrap = document.createElement('span');
+    var wrap = document.createElement('span');
     wrap.className = 'ot-bi-wrap';
     wrap.appendChild(transSpan);
     wrap.appendChild(origSpan);
@@ -382,8 +629,9 @@
     frag.appendChild(wrap);
 
     // Preserve any non-text children (images, etc.)
-    const nonTextChildren = [];
-    for (const child of el.childNodes) {
+    var nonTextChildren = [];
+    for (var ci = 0; ci < el.childNodes.length; ci++) {
+      var child = el.childNodes[ci];
       if (child.nodeType === Node.ELEMENT_NODE && !INLINE_TAGS.has(child.tagName)) {
         nonTextChildren.push(child);
       }
@@ -391,61 +639,74 @@
 
     el.textContent = '';
     el.appendChild(frag);
-    for (const c of nonTextChildren) {
-      el.appendChild(c);
+    for (var ni = 0; ni < nonTextChildren.length; ni++) {
+      el.appendChild(nonTextChildren[ni]);
     }
   }
 
   // ─── Bilingual toggle ───────────────────────────────────────────────
   function refreshBilingualRender() {
-    const nodes = document.querySelectorAll('[data-ot-translated]');
+    var nodes = document.querySelectorAll('[data-ot-translated]');
     nodes.forEach(function (el) {
-      const original = el.getAttribute('data-ot-original');
-      const translation = el.getAttribute('data-ot-translation');
+      var original = el.getAttribute('data-ot-original');
+      var translation = el.getAttribute('data-ot-translation');
       if (!original || !translation) return;
 
       // Remove existing bilingual wraps
-      const wraps = el.querySelectorAll('.ot-bi-wrap');
+      var wraps = el.querySelectorAll('.ot-bi-wrap');
       wraps.forEach(function (w) { w.remove(); });
 
       if (!bilingualMode) {
         el.textContent = translation;
       } else {
         el.textContent = '';
-        const origSpan = document.createElement('span');
+        var origSpan = document.createElement('span');
         origSpan.className = 'ot-orig';
         origSpan.textContent = original;
 
-        const transSpan = document.createElement('span');
+        var transSpan = document.createElement('span');
         transSpan.className = 'ot-trans';
         transSpan.textContent = translation;
 
-        const wrap = document.createElement('span');
+        var wrap = document.createElement('span');
         wrap.className = 'ot-bi-wrap';
-        wrap.appendChild(origSpan);
         wrap.appendChild(transSpan);
+        wrap.appendChild(origSpan);
 
         el.appendChild(wrap);
       }
     });
   }
 
+  // ─── Snapshot save ──────────────────────────────────────────────────
+  async function saveSnapshot() {
+    if (!snapshotDirty || translatedCount === 0) return;
+    snapshotDirty = false;
+    var pairs = [];
+    document.querySelectorAll('[data-ot-translated]').forEach(function (el) {
+      var src = el.getAttribute('data-ot-original');
+      var dst = el.getAttribute('data-ot-translation');
+      if (src && dst) pairs.push({ src: src, dst: dst });
+    });
+    if (pairs.length > 0) {
+      try { await dbSavePageSnapshot(host, location.href, pairs); } catch (_) {}
+    }
+  }
+
   // ─── MutationObserver ───────────────────────────────────────────────
   function watchMutations() {
     var pendingMutations = [];
     observer = new MutationObserver(function (mutations) {
-      var addedTotal = 0;
+      if (!isActive) return;
       for (var mi = 0; mi < mutations.length; mi++) {
-        addedTotal += mutations[mi].addedNodes.length;
         pendingMutations.push(mutations[mi]);
       }
       if (mutationTimer) clearTimeout(mutationTimer);
       mutationTimer = setTimeout(function () {
-        if (!isActive) return;
+        if (!isActive || document.hidden) return;
         var batch = pendingMutations;
         pendingMutations = [];
-        var totalRecords = batch.length;
-        console.log('[page-translate] mutation processing: ' + totalRecords + ' records');
+        console.log('[page-translate] mutation processing: ' + batch.length + ' records');
         for (var i = 0; i < batch.length; i++) {
           var m = batch[i];
           for (var j = 0; j < m.addedNodes.length; j++) {
@@ -475,18 +736,14 @@
   // ─── Scroll watcher — promote bgQ to viewQ ──────────────────────────
   function watchScroll() {
     window.addEventListener('scroll', function () {
-      if (!isActive || scrollTicking) return;
+      if (!isActive || scrollTicking || document.hidden) return;
       scrollTicking = true;
       requestAnimationFrame(function () {
-        // Promote visible bgQ items to viewQ
-        const promoted = [];
-        const remaining = [];
-        for (const el of bgQ) {
-          if (!el.isConnected) {
-            pendingCount--;
-            continue;
-          }
-          const rect = el.getBoundingClientRect();
+        var promoted = [], remaining = [];
+        for (var i = 0; i < bgQ.length; i++) {
+          var el = bgQ[i];
+          if (!el.isConnected) { pendingCount--; continue; }
+          var rect = el.getBoundingClientRect();
           if (rect.top >= 0 && rect.bottom <= window.innerHeight) {
             promoted.push(el);
           } else {
@@ -517,6 +774,7 @@
     pumping = false;
     if (pumpTimer) clearTimeout(pumpTimer);
     if (mutationTimer) clearTimeout(mutationTimer);
+    if (snapshotTimer) clearTimeout(snapshotTimer);
     if (observer) { observer.disconnect(); observer = null; }
     viewQ = [];
     bgQ = [];
@@ -570,7 +828,6 @@
   chrome.storage.local.get('pageGlobalEnabled', function (result) {
     console.log('[page-translate] storage read, pageGlobalEnabled:', result.pageGlobalEnabled);
     if (result.pageGlobalEnabled !== false) {
-      // Also load other settings
       chrome.storage.local.get(
         ['pageBilingual', 'pageTargetLang', 'pageEngine', 'pageOllamaUrl', 'pageOllamaModel', 'pageSourceLang', 'translationSettings'],
         function (r) {
@@ -582,6 +839,8 @@
           if (r.pageOllamaModel) ollamaModel = r.pageOllamaModel;
           if (r.pageSourceLang) sourceLang = r.pageSourceLang;
 
+          // Fire-and-forget: warm IndexedDB cache in background, start translation immediately
+          warmupCache();
           if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', start);
           } else {

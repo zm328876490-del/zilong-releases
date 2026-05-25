@@ -85,6 +85,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       forwardToContent({ type: 'offscreenError', message: message.message, sessionId: message.sessionId }, message.sessionId);
       closeOffscreenDocument();
       break;
+
+    // ─── Page translation: proxy fetch through SW to bypass page CSP ──
+    case 'PAGE_FETCH_TRANSLATION':
+      handlePageTranslateFetch(message, sendResponse);
+      return true; // async response
   }
 });
 
@@ -221,6 +226,26 @@ chrome.runtime.onConnect.addListener((port) => {
     });
   }
 });
+
+// ─── Page translation fetch proxy ───────────────────────────────────────
+
+async function handlePageTranslateFetch(message, sendResponse) {
+  try {
+    const resp = await fetch(message.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(message.body),
+    });
+    if (!resp.ok) {
+      sendResponse({ ok: false, status: resp.status, results: null });
+      return;
+    }
+    const data = await resp.json();
+    sendResponse({ ok: true, status: resp.status, results: data.results || null });
+  } catch (e) {
+    sendResponse({ ok: false, status: 0, results: null, error: e.message });
+  }
+}
 
 // ─── Periodic cleanup of stale pending results ────────────────────────
 setInterval(() => {
