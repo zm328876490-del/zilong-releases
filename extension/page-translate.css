@@ -1,0 +1,22 @@
+/* page-translate.css — Bilingual rendering styles */
+
+.ot-bi-wrap {
+    display: inline-flex;
+    flex-direction: column;
+    vertical-align: baseline;
+    line-height: 1.4;
+}
+
+.ot-trans {
+    color: inherit;
+}
+
+.ot-orig {
+    color: #9ca3af !important;
+    font-size: 0.78em;
+    line-height: 1.2;
+}
+
+@media (prefers-color-scheme: dark) {
+    .ot-orig  { color: #6b7280 !important; }
+}

@@ -1238,6 +1238,54 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ─── Page Translation HTTP endpoint ─────────────────────────────────────
+
+type translatePageReq struct {
+	Texts      []string `json:"texts"`
+	From       string   `json:"from"`
+	To         string   `json:"to"`
+	Engine     string   `json:"engine"`
+	OllamaUrl  string   `json:"ollamaUrl,omitempty"`
+	OllamaModel string  `json:"ollamaModel,omitempty"`
+}
+
+type translatePageResp struct {
+	Results []string `json:"results"`
+}
+
+func handleTranslatePage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req translatePageReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"bad request: %s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Texts) == 0 || req.To == "" {
+		http.Error(w, `{"error":"texts and to are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	tr := translate.New("", "")
+	tr.SetEngine(req.Engine)
+	if req.Engine == "ollama" {
+		tr.SetOllama(req.OllamaUrl, req.OllamaModel)
+	}
+
+	results, err := tr.TranslateBatch(req.Texts, req.From, req.To)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(translatePageResp{Results: results})
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1370,7 +1418,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", handleWebSocket)
-
+	mux.HandleFunc("/translate/page", handleTranslatePage)
 	mux.HandleFunc("/fetch-subtitles", handleFetchSubtitles)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

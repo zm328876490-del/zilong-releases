@@ -22,6 +22,12 @@
       "matches": ["<all_urls>"],
       "js": ["floating-window.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["page-translate.js"],
+      "css": ["page-translate.css"],
+      "run_at": "document_idle"
     }
   ],
   "icons": {

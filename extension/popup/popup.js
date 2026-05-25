@@ -23,6 +23,8 @@
   const subtitleSizeNote = document.getElementById('subtitleSizeNote');
   const ttsVolumeSlider = document.getElementById('ttsVolume');
   const ttsVolumeVal = document.getElementById('ttsVolumeVal');
+  const toggleGlobal = document.getElementById('toggleGlobal');
+  const toggleBilingualPage = document.getElementById('toggleBilingualPage');
   const toggleBtn = document.getElementById('toggleBtn');
   const toggleIcon = document.getElementById('toggleIcon');
   const toggleText = document.getElementById('toggleText');
@@ -44,6 +46,8 @@
     subtitleSize: 50,
     originalVolume: 30,
     ttsVolume: 100,
+    pageGlobalEnabled: true,
+    pageBilingual: false,
   };
 
   async function loadSettings() {
@@ -64,6 +68,8 @@
     originalVolumeVal.textContent = originalVolumeSlider.value + '%';
     ttsVolumeSlider.value = settings.ttsVolume || 100;
     ttsVolumeVal.textContent = ttsVolumeSlider.value + '%';
+    toggleGlobal.checked = settings.pageGlobalEnabled !== false;
+    toggleBilingualPage.checked = settings.pageBilingual === true;
     return settings;
   }
 
@@ -79,8 +85,10 @@
       subtitleSize: parseInt(subtitleSizeSlider.value, 10),
       originalVolume: parseInt(originalVolumeSlider.value, 10),
       ttsVolume: parseInt(ttsVolumeSlider.value, 10),
+      pageGlobalEnabled: toggleGlobal.checked,
+      pageBilingual: toggleBilingualPage.checked,
     };
-    await chrome.storage.local.set({ translationSettings: settings });
+    await chrome.storage.local.set({ translationSettings: settings, pageBilingual: settings.pageBilingual });
 
     // Push to active tab immediately for real-time effect
     if (isRunning) {
@@ -235,7 +243,10 @@
   });
 
   // Target language change: rebuild TTS voices first, then save
-  targetLangSelect.addEventListener('change', saveSettings);
+  targetLangSelect.addEventListener('change', function () {
+    saveSettings();
+    syncPageLangEngine();
+  });
 
   // Engine change: open ollama modal when "本地" selected
   translateEngineSelect.addEventListener('change', function () {
@@ -244,13 +255,14 @@
     } else {
       prevEngine = translateEngineSelect.value;
       saveSettings();
+      syncPageLangEngine();
     }
   });
 
   // Auto-save on input change
   [sourceLangSelect].forEach(
-    (el) => {
-      el.addEventListener('change', saveSettings);
+    function (el) {
+      el.addEventListener('change', function () { saveSettings(); syncPageLangEngine(); });
       el.addEventListener('input', saveSettings);
     }
   );
@@ -272,6 +284,7 @@
     prevEngine = 'ollama';
     hideOllamaModal();
     saveSettings();
+    syncPageLangEngine();
   });
 
   ollamaCancelBtn.addEventListener('click', function () {
@@ -292,6 +305,19 @@
     updateSubtitleSizeVisibility();
     saveSettings();
     pushDisplaySettings();
+  });
+
+  // Page translation toggles
+  toggleGlobal.addEventListener('change', function () {
+    var enabled = toggleGlobal.checked;
+    chrome.storage.local.set({ pageGlobalEnabled: enabled });
+    pushPageMessage('PAGE_TRANSLATE_TOGGLE', { enabled: enabled });
+  });
+
+  toggleBilingualPage.addEventListener('change', function () {
+    var enabled = toggleBilingualPage.checked;
+    chrome.storage.local.set({ pageBilingual: enabled });
+    pushPageMessage('PAGE_UPDATE_BILINGUAL', { enabled: enabled });
   });
 
   function updateSubtitleSizeVisibility() {
@@ -316,6 +342,36 @@
     saveSettings();
     pushDisplaySettings();
   });
+
+  // Push page translation settings to content script
+  async function pushPageMessage(type, data) {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab) {
+        await chrome.tabs.sendMessage(tab.id, Object.assign({ type: type }, data)).catch(function () {});
+      }
+    } catch (_) {}
+  }
+
+  // Sync language/engine changes to page translation settings
+  async function syncPageLangEngine() {
+    chrome.storage.local.set({
+      pageSourceLang: sourceLangSelect.value,
+      pageTargetLang: targetLangSelect.value,
+      pageEngine: translateEngineSelect.value,
+      pageOllamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
+      pageOllamaModel: ollamaModelInput.value.trim() || 'qwen2.5:7b',
+    });
+    pushPageMessage('PAGE_UPDATE_SETTINGS', {
+      settings: {
+        sourceLang: sourceLangSelect.value,
+        targetLang: targetLangSelect.value,
+        engine: translateEngineSelect.value,
+        ollamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
+        ollamaModel: ollamaModelInput.value.trim() || 'qwen2.5:7b',
+      },
+    });
+  }
 
   // Push display-related settings to content script in real-time
   async function pushDisplaySettings() {
@@ -370,6 +426,12 @@
   // ─── Init ─────────────────────────────────────────────────────────
   async function init() {
     await loadSettings();
+
+    // Sync separate keys for page-translate.js (which reads them individually)
+    chrome.storage.local.set({
+      pageBilingual: toggleBilingualPage.checked,
+      pageGlobalEnabled: toggleGlobal.checked,
+    });
 
     // Check current status from the active tab
     try {
