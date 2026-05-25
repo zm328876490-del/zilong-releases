@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // ─── Batch Translation (page translation) ──────────────────────────────
@@ -96,14 +99,27 @@ func (t *Translator) translateMicrosoftBatch(texts []string, to string) ([]strin
 	return out, nil
 }
 
+var googleClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   3 * time.Second,
+		ResponseHeaderTimeout: 3 * time.Second,
+	},
+	Timeout: 5 * time.Second,
+}
+
 func (t *Translator) translateGoogleBatch(texts []string, from, to string) ([]string, error) {
 	fromLang := mapLangGoogle(from)
 	toLang := mapLangGoogle(to)
 	out := make([]string, len(texts))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
+	var failCount int32
 
 	for i, text := range texts {
+		if atomic.LoadInt32(&failCount) > int32(len(texts)/2) {
+			break
+		}
 		wg.Add(1)
 		go func(idx int, txt string) {
 			defer wg.Done()
@@ -114,22 +130,26 @@ func (t *Translator) translateGoogleBatch(texts []string, from, to string) ([]st
 				"https://translate.googleapis.com/translate_a/single?client=gtx&sl=%s&tl=%s&dt=t&q=%s",
 				fromLang, toLang, url.QueryEscape(txt),
 			)
-			resp, err := t.client.Get(apiURL)
+			resp, err := googleClient.Get(apiURL)
 			if err != nil {
+				atomic.AddInt32(&failCount, 1)
 				return
 			}
 			defer resp.Body.Close()
 
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
+				atomic.AddInt32(&failCount, 1)
 				return
 			}
 			if resp.StatusCode != http.StatusOK {
+				atomic.AddInt32(&failCount, 1)
 				return
 			}
 
 			var result []interface{}
 			if err := json.Unmarshal(body, &result); err != nil {
+				atomic.AddInt32(&failCount, 1)
 				return
 			}
 			if len(result) == 0 {
@@ -151,6 +171,15 @@ func (t *Translator) translateGoogleBatch(texts []string, from, to string) ([]st
 		}(i, text)
 	}
 	wg.Wait()
+	successCount := 0
+	for _, v := range out {
+		if v != "" {
+			successCount++
+		}
+	}
+	if failCount > 0 && successCount == 0 {
+		return nil, fmt.Errorf("Google 翻译不可用（需代理访问），请切换到微软翻译引擎")
+	}
 	return out, nil
 }
 

@@ -29,7 +29,7 @@
   ]);
 
   const SKIP_ROLES = new Set([
-    'menu', 'menubar', 'listbox', 'tablist', 'toolbar', 'presentation', 'none',
+    'presentation', 'none',
   ]);
 
   const CONCURRENCY = 4;
@@ -352,7 +352,12 @@
       scanLeaf++;
       root._otDone = true;
       enqueue(root);
-      return;
+      // Even if it's a leaf, it might have a shadowRoot
+    }
+
+    // Shadow DOM support
+    if (root.shadowRoot) {
+      scanDOM(root.shadowRoot, _inHidden);
     }
 
     var children = root.children;
@@ -367,9 +372,13 @@
         scanLeaf++;
         child._otDone = true;
         enqueue(child);
-      } else if (child.children && child.children.length > 0) {
+      }
+      // Always recurse into children unless skippable, to ensure we find all nested text
+      if (child.children && child.children.length > 0) {
         scanRecurse++;
         scanDOM(child, _inHidden);
+      } else if (child.shadowRoot) {
+        scanDOM(child.shadowRoot, _inHidden);
       }
     }
   }
@@ -527,6 +536,23 @@
   }
 
   async function fetchTranslationBatch(texts) {
+    // Google Translate is called from the browser (respects system proxy),
+    // unlike the Go backend which makes direct connections.
+    if (engine === 'google') {
+      return new Promise(function (resolve) {
+        chrome.runtime.sendMessage({
+          type: 'PAGE_GOOGLE_TRANSLATE',
+          texts: texts, from: sourceLang, to: targetLang,
+        }, function (resp) {
+          if (chrome.runtime.lastError || !resp || !resp.ok) {
+            resolve(new Array(texts.length).fill(''));
+            return;
+          }
+          resolve(resp.results || new Array(texts.length).fill(''));
+        });
+      });
+    }
+
     return new Promise(function (resolve) {
       chrome.runtime.sendMessage({
         type: 'PAGE_FETCH_TRANSLATION',
@@ -693,21 +719,24 @@
         if (!isActive || document.hidden) return;
         var batch = pendingMutations;
         pendingMutations = [];
+        var visAttrs = new Set(['style', 'class', 'hidden', 'aria-hidden']);
         for (var i = 0; i < batch.length; i++) {
           var m = batch[i];
-          for (var j = 0; j < m.addedNodes.length; j++) {
-            var node = m.addedNodes[j];
-            if (node.nodeType === Node.ELEMENT_NODE) {
-              scanDOM(node);
+          if (m.type === 'childList') {
+            for (var j = 0; j < m.addedNodes.length; j++) {
+              var node = m.addedNodes[j];
+              if (node.nodeType === Node.ELEMENT_NODE) {
+                scanDOM(node);
+              }
             }
-          }
-          if (m.type === 'attributes' && m.attributeName === 'style') {
+          } else if (m.type === 'attributes' && visAttrs.has(m.attributeName)) {
             if (m.target.nodeType === Node.ELEMENT_NODE && isVisible(m.target)) {
+              // When a container becomes visible, scan it and its children
               scanDOM(m.target);
             }
           }
         }
-      }, 100);
+      }, 150);
     });
 
     observer.observe(document.body, {
