@@ -500,16 +500,13 @@ function generateSessionId() {
       // window.open() called deep in an async call chain loses the
       // user gesture and gets blocked by Chrome's popup blocker.
       if (window.startFloatingWindowMode && !isLiveStream(video)) {
-        console.log('[AI] FAB click: pre-opening floating window...');
         var w = Math.round((video.videoWidth || 640) * 0.7) || 480;
         var h = Math.round((video.videoHeight || 360) * 0.7) + 100 || 400;
         var left = Math.max(0, screen.width - w - 40);
         var top = Math.max(0, (screen.height - h) / 2);
-        console.log('[AI] popup dimensions:', w, 'x', h, 'pos:', left, ',', top);
         var pw = window.open('about:blank', 'ai_translation_overlay',
           'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top +
           ',resizable=1,scrollbars=0,status=0,toolbar=0,menubar=0,location=0');
-        console.log('[AI] window.open returned:', pw);
         if (pw) window.__ai_preopened_window__ = pw;
       }
       start();
@@ -2817,14 +2814,10 @@ function generateSessionId() {
 
     // VOD → floating window or offline recording; live → real-time ASR
     var video = findVideoElement();
-    console.log('[AI] start: video =', video ? (video.tagName + ' ' + video.videoWidth + 'x' + video.videoHeight + ' dur=' + video.duration + ' paused=' + video.paused) : null);
-    console.log('[AI] start: isLiveStream =', isLiveStream(video), 'startFloatingWindowMode =', !!window.startFloatingWindowMode);
     if (video && !isLiveStream(video)) {
       if (window.startFloatingWindowMode) {
-        console.log('[AI] start: taking floating window path');
         window.startFloatingWindowMode(video);
       } else {
-        console.log('[AI] start: taking offline recording path');
         startOfflineRecording(video);
         if (ws) {
           ws.onclose = null;

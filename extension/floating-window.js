@@ -198,14 +198,11 @@
 
     // Use pre-opened window from FAB click handler (preserves user gesture).
     var preOpened = window.__ai_preopened_window__;
-    console.log('[AI] openFloatingWindow: preOpened =', preOpened, 'closed =', preOpened && preOpened.closed);
     if (preOpened && !preOpened.closed) {
       ai.floatingWindow = preOpened;
       window.__ai_preopened_window__ = undefined;
-      console.log('[AI] openFloatingWindow: using pre-opened window');
     } else {
       window.__ai_preopened_window__ = undefined;
-      console.log('[AI] openFloatingWindow: pre-opened window not available, trying direct window.open');
       var w = Math.round((video.videoWidth || 640) * 0.7) || 480;
       var h = Math.round((video.videoHeight || 360) * 0.7) + 100 || 400;
       var left = Math.max(0, screen.width - w - 40);
@@ -1511,9 +1508,7 @@
     // while floating because nothing is playing the source audio.
     try { chrome.runtime.sendMessage({ type: 'floatingModeChanged', floating: true }); } catch (_) {}
 
-    console.log('[AI] startFloatingWindowMode: calling openFloatingWindow...');
     if (!openFloatingWindow(video)) {
-      console.log('[AI] startFloatingWindowMode: openFloatingWindow returned false, falling back');
       removeVideoOverlay();
       // Pop-up blocked — tear down volume guards + undo the duck + notify popup.
       if (_volumeGuardInterval) { clearInterval(_volumeGuardInterval); _volumeGuardInterval = null; }
