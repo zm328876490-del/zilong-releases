@@ -243,7 +243,9 @@
   function isVisible(el) {
     var style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
-    if (parseFloat(style.opacity) === 0) return false;
+    // NOTE: 不检查 opacity — 元素可能正在 fade-in 动画中 (opacity 0→1)，
+    // 此时已有完整 DOM 内容，应当翻译。CSS transition 不会触发 mutation，
+    // 等动画结束再扫会永久错过 (Ozon Vue Portal 下拉菜单根因)。
     var rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return false;
     return true;
@@ -303,13 +305,16 @@
     }
 
     // Collect direct text (excluding deeply nested block elements)
-    var text = '', hasBlockChild = false;
+    var text = '', hasBlockChild = false, interactiveChildren = 0;
     for (var ci = 0; ci < el.childNodes.length; ci++) {
       var child = el.childNodes[ci];
       if (child.nodeType === Node.TEXT_NODE) {
         text += child.textContent;
       } else if (child.nodeType === Node.ELEMENT_NODE) {
-        if (INLINE_TAGS.has(child.tagName)) {
+        if (child.tagName === 'A' || child.tagName === 'BUTTON') {
+          interactiveChildren++;
+          text += child.textContent;
+        } else if (INLINE_TAGS.has(child.tagName)) {
           text += child.textContent;
         } else if (!SKIP_TAGS.has(child.tagName)) {
           hasBlockChild = true;
@@ -318,6 +323,13 @@
     }
     text = text.trim();
     if (text.length < 2) {
+      return false;
+    }
+
+    // 多个 <a>/<button> 兄弟 → 该容器是导航/菜单组，不能整体当 leaf 翻译
+    // (textContent=translation 会摧毁所有链接结构、href 和事件绑定，
+    //  Ozon 下拉菜单 vue-portal-target 就栽在这里 — 翻译完点不开)
+    if (interactiveChildren >= 2) {
       return false;
     }
 
@@ -706,6 +718,38 @@
     }
   }
 
+  // ─── IntersectionObserver — 兜底：节点真正可见时再扫一次 ─────────────
+  // 用途：DOM 已插入但 isVisible=false (display:none / 0×0 / 折叠容器)，
+  //       当节点进入视口或尺寸变非零时强制重扫。覆盖 portal / 折叠菜单 / lazy DOM。
+  var visibilityObserver = null;
+  function ensureVisibilityObserver() {
+    if (visibilityObserver || typeof IntersectionObserver === 'undefined') return visibilityObserver;
+    visibilityObserver = new IntersectionObserver(function (entries) {
+      if (!isActive) return;
+      for (var i = 0; i < entries.length; i++) {
+        var ent = entries[i];
+        if (ent.isIntersecting && ent.target) {
+          var t = ent.target;
+          visibilityObserver.unobserve(t);
+          if (t._otVisWatch) t._otVisWatch = false;
+          // 节点已在视口内，清掉 _otDone 标记给子树一次重扫机会
+          // (旧 scan 可能因 isVisible=false 提前 return，子节点根本没遍历到)
+          scanDOM(t);
+        }
+      }
+    }, { root: null, threshold: 0.01 });
+    return visibilityObserver;
+  }
+
+  function watchVisibility(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+    if (node._otVisWatch) return;
+    var io = ensureVisibilityObserver();
+    if (!io) return;
+    node._otVisWatch = true;
+    try { io.observe(node); } catch (_) {}
+  }
+
   // ─── MutationObserver ───────────────────────────────────────────────
   function watchMutations() {
     var pendingMutations = [];
@@ -725,9 +769,11 @@
           if (m.type === 'childList') {
             for (var j = 0; j < m.addedNodes.length; j++) {
               var node = m.addedNodes[j];
-              if (node.nodeType === Node.ELEMENT_NODE) {
-                scanDOM(node);
-              }
+              if (node.nodeType !== Node.ELEMENT_NODE) continue;
+              scanDOM(node);
+              // 兜底：节点可能此刻还隐藏 (动画/折叠/portal target 空壳)，
+              // 注册 IntersectionObserver，等真正进入视口再扫一次。
+              if (!node._otDone) watchVisibility(node);
             }
           } else if (m.type === 'attributes' && visAttrs.has(m.attributeName)) {
             if (m.target.nodeType === Node.ELEMENT_NODE && isVisible(m.target)) {
@@ -788,6 +834,7 @@
     if (mutationTimer) clearTimeout(mutationTimer);
     if (snapshotTimer) clearTimeout(snapshotTimer);
     if (observer) { observer.disconnect(); observer = null; }
+    if (visibilityObserver) { visibilityObserver.disconnect(); visibilityObserver = null; }
     viewQ = [];
     bgQ = [];
     pendingCount = 0;
