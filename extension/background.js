@@ -289,7 +289,7 @@ async function handleGoogleTranslateBatch(texts, fromLang, toLang) {
           for (let i = 0; i < n; i++) {
             const raw = data[i];
             if (!Array.isArray(raw)) { results[start + i] = ''; continue; }
-            results[start + i] = raw.map(seg => Array.isArray(seg) ? (seg[0] || '') : '').join('') || '';
+            results[start + i] = raw.map(seg => Array.isArray(seg) ? (seg[0] || '') : '').join('').trim() || '';
           }
           ok = true;
           break;
@@ -304,10 +304,9 @@ async function handleGoogleTranslateBatch(texts, fromLang, toLang) {
       }
     }
     if (!ok) {
-      for (let i = start; i < texts.length; i++) {
-        results[i] = '';
+      for (let i = 0; i < batch.length; i++) {
+        results[start + i] = '';
       }
-      break;
     }
   }
   return results;

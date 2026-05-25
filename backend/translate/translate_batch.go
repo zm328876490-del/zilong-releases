@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,8 +28,6 @@ func (t *Translator) TranslateBatch(texts []string, from, to string) ([]string, 
 		return t.translateMicrosoftBatch(texts, to)
 	case "google":
 		return t.translateGoogleBatch(texts, from, to)
-	case "ollama":
-		return t.translateOllamaBatch(texts, from, to)
 	default:
 		results, err := t.translateMicrosoftBatch(texts, to)
 		if err == nil {
@@ -36,6 +35,30 @@ func (t *Translator) TranslateBatch(texts []string, from, to string) ([]string, 
 		}
 		return t.translateGoogleBatch(texts, from, to)
 	}
+}
+
+// TranslateBatchStream streams translations one-by-one as NDJSON lines.
+// Each line: {"i":index,"t":"translation"}\n
+func (t *Translator) TranslateBatchStream(w io.Writer, texts []string, from, to string) error {
+	if len(texts) == 0 {
+		return fmt.Errorf("empty texts")
+	}
+	if t.engine == "ollama" {
+		return t.translateOllamaBatch(w, texts, from, to)
+	}
+	// Non-ollama engines: batch all at once, then write NDJSON
+	results, err := t.TranslateBatch(texts, from, to)
+	if err != nil {
+		return err
+	}
+	for i, r := range results {
+		if r == "" {
+			continue
+		}
+		b, _ := json.Marshal(map[string]interface{}{"i": i, "t": r})
+		w.Write(append(b, '\n'))
+	}
+	return nil
 }
 
 func (t *Translator) translateMicrosoftBatch(texts []string, to string) ([]string, error) {
@@ -54,31 +77,9 @@ func (t *Translator) translateMicrosoftBatch(texts []string, to string) ([]strin
 	for i, text := range texts {
 		items[i] = map[string]string{"Text": text}
 	}
-	body, err := json.Marshal(items)
+	bodyBytes, err := json.Marshal(items)
 	if err != nil {
 		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", apiURL, strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("microsoft batch request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("microsoft batch HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var results []struct {
@@ -86,8 +87,42 @@ func (t *Translator) translateMicrosoftBatch(texts []string, to string) ([]strin
 			Text string `json:"text"`
 		} `json:"translations"`
 	}
-	if err := json.Unmarshal(respBody, &results); err != nil {
-		return nil, fmt.Errorf("microsoft batch parse: %w", err)
+
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(500 * time.Millisecond)
+		}
+		req, err := http.NewRequest("POST", apiURL, strings.NewReader(string(bodyBytes)))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := t.client.Do(req)
+		if err != nil {
+			continue
+		}
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			if resp.StatusCode >= 500 {
+				continue
+			}
+			return nil, fmt.Errorf("microsoft batch HTTP %d: %s", resp.StatusCode, string(respBody))
+		}
+		if err := json.Unmarshal(respBody, &results); err != nil {
+			continue
+		}
+		break
+	}
+
+	if len(results) == 0 {
+		return nil, fmt.Errorf("microsoft batch: all retries exhausted")
 	}
 
 	out := make([]string, len(texts))
@@ -113,7 +148,7 @@ func (t *Translator) translateGoogleBatch(texts []string, from, to string) ([]st
 	toLang := mapLangGoogle(to)
 	out := make([]string, len(texts))
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 4)
+	sem := make(chan struct{}, 1)
 	var failCount int32
 
 	for i, text := range texts {
@@ -125,49 +160,58 @@ func (t *Translator) translateGoogleBatch(texts []string, from, to string) ([]st
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			time.Sleep(200 * time.Millisecond)
 
 			apiURL := fmt.Sprintf(
 				"https://translate.googleapis.com/translate_a/single?client=gtx&sl=%s&tl=%s&dt=t&q=%s",
 				fromLang, toLang, url.QueryEscape(txt),
 			)
-			resp, err := googleClient.Get(apiURL)
-			if err != nil {
-				atomic.AddInt32(&failCount, 1)
-				return
-			}
-			defer resp.Body.Close()
 
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				atomic.AddInt32(&failCount, 1)
-				return
-			}
-			if resp.StatusCode != http.StatusOK {
-				atomic.AddInt32(&failCount, 1)
-				return
-			}
+			var translated string
+			for attempt := 0; attempt < 3; attempt++ {
+				if attempt > 0 {
+					time.Sleep(500 * time.Millisecond)
+				}
+				resp, err := googleClient.Get(apiURL)
+				if err != nil {
+					continue
+				}
+				body, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					continue
+				}
+				if resp.StatusCode != http.StatusOK {
+					continue
+				}
 
-			var result []interface{}
-			if err := json.Unmarshal(body, &result); err != nil {
+				var result []interface{}
+				if err := json.Unmarshal(body, &result); err != nil {
+					continue
+				}
+				if len(result) == 0 {
+					continue
+				}
+				first, ok := result[0].([]interface{})
+				if !ok || len(first) == 0 {
+					continue
+				}
+				entry, ok := first[0].([]interface{})
+				if !ok || len(entry) == 0 {
+					continue
+				}
+				t, ok := entry[0].(string)
+				if !ok {
+					continue
+				}
+				translated = strings.TrimSpace(t)
+				break
+			}
+			if translated != "" {
+				out[idx] = translated
+			} else {
 				atomic.AddInt32(&failCount, 1)
-				return
 			}
-			if len(result) == 0 {
-				return
-			}
-			first, ok := result[0].([]interface{})
-			if !ok || len(first) == 0 {
-				return
-			}
-			entry, ok := first[0].([]interface{})
-			if !ok || len(entry) == 0 {
-				return
-			}
-			translated, ok := entry[0].(string)
-			if !ok {
-				return
-			}
-			out[idx] = strings.TrimSpace(translated)
 		}(i, text)
 	}
 	wg.Wait()
@@ -183,41 +227,109 @@ func (t *Translator) translateGoogleBatch(texts []string, from, to string) ([]st
 	return out, nil
 }
 
-func (t *Translator) translateOllamaBatch(texts []string, from, to string) ([]string, error) {
+var ollamaWarmupOnce sync.Once
+
+func warmupOllama(url, model string) {
+	warmBody := ollamaChatRequest{
+		Model: model,
+		Messages: []ollamaChatMessage{{Role: "user", Content: "hello"}},
+		Stream:      false,
+		Temperature: 0,
+	}
+	b, _ := json.Marshal(warmBody)
+	go func() {
+		http.Post(url+"/v1/chat/completions", "application/json", bytes.NewReader(b))
+	}()
+}
+
+func (t *Translator) translateOllamaBatch(w io.Writer, texts []string, from, to string) error {
+	ollamaWarmupOnce.Do(func() { warmupOllama(t.ollamaUrl, t.ollamaModel) })
+
 	if t.ollamaUrl == "" {
-		return nil, fmt.Errorf("ollama URL not configured")
+		return fmt.Errorf("ollama URL not configured")
 	}
 	if t.ollamaModel == "" {
-		return nil, fmt.Errorf("ollama model not configured")
+		return fmt.Errorf("ollama model not configured")
 	}
 
-	prompt := buildOllamaBatchPrompt(texts, from, to)
+	toName := langNameForOllama(to)
+	client := t.client
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 2)
+	var failCount int32
+
+	for i, text := range texts {
+		if atomic.LoadInt32(&failCount) > int32(len(texts)/2) {
+			break
+		}
+		txt := strings.TrimSpace(text)
+		if txt == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(idx int, src string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			var result string
+			var err error
+			for attempt := 0; attempt < 3; attempt++ {
+				if attempt > 0 {
+					time.Sleep(time.Second)
+				}
+				result, err = translateOllamaSingle(src, toName, t.ollamaUrl, t.ollamaModel, client)
+				if err == nil {
+					break
+				}
+			}
+			if err != nil {
+				atomic.AddInt32(&failCount, 1)
+				return
+			}
+			mu.Lock()
+			b, _ := json.Marshal(map[string]interface{}{"i": idx, "t": result})
+			w.Write(append(b, '\n'))
+			mu.Unlock()
+		}(i, txt)
+	}
+	wg.Wait()
+
+	if atomic.LoadInt32(&failCount) > 0 {
+		return nil // partial results acceptable
+	}
+	return nil
+}
+
+func translateOllamaSingle(text, toLang, ollamaUrl, model string, client *http.Client) (string, error) {
+	systemPrompt := "将以下文本翻译为" + toLang + "。只返回译文，不要解释，不要前缀。"
 
 	reqBody := ollamaChatRequest{
-		Model: t.ollamaModel,
+		Model: model,
 		Messages: []ollamaChatMessage{
-			{Role: "system", Content: prompt},
-			{Role: "user", Content: "请翻译。"},
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: text},
 		},
 		Stream:      false,
-		Temperature: 0.1,
+		Temperature: 0,
 	}
 
 	bodyBytes, _ := json.Marshal(reqBody)
-	endpoint := t.ollamaUrl + "/v1/chat/completions"
+	endpoint := ollamaUrl + "/v1/chat/completions"
 
-	resp, err := t.client.Post(endpoint, "application/json", strings.NewReader(string(bodyBytes)))
+	resp, err := client.Post(endpoint, "application/json", strings.NewReader(string(bodyBytes)))
 	if err != nil {
-		return nil, fmt.Errorf("ollama batch request: %w", err)
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama batch HTTP %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var chatResp struct {
@@ -228,93 +340,24 @@ func (t *Translator) translateOllamaBatch(texts []string, from, to string) ([]st
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return nil, fmt.Errorf("ollama batch parse: %w", err)
+		return "", err
 	}
 	if len(chatResp.Choices) == 0 {
-		return nil, fmt.Errorf("ollama batch empty response")
+		return "", nil
 	}
-
-	raw := strings.TrimSpace(chatResp.Choices[0].Message.Content)
-	// Extract JSON array from response (model may wrap in ```json ... ```)
-	if i := strings.Index(raw, "["); i >= 0 {
-		raw = raw[i:]
-		if j := strings.LastIndex(raw, "]"); j >= 0 {
-			raw = raw[:j+1]
-		}
-	}
-
-	type batchItem struct {
-		ID          int    `json:"id"`
-		Translation string `json:"translation"`
-	}
-	var items []batchItem
-	if err := json.Unmarshal([]byte(raw), &items); err != nil {
-		return nil, fmt.Errorf("ollama batch json parse: %w\nraw: %s", err, raw)
-	}
-
-	out := make([]string, len(texts))
-	for _, item := range items {
-		if item.ID >= 0 && item.ID < len(out) {
-			out[item.ID] = strings.TrimSpace(item.Translation)
-		}
-	}
-	return out, nil
+	return strings.TrimSpace(chatResp.Choices[0].Message.Content), nil
 }
 
-func buildOllamaBatchPrompt(texts []string, from, to string) string {
-	langNames := map[string]string{
+func langNameForOllama(lang string) string {
+	m := map[string]string{
 		"zh-Hans": "简体中文", "zh-Hant": "繁體中文", "zh": "中文",
 		"en": "English", "ja": "日本語", "ko": "한국어",
 		"fr": "Français", "de": "Deutsch", "es": "Español",
 		"pt": "Português", "ru": "Русский", "th": "ไทย", "vi": "Tiếng Việt",
 	}
-	toName := langNames[to]
-	if toName == "" {
-		toName = to
+	if v, ok := m[lang]; ok {
+		return v
 	}
-	fromName := langNames[from]
-	if fromName == "" {
-		fromName = "源语言"
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("你是网页 UI 文本翻译引擎。将以下%s文本准确翻译为%s。\n\n", fromName, toName))
-	sb.WriteString("规则：\n")
-	sb.WriteString("- 只翻译文本内容，保留占位符（%s, %d, {0}, {{name}} 等）不变\n")
-	sb.WriteString("- 保留 HTML 实体（&amp;, &lt;, &quot; 等）不变\n")
-	sb.WriteString("- 简短 UI 文本（按钮、标签）用简洁对应词\n")
-	sb.WriteString("- 返回 JSON 数组，格式：")
-
-	// Concrete JSON example matching the target language
-	sb.WriteString(fmt.Sprintf(`[{"id":0,"translation":"%s"},{"id":1,"translation":"%s"}]`, exampleTranslation(to, 0), exampleTranslation(to, 1)))
-	sb.WriteString("\n- 只返回 JSON，不要任何解释\n\n")
-	sb.WriteString("待翻译文本：\n")
-
-	for i, text := range texts {
-		sb.WriteString(fmt.Sprintf("[%d] %s\n", i, text))
-	}
-
-	return sb.String()
+	return lang
 }
 
-func exampleTranslation(to string, idx int) string {
-	examples := map[string][2]string{
-		"zh-Hans": {"你好世界", "点击这里"},
-		"zh-Hant": {"你好世界", "點擊這裡"},
-		"zh":      {"你好世界", "点击这里"},
-		"en":      {"Hello World", "Click here"},
-		"ja":      {"こんにちは世界", "ここをクリック"},
-		"ko":      {"안녕하세요 세계", "여기를 클릭"},
-		"fr":      {"Bonjour le monde", "Cliquez ici"},
-		"de":      {"Hallo Welt", "Hier klicken"},
-		"es":      {"Hola mundo", "Haga clic aquí"},
-		"pt":      {"Olá mundo", "Clique aqui"},
-		"ru":      {"Привет мир", "Нажмите здесь"},
-		"th":      {"สวัสดีชาวโลก", "คลิกที่นี่"},
-		"vi":      {"Chào thế giới", "Nhấp vào đây"},
-	}
-	if e, ok := examples[to]; ok {
-		return e[idx]
-	}
-	return examples["zh-Hans"][idx]
-}

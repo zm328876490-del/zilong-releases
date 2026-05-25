@@ -36,7 +36,7 @@
   const BATCH_SIZE = 30;
   const CHAR_LIMIT = 1500;
   const MAX_RETRIES = 3;
-  const MAX_CACHE = 5000;
+  const MAX_CACHE = 10000;
   const API = 'http://localhost:29527/translate/page';
   const host = location.hostname;
 
@@ -55,6 +55,7 @@
   let snapshotDirty = false;
   let snapshotTimer = null;
   let pausedByVideo = false;
+  let _pageIsJapanese = undefined;
 
   let targetLang = 'zh-Hans';
   let engine = 'microsoft';
@@ -274,27 +275,50 @@
   }
 
   function isTargetLanguage(text) {
-    var stripped = text.replace(/[\s\d\p{P}]+/gu, '');
-    if (stripped.length === 0) return false;
+    if (!text) return false;
+    var meaningful = text.replace(/[\s\d\p{P}\p{S}]/gu, '');
+    if (meaningful.length === 0) return false;
 
-    var t = targetLang, re;
-    if (t === 'zh' || t === 'zh-Hans' || t === 'zh-Hant') {
-      re = /\p{Script=Han}/u;
-    } else if (t === 'ja') {
-      re = /[぀-ゟ゠-ヿ\p{Script=Han}]/u;
-    } else if (t === 'ko') {
-      re = /[가-힯]/u;
-    } else if (t === 'th') {
-      re = /[฀-๿]/u;
-    } else if (t === 'ru') {
-      re = /\p{Script=Cyrillic}/u;
-    } else {
-      var letters = (stripped.match(/[a-zA-Z]/g) || []).length;
-      return letters / stripped.length > 0.8;
+    // Two-layer Japanese exclusion for zh targets:
+    // L1: text has kana → must be Japanese, do NOT skip
+    // L2: entire page is Japanese → even pure-kanji text should NOT be skipped
+    if (targetLang === 'zh' || targetLang === 'zh-Hans' || targetLang === 'zh-Hant') {
+      if (/[぀-ゟ゠-ヿ]/.test(meaningful)) return false;
+      if (isJapanesePage()) return false;
     }
 
-    var matching = (stripped.match(new RegExp(re.source, 'gu')) || []).length;
-    return matching / stripped.length > 0.5;
+    var pattern;
+    if (targetLang === 'zh' || targetLang === 'zh-Hans' || targetLang === 'zh-Hant' || targetLang === 'ja') {
+      pattern = targetLang === 'ja'
+        ? /[一-鿿㐀-䶿぀-ゟ゠-ヿ]/g
+        : /[一-鿿㐀-䶿]/g;
+    } else if (targetLang === 'ko') {
+      pattern = /[가-힯ᄀ-ᇿ]/g;
+    } else if (targetLang === 'ru') {
+      pattern = /[Ѐ-ӿԀ-ԯ]/g;
+    } else if (targetLang === 'ar') {
+      pattern = /[؀-ۿݐ-ݿ]/g;
+    } else if (targetLang === 'th') {
+      pattern = /[฀-๿]/g;
+    } else {
+      var letters = (meaningful.match(/[a-zA-Z]/g) || []).length;
+      return letters / meaningful.length > 0.8;
+    }
+
+    var matches = meaningful.match(pattern);
+    var count = matches ? matches.length : 0;
+    return count / meaningful.length >= 0.5;
+  }
+
+  function isJapanesePage() {
+    if (_pageIsJapanese !== undefined) return _pageIsJapanese;
+    var pageLang = (document.documentElement.lang || '').toLowerCase();
+    if (pageLang.indexOf('ja') === 0) { _pageIsJapanese = true; return true; }
+    try {
+      var sample = (document.body && document.body.innerText || '').slice(0, 3000);
+      _pageIsJapanese = /[぀-ゟ゠-ヿ]{3,}/.test(sample);
+    } catch (_) { _pageIsJapanese = false; }
+    return _pageIsJapanese;
   }
 
   var debugLeafLog = 0;
@@ -473,11 +497,21 @@
     }
     if (!valid.length) return;
 
-    // ── L1: memory cache ──────────────────────────────────────────────
+    // ── L0: local dictionary ────────────────────────────────────────────
+    var dict = window.__ai_dict;
     var texts = valid.map(function (el) { return (el.textContent || '').trim(); });
     var needModel = [];
     for (var j = 0; j < valid.length; j++) {
       var key = texts[j].toLowerCase();
+      // Check dictionary first (sub-ms, no network)
+      var dictHit = dict && dict.localTranslate(texts[j]);
+      if (dictHit) {
+        var pp = dict.postProcess(dictHit);
+        cacheSet(key, pp);
+        applyTranslation(valid[j], pp);
+        continue;
+      }
+      // ── L1: memory cache ──────────────────────────────────────────────
       var hit = cacheGet(key);
       if (hit !== undefined) {
         applyTranslation(valid[j], hit);
@@ -487,7 +521,7 @@
     }
     if (!needModel.length) return;
 
-    // ── L2: IndexedDB ─────────────────────────────────────────────────
+    // ── L2: IndexedDB domain phrases ──────────────────────────────────
     var needTexts = needModel.map(function (el) { return (el.textContent || '').trim(); });
     var uniqueTexts = [];
     var seenTexts = {};
@@ -514,44 +548,108 @@
     }
     if (!needModel.length) return;
 
-    // ── L3: API ───────────────────────────────────────────────────────
-    needModel.forEach(function (el) { addSpinner(el); });
+    // ── L3: translation API ───────────────────────────────────────────
+    if (engine === 'ollama') {
+      await fetchTranslationStream(needModel, needTexts);
+    } else {
+      needModel.forEach(function (el) { addSpinner(el); });
 
-    var results;
+      var results;
+      try {
+        results = await fetchTranslationBatch(needTexts);
+      } catch (_) {
+        results = new Array(needTexts.length).fill('');
+      }
+
+      needModel.forEach(function (el) { removeSpinner(el); });
+
+      if (!results || !Array.isArray(results)) {
+        needModel.forEach(function (el) { requeueOrGiveUp(el); });
+        return;
+      }
+
+      var toSave = [];
+      for (var mi = 0; mi < needModel.length; mi++) {
+        var el = needModel[mi];
+        var translation = results[mi] || '';
+        var src = needTexts[mi];
+        if (!translation) { requeueOrGiveUp(el); continue; }
+        cacheSet(src.toLowerCase(), translation);
+        toSave.push({ src: src, dst: translation });
+        applyTranslation(el, translation);
+      }
+
+      if (toSave.length > 0) {
+        dbSave(host, toSave).catch(function () {});
+        snapshotDirty = true;
+        if (Math.random() < 0.02) dbPrune();
+      }
+    }
+  }
+
+  async function fetchTranslationStream(leaves, texts) {
+    // Direct fetch to Go backend — reads NDJSON line by line, applying
+    // each result as it arrives so spinner disappears progressively.
+    leaves.forEach(function (el) { addSpinner(el); });
+
     try {
-      results = await fetchTranslationBatch(needTexts);
+      var resp = await fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          texts: texts, from: sourceLang, to: targetLang,
+          engine: engine, ollamaUrl: ollamaUrl, ollamaModel: ollamaModel,
+        }),
+      });
+      if (!resp.ok) {
+        leaves.forEach(function (el) { removeSpinner(el); requeueOrGiveUp(el); });
+        return;
+      }
+
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var buf = '';
+      var toSave = [];
+
+      while (true) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        buf += decoder.decode(chunk.value, { stream: true });
+        var lines = buf.split('\n');
+        buf = lines.pop(); // keep incomplete line
+
+        for (var li = 0; li < lines.length; li++) {
+          var line = lines[li].trim();
+          if (!line) continue;
+          try {
+            var item = JSON.parse(line);
+            var idx = item.i;
+            var translation = item.t;
+            if (idx >= 0 && idx < leaves.length && translation) {
+              var el = leaves[idx];
+              var src = texts[idx];
+              removeSpinner(el);
+              cacheSet(src.toLowerCase(), translation);
+              toSave.push({ src: src, dst: translation });
+              applyTranslation(el, translation);
+            }
+          } catch (_) {}
+        }
+      }
+
+      if (toSave.length > 0) {
+        dbSave(host, toSave).catch(function () {});
+        snapshotDirty = true;
+        if (Math.random() < 0.02) dbPrune();
+      }
     } catch (_) {
-      results = new Array(needTexts.length).fill('');
-    }
-
-    needModel.forEach(function (el) { removeSpinner(el); });
-
-    if (!results || !Array.isArray(results)) {
-      needModel.forEach(function (el) { removeSpinner(el); requeueOrGiveUp(el); });
-      return;
-    }
-
-    var toSave = [];
-    for (var mi = 0; mi < needModel.length; mi++) {
-      var el = needModel[mi];
-      var translation = results[mi] || '';
-      var src = needTexts[mi];
-      if (!translation) { requeueOrGiveUp(el); continue; }
-      cacheSet(src.toLowerCase(), translation);
-      toSave.push({ src: src, dst: translation });
-      applyTranslation(el, translation);
-    }
-
-    if (toSave.length > 0) {
-      dbSave(host, toSave).catch(function () {});
-      snapshotDirty = true;
-      if (Math.random() < 0.02) dbPrune();
+      leaves.forEach(function (el) { removeSpinner(el); requeueOrGiveUp(el); });
     }
   }
 
   async function fetchTranslationBatch(texts) {
-    // Google Translate is called from the browser (respects system proxy),
-    // unlike the Go backend which makes direct connections.
+    // Google Translate goes through the browser so it respects the system proxy.
+    // Microsoft and Ollama go through the Go backend.
     if (engine === 'google') {
       return new Promise(function (resolve) {
         chrome.runtime.sendMessage({

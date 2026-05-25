@@ -25,7 +25,7 @@
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["page-translate.js"],
+      "js": ["dict.js", "page-translate.js"],
       "css": ["page-translate.css"],
       "run_at": "document_idle"
     }

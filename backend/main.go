@@ -1182,6 +1182,23 @@ func handleTranslatePage(w http.ResponseWriter, r *http.Request) {
 		tr.SetOllama(req.OllamaUrl, req.OllamaModel)
 	}
 
+	if req.Engine == "ollama" {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, `{"error":"streaming not supported"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		if err := tr.TranslateBatchStream(w, req.Texts, req.From, req.To); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadGateway)
+			return
+		}
+		flusher.Flush()
+		return
+	}
+
 	results, err := tr.TranslateBatch(req.Texts, req.From, req.To)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadGateway)
