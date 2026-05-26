@@ -107,6 +107,8 @@
   // Last sample-sequence we saw from the worklet; used to detect drops.
   let _lastSampleSeqEnd = 0;
   let _audioHoleCount = 0;
+  let _audioFlowing = false;     // set true on first PCM batch
+  let _noAudioTimer = null;      // timeout for "no audio detected" warning
   // Audio-out debug stats (front-end side). Aggregated and printed once per second
   // so we can compare with the backend [audio-in] aggregate log to spot loss in flight.
   let _dbgSentChunks = 0;
@@ -1236,6 +1238,12 @@ function generateSessionId() {
               if (data.overflow) {
                 _audioHoleCount++;
                 return;
+              }
+
+              // First PCM batch — audio is flowing, clear silence warning
+              if (!_audioFlowing && !data.flush) {
+                _audioFlowing = true;
+                if (_noAudioTimer) { clearTimeout(_noAudioTimer); _noAudioTimer = null; }
               }
 
               var pcm = new Int16Array(data.pcm);
@@ -2818,6 +2826,22 @@ function generateSessionId() {
       if (captureVideo) { captureVideoAudio(captureVideo); }
     }
 
+    // Start a silence-detection timer for floating mode. If no PCM
+    // arrives within 10s, warn the user in the floating window.
+    if (floatingFallback && !_noAudioTimer) {
+      _noAudioTimer = setTimeout(function () {
+        if (!_audioFlowing) {
+          var fw = floatingWindow;
+          if (fw && !fw.closed) {
+            try {
+              var sEl = fw.document.getElementById('audio-status');
+              if (sEl) sEl.textContent = '未检测到音频，请检查原视频是否在播放';
+            } catch (_) {}
+          }
+        }
+      }, 10000);
+    }
+
     // Use persistent pipeline: keep existing WS and AudioContext alive
     if (ws && ws.readyState === WebSocket.OPEN) {
       if (!floatingFallback) { startVideoWatcher(); duckVideoAudio(); showLoading(); }
@@ -3040,6 +3064,8 @@ function generateSessionId() {
       finishWarmup();
       chrome.runtime.sendMessage({ type: 'stopped' }).catch(function () {});
     }
+    _audioFlowing = false;
+    if (_noAudioTimer) { clearTimeout(_noAudioTimer); _noAudioTimer = null; }
     isRunning = true;
     notifyPageTranslate(true);
     fab.classList.add('running');
@@ -3108,6 +3134,8 @@ function generateSessionId() {
     isRunning = false;
     fab.classList.remove('running');
     startSent = false;
+    _audioFlowing = false;
+    if (_noAudioTimer) { clearTimeout(_noAudioTimer); _noAudioTimer = null; }
 
     stopUrlWatcher();
     cleanupOffline();
