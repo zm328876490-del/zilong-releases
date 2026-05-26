@@ -147,7 +147,7 @@
   let activeProcessGeneration = 0; // generation when current preprocess was sent
   let waitingPreprocess = false;  // true between sending preprocess and receiving preprocess_complete/error
 
-  let floatingMode = false; let floatingWindow = null; let floatingLoaded = false; let floatingVideo = null; let floatingBufferFilled = false; let floatingTtsQueue = []; let floatingTtsPlaying = false; let floatingTtsFallbackChunks = []; let floatingFallback = false; let offscreenPending = false; let floatingTimeline = []; let floatingTimelineCursor = 0;
+  let floatingMode = false; let floatingWindow = null; let floatingLoaded = false; let floatingVideo = null; let floatingBufferFilled = false; let floatingTtsQueue = []; let floatingTtsPlaying = false; let floatingTtsFallbackChunks = []; let floatingFallback = false; let floatingTimeline = []; let floatingTimelineCursor = 0;
 
 function generateSessionId() {
     return 's_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
