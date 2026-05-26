@@ -260,6 +260,14 @@ button:active {
   border: 1px solid rgba(252,165,165,0.3);
 }
 
+/* ─── Hint Text ──────────────────────────── */
+.hint-text {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-top: 6px;
+  padding-left: 2px;
+}
+
 /* ─── Toggle Switch ──────────────────────── */
 .toggle-row {
   display: flex;
