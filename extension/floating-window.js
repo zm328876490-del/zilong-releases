@@ -203,7 +203,7 @@
       window.__ai_preopened_window__ = undefined;
     } else {
       window.__ai_preopened_window__ = undefined;
-      var FIXED_W = 780, FIXED_H = 400;
+      var FIXED_W = 480, FIXED_H = 780;
       var left = Math.max(0, screen.width - FIXED_W - 40);
       var top = Math.max(0, (screen.height - FIXED_H) / 2);
       ai.floatingWindow = window.open('about:blank', 'ai_translation_overlay',
