@@ -48,8 +48,13 @@
   };
 
   async function loadSettings() {
-    const result = await chrome.storage.local.get('translationSettings');
+    const result = await chrome.storage.local.get(['translationSettings', 'pageBilingual']);
     const settings = result.translationSettings || DEFAULT_SETTINGS;
+    // pageBilingual may be stored at top level by the toggle handler.
+    // Merge it into settings so the checkbox reflects the user's actual choice.
+    if (result.pageBilingual !== undefined) {
+      settings.pageBilingual = result.pageBilingual;
+    }
     const targetLang = settings.targetLang || DEFAULT_SETTINGS.targetLang;
     sourceLangSelect.value = settings.sourceLang || DEFAULT_SETTINGS.sourceLang;
     targetLangSelect.value = targetLang;

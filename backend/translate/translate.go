@@ -133,6 +133,21 @@ case "google":
 	}
 }
 
+// TranslateImage is for standalone image text (signs, menus, labels, etc.).
+// In Ollama mode it uses a simple prompt with no context ring — each text
+// fragment is independent. For other engines it falls through to Translate.
+func (t *Translator) TranslateImage(text, from, to string) (string, error) {
+	if t.engine == "ollama" {
+		result, err := t.translateOllamaImage(text, from, to)
+		if err == nil {
+			cacheKey := from + "|" + to + "|" + text
+			t.cachePut(cacheKey, result)
+		}
+		return result, err
+	}
+	return t.Translate(text, from, to)
+}
+
 func (t *Translator) cachePut(key, value string) {
 	t.cacheMu.Lock()
 	t.cache[key] = value
@@ -485,5 +500,97 @@ func (t *Translator) ctxPairsLocked() []ctxPair {
 		}
 	}
 	return out
+}
+
+// ─── Ollama image text translation (no context, simple prompt) ─────────
+
+func buildOllamaImagePrompt(to string) string {
+	langNames := map[string]string{
+		"zh-Hans": "简体中文", "zh-Hant": "繁體中文", "zh": "中文",
+		"en": "English", "ja": "日本語", "ko": "한국어",
+		"fr": "Français", "de": "Deutsch", "es": "Español",
+		"pt": "Português", "ru": "Русский", "ar": "العربية",
+		"th": "ไทย", "vi": "Tiếng Việt",
+	}
+	toName := langNames[to]
+	if toName == "" {
+		toName = to
+	}
+
+	// Chinese targets get a zh-CN prompt for natural localization.
+	if to == "zh-Hans" || to == "zh-Hant" || to == "zh" {
+		return fmt.Sprintf(`你是翻译专家。将图片中的文字翻译为地道的%s。
+
+这些文字可能来自路牌、菜单、按钮、标签、UI界面、标志等。
+
+翻译原则：
+· 保持简洁自然，不添加解释或修饰
+· 英文全大写按正常大小写翻译（如 SUBMIT → 提交）
+· 专有名词、品牌名、缩写保留原文不翻译
+· 日语按中文习惯表达，不要逐字直译
+· 只输出译文，一行，不要任何多余文字`, toName)
+	}
+
+	return fmt.Sprintf(`You are a translation expert. Translate image text into natural %s.
+
+The text may come from signs, menus, buttons, labels, UI elements, etc.
+
+Rules:
+· Keep it concise and natural, no explanations
+· ALL-CAPS English should be translated in normal case
+· Proper nouns, brand names, abbreviations stay in original language
+· Output ONLY the translation, one line, nothing else`, toName)
+}
+
+func (t *Translator) translateOllamaImage(text, from, to string) (string, error) {
+	if t.ollamaUrl == "" {
+		return "", fmt.Errorf("ollama URL not configured")
+	}
+	if t.ollamaModel == "" {
+		return "", fmt.Errorf("ollama model not configured")
+	}
+
+	systemPrompt := buildOllamaImagePrompt(to)
+
+	messages := []ollamaChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: text},
+	}
+
+	reqBody := ollamaChatRequest{
+		Model:       t.ollamaModel,
+		Messages:    messages,
+		Stream:      false,
+		Temperature: 0.1,
+	}
+
+	bodyBytes, _ := json.Marshal(reqBody)
+	endpoint := t.ollamaUrl + "/v1/chat/completions"
+
+	req, _ := http.NewRequest("POST", endpoint, strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var chatResp ollamaChatResponse
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		return "", fmt.Errorf("ollama parse: %w", err)
+	}
+	if len(chatResp.Choices) == 0 {
+		return "", fmt.Errorf("ollama empty response")
+	}
+
+	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	result = strings.Trim(result, "\"'")
+	return result, nil
 }
 

@@ -318,6 +318,9 @@
     if (!parent) return NodeFilter.FILTER_REJECT;
     if (SKIP_TAGS.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
     if (parent.closest && (parent.closest('svg') || parent.closest('math'))) return NodeFilter.FILTER_REJECT;
+    // Skip text nodes inside our own bilingual markup to prevent
+    // MutationObserver feedback loop (re-translating .ot-orig text)
+    if (parent.closest && parent.closest('.ot-bi-wrap')) return NodeFilter.FILTER_REJECT;
     if (shouldSkipEl(parent)) return NodeFilter.FILTER_REJECT;
 
     var text = node.textContent.trim();

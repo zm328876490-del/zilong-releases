@@ -1453,7 +1453,7 @@ func handleImageTranslate(w http.ResponseWriter, r *http.Request) {
 		if len(strings.TrimSpace(w.Text)) < 2 {
 			continue
 		}
-		translated, err := tr.Translate(w.Text, "auto", targetLang)
+		translated, err := tr.TranslateImage(w.Text, "auto", targetLang)
 		if err != nil || translated == "" {
 			translated = w.Text
 		}
