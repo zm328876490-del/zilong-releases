@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
@@ -944,6 +945,9 @@ func isSentenceEndPunct(r rune) bool {
 // whisperServerURL is set at startup after whisper-server is ready.
 var whisperServerURL string
 
+// ocrServerURL is set at startup after the EasyOCR HTTP server is ready.
+var ocrServerURL string
+
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -1281,6 +1285,283 @@ func waitForServer(url string, timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for whisper-server")
 }
 
+// startOCRServer launches the EasyOCR Python HTTP server as a persistent
+// subprocess so the model is loaded once and reused across requests.
+func startOCRServer() (*exec.Cmd, error) {
+	python := findPython()
+	scriptPath := filepath.Join(".", "scripts", "ocr_server.py")
+
+	cmd := exec.Command(python, scriptPath)
+	cmd.Stderr = os.Stderr
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("ocr server stdout pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start OCR server: %w", err)
+	}
+
+	deadline := time.Now().Add(120 * time.Second)
+	buf := make([]byte, 4096)
+	var lineBuf []byte
+	for time.Now().Before(deadline) {
+		n, readErr := stdout.Read(buf)
+		if n > 0 {
+			lineBuf = append(lineBuf, buf[:n]...)
+			for {
+				idx := indexByte(lineBuf, '\n')
+				if idx < 0 {
+					break
+				}
+				line := lineBuf[:idx]
+				lineBuf = lineBuf[idx+1:]
+
+				var evt map[string]interface{}
+				if json.Unmarshal(line, &evt) == nil {
+					if evt["event"] == "ready" {
+						port := 29529
+						if p, ok := evt["port"].(float64); ok {
+							port = int(p)
+						}
+						ocrServerURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+						go func() { io.Copy(io.Discard, stdout) }()
+						return cmd, nil
+					}
+				}
+			}
+		}
+		if readErr != nil {
+			cmd.Process.Kill()
+			return nil, fmt.Errorf("OCR server exited early: %w", readErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	cmd.Process.Kill()
+	return nil, fmt.Errorf("OCR server startup timeout")
+}
+
+func indexByte(data []byte, c byte) int {
+	for i, b := range data {
+		if b == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// ─── Image Translation (OCR + translate + draw) ─────────────────────
+// Uses Windows built-in OCR (no model), existing translation engine,
+// and System.Drawing to render translated text back onto the image.
+
+type imageTranslateReq struct {
+	Image      string `json:"image"`
+	TargetLang string `json:"targetLang"`
+	Engine     string `json:"engine"`
+	OllamaUrl  string `json:"ollamaUrl,omitempty"`
+	OllamaModel string `json:"ollamaModel,omitempty"`
+}
+
+type ocrWord struct {
+	Text string `json:"text"`
+	X    int    `json:"x"`
+	Y    int    `json:"y"`
+	W    int    `json:"w"`
+	H    int    `json:"h"`
+}
+
+type imageTranslateItem struct {
+	Original    string `json:"original"`
+	Translated  string `json:"translated"`
+	X           int    `json:"x"`
+	Y           int    `json:"y"`
+	W           int    `json:"w"`
+	H           int    `json:"h"`
+}
+
+type imageTranslateResp struct {
+	Image string                `json:"image,omitempty"`
+	Items []imageTranslateItem  `json:"items,omitempty"`
+	Error string                `json:"error,omitempty"`
+}
+
+func handleImageTranslate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req imageTranslateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"bad request: %s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	if req.Image == "" {
+		http.Error(w, `{"error":"image is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Write base64 image to temp file
+	imgData, err := base64.StdEncoding.DecodeString(req.Image)
+	if err != nil {
+		http.Error(w, `{"error":"invalid base64"}`, http.StatusBadRequest)
+		return
+	}
+
+	tmpDir := os.TempDir()
+	inPath := filepath.Join(tmpDir, fmt.Sprintf("ocr_in_%d.png", time.Now().UnixNano()))
+	defer os.Remove(inPath)
+
+	if err := os.WriteFile(inPath, imgData, 0644); err != nil {
+		writeImageError(w, "写入临时文件失败: "+err.Error())
+		return
+	}
+
+	// Step 1: OCR
+	ocrWords, err := runOCR(inPath)
+	if err != nil {
+		writeImageError(w, "OCR 识别失败: "+err.Error())
+		return
+	}
+	if len(ocrWords) == 0 {
+		writeImageError(w, "图片中未识别到文字")
+		return
+	}
+
+	// Step 2: Translate each word
+	targetLang := req.TargetLang
+	if targetLang == "" {
+		targetLang = "zh-Hans"
+	}
+	ollamaUrl := strings.TrimRight(req.OllamaUrl, "/")
+	ollamaModel := req.OllamaModel
+	if ollamaModel == "" {
+		ollamaModel = "qwen2.5:7b"
+	}
+
+	tr := translate.New("", "")
+	tr.SetEngine(req.Engine)
+	if req.Engine == "ollama" {
+		tr.SetOllama(ollamaUrl, ollamaModel)
+	}
+
+	var items []imageTranslateItem
+	for _, w := range ocrWords {
+		if len(strings.TrimSpace(w.Text)) < 2 {
+			continue
+		}
+		translated, err := tr.Translate(w.Text, "auto", targetLang)
+		if err != nil || translated == "" {
+			translated = w.Text
+		}
+		items = append(items, imageTranslateItem{
+			Original:   w.Text,
+			Translated: translated,
+			X:          w.X,
+			Y:          w.Y,
+			W:          w.W,
+			H:          w.H,
+		})
+	}
+
+	if len(items) == 0 {
+		writeImageError(w, "无有效文字可翻译")
+		return
+	}
+
+		// Step 3: Return items (browser renders via canvas overlay)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(imageTranslateResp{Items: items})
+}
+
+func writeImageError(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(imageTranslateResp{Error: msg})
+}
+
+// runOCR calls the persistent EasyOCR HTTP server.
+func runOCR(imagePath string) ([]ocrWord, error) {
+	body, _ := json.Marshal(map[string]string{"image": imagePath})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", ocrServerURL+"/ocr", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("OCR server request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		var svrErr struct{ Error string `json:"error"` }
+		body, _ := io.ReadAll(resp.Body)
+		if json.Unmarshal(body, &svrErr) == nil && svrErr.Error != "" {
+			return nil, fmt.Errorf("OCR server: %s", svrErr.Error)
+		}
+		return nil, fmt.Errorf("OCR server returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var words []ocrWord
+	if err := json.NewDecoder(resp.Body).Decode(&words); err != nil {
+		return nil, fmt.Errorf("parse OCR JSON: %w", err)
+	}
+	return words, nil
+}
+
+// findPython returns a working python command.
+func findPython() string {
+	// Check known install paths first (Windows App Execution Alias
+	// "python.exe" in WindowsApps is a store stub, not a real interpreter).
+	candidates := []string{
+		`C:\Users\mingz\AppData\Local\Programs\Python\Python310\python.exe`,
+		"py", // Python Launcher for Windows
+		"python3",
+		"python",
+	}
+	for _, name := range candidates {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		cmd := exec.CommandContext(ctx, name, "--version")
+		if err := cmd.Run(); err == nil {
+			cancel()
+			return name
+		}
+		cancel()
+	}
+	return "python"
+}
+
+// runDraw runs the PowerShell drawing script to render translations on the image.
+func runDraw(inPath, outPath string, items []imageTranslateItem) error {
+	scriptPath := filepath.Join(".", "scripts", "draw.ps1")
+
+	// Write items to temp JSON file (avoids cmd-line encoding issues with CJK)
+	itemsJSON, _ := json.Marshal(items)
+	tmpJSON := inPath + ".json"
+	if err := os.WriteFile(tmpJSON, itemsJSON, 0644); err != nil {
+		return err
+	}
+	defer os.Remove(tmpJSON)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Pass JSON file path as argument to avoid PowerShell command-line encoding issues
+	cmd := exec.CommandContext(ctx, "powershell", "-ExecutionPolicy", "Bypass", "-File", scriptPath, inPath, outPath, tmpJSON)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, string(out))
+	}
+	return nil
+}
+
 // handleFetchSubtitles fetches a YouTube timedtext URL server-side,
 // parses the XML, and returns [{text, start, end}, ...] as JSON.
 func handleFetchSubtitles(w http.ResponseWriter, r *http.Request) {
@@ -1339,9 +1620,18 @@ func main() {
 		defer whisperCmd.Process.Kill()
 	}
 
+	// Start EasyOCR persistent server (avoids reloading model each request)
+	ocrCmd, err := startOCRServer()
+	if err != nil {
+		fmt.Println("[main] OCR server:", err)
+	} else {
+		defer ocrCmd.Process.Kill()
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", handleWebSocket)
 	mux.HandleFunc("/translate/page", handleTranslatePage)
+	mux.HandleFunc("/api/image-translate", handleImageTranslate)
 	mux.HandleFunc("/fetch-subtitles", handleFetchSubtitles)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1363,6 +1653,9 @@ func main() {
 		<-sigCh
 		if whisperCmd != nil {
 			whisperCmd.Process.Kill()
+		}
+		if ocrCmd != nil {
+			ocrCmd.Process.Kill()
 		}
 		os.Exit(0)
 	}()

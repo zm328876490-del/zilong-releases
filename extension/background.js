@@ -43,6 +43,107 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
+// ─── Image Translation (right-click context menu) ──────────────────────
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({
+    id: 'translateImage',
+    title: '翻译图片文字',
+    contexts: ['image'],
+  });
+});
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === 'translateImage') {
+    handleImageTranslate(info.srcUrl, tab.id);
+  }
+});
+
+async function handleImageTranslate(srcUrl, tabId) {
+  try {
+    notifyContent(tabId, { type: 'SHOW_IMAGE_STATUS', srcUrl: srcUrl, text: '图片翻译中...' });
+
+    const result = await chrome.storage.local.get('translationSettings');
+    const settings = result.translationSettings || {};
+
+    // Get base64 image data
+    var base64;
+    if (srcUrl.startsWith('blob:')) {
+      base64 = await captureBlobInTab(tabId, srcUrl);
+    } else if (srcUrl.startsWith('data:')) {
+      var commaIdx = srcUrl.indexOf(',');
+      base64 = commaIdx >= 0 ? srcUrl.substring(commaIdx + 1) : srcUrl;
+    } else {
+      var resp = await fetch(srcUrl);
+      if (!resp.ok) { notifyContent(tabId, { type: 'SHOW_IMAGE_STATUS', srcUrl: srcUrl, text: '图片下载失败' }); return; }
+      var blob = await resp.blob();
+      base64 = await blobToBase64(blob);
+    }
+
+    if (!base64) { notifyContent(tabId, { type: 'SHOW_IMAGE_STATUS', srcUrl: srcUrl, text: '无法获取图片数据' }); return; }
+
+    // Call Go backend OCR pipeline (OCR → translate → draw)
+    notifyContent(tabId, { type: 'SHOW_IMAGE_STATUS', srcUrl: srcUrl, text: 'OCR 识别 + 翻译中...' });
+    var apiResp = await fetch('http://localhost:29527/api/image-translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image: base64,
+        targetLang: settings.targetLang || 'zh-Hans',
+        engine: settings.engine || 'microsoft',
+        ollamaUrl: (settings.ollamaUrl || 'http://localhost:11434').replace(/\/$/, ''),
+        ollamaModel: settings.ollamaModel || 'qwen2.5:7b',
+      }),
+    });
+
+    if (!apiResp.ok) {
+      var errText = ''; try { errText = await apiResp.text(); } catch (_) {}
+      notifyContent(tabId, { type: 'SHOW_IMAGE_STATUS', srcUrl: srcUrl, text: '图片翻译失败: HTTP ' + apiResp.status + (errText ? ' ' + errText.slice(0, 100) : '') });
+      return;
+    }
+
+    var data = await apiResp.json();
+    if (data.error) { notifyContent(tabId, { type: 'SHOW_IMAGE_STATUS', srcUrl: srcUrl, text: '图片翻译失败: ' + data.error }); return; }
+
+    notifyContent(tabId, {
+      type: 'SHOW_IMAGE_RESULT',
+      src: srcUrl,
+      image: data.image || '',
+      items: data.items || [],
+    });
+  } catch (e) {
+    notifyContent(tabId, { type: 'SHOW_IMAGE_STATUS', srcUrl: srcUrl, text: '图片翻译失败: ' + (e.message || '未知错误') });
+  }
+}
+
+function notifyContent(tabId, message) {
+  chrome.tabs.sendMessage(tabId, message).catch(() => {});
+}
+
+function blobToBase64(blob) {
+  return new Promise(function (resolve) {
+    var reader = new FileReader();
+    reader.onloadend = function () {
+      var dataUrl = reader.result;
+      if (typeof dataUrl === 'string') {
+        var idx = dataUrl.indexOf(',');
+        resolve(idx >= 0 ? dataUrl.substring(idx + 1) : null);
+      } else { resolve(null); }
+    };
+    reader.onerror = function () { resolve(null); };
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function captureBlobInTab(tabId, srcUrl) {
+  return new Promise(function (resolve) {
+    chrome.tabs.sendMessage(tabId, { type: 'CAPTURE_BLOB_IMAGE', srcUrl: srcUrl }, function (resp) {
+      resolve(resp ? resp.base64 || null : null);
+    });
+    setTimeout(function () { resolve(null); }, 5000);
+  });
+}
+
 // ─── Keepalive ────────────────────────────────────────────────────────
 
 chrome.runtime.onConnect.addListener((port) => {

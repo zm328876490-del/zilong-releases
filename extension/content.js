@@ -3039,9 +3039,266 @@ function generateSessionId() {
         applyDisplaySettings(message.settings || {});
         sendResponse({ success: true });
         break;
+
+      case 'SHOW_IMAGE_STATUS':
+        if (message.text && message.text.indexOf('失败') !== -1) {
+          hideImageSpinner();
+          showImageToast(message.text);
+        } else if (message.srcUrl) {
+          updateImageSpinner(message.srcUrl, message.text);
+        } else {
+          showImageToast(message.text);
+        }
+        break;
+
+      case 'SHOW_IMAGE_RESULT':
+        hideImageSpinner();
+        showImageResultOverlay(message.src, message.image, message.items);
+        break;
+
+      case 'CAPTURE_BLOB_IMAGE':
+        captureBlobImage(message.srcUrl, sendResponse);
+        return true; // async
     }
     return true; // Keep message channel open for async response
   });
+
+  // ─── Image translation display ──────────────────────────────────────
+
+  var _imageSpinner = null;
+  var _spinnerTarget = null;
+  var _spinnerReposRaf = null;
+
+  function _reposSpinner() {
+    if (!_imageSpinner || !_spinnerTarget) return;
+    var rect = _spinnerTarget.getBoundingClientRect();
+    _imageSpinner.style.left = rect.left + 'px';
+    _imageSpinner.style.top = rect.top + 'px';
+    _imageSpinner.style.width = rect.width + 'px';
+    _imageSpinner.style.height = rect.height + 'px';
+  }
+
+  function _startSpinnerTracking() {
+    if (_spinnerReposRaf) return;
+    var ticking = false;
+    function step() {
+      _spinnerReposRaf = requestAnimationFrame(step);
+      if (!ticking) { ticking = true; _reposSpinner(); ticking = false; }
+    }
+    _spinnerReposRaf = requestAnimationFrame(step);
+  }
+
+  function _stopSpinnerTracking() {
+    if (_spinnerReposRaf) { cancelAnimationFrame(_spinnerReposRaf); _spinnerReposRaf = null; }
+  }
+
+  function updateImageSpinner(srcUrl, text) {
+    if (_imageSpinner) {
+      var label = _imageSpinner.querySelector('.ai-spinner-label');
+      if (label) label.textContent = text || '';
+      return;
+    }
+    hideImageSpinner();
+    var imgs = document.querySelectorAll('img');
+    var target = null;
+    for (var i = 0; i < imgs.length; i++) {
+      if (imgs[i].src === srcUrl || imgs[i].src === srcUrl.replace(/^https?:/, '')) {
+        target = imgs[i];
+        break;
+      }
+    }
+    if (!target) { showImageToast(text); return; }
+    _spinnerTarget = target;
+
+    var rect = target.getBoundingClientRect();
+    var spinner = document.createElement('div');
+    spinner.className = 'ai-image-spinner';
+    spinner.style.cssText =
+      'position:fixed;z-index:2147483645;' +
+      'left:' + rect.left + 'px;top:' + rect.top + 'px;' +
+      'width:' + rect.width + 'px;height:' + rect.height + 'px;' +
+      'background:rgba(0,0,0,0.55);display:flex;flex-direction:column;' +
+      'align-items:center;justify-content:center;pointer-events:none;';
+
+    var ring = document.createElement('div');
+    ring.style.cssText =
+      'width:40px;height:40px;border:3px solid rgba(255,255,255,0.2);' +
+      'border-top-color:#4a9eff;border-radius:50%;animation:ai-spin 0.8s linear infinite;';
+    spinner.appendChild(ring);
+
+    if (text) {
+      var label = document.createElement('div');
+      label.className = 'ai-spinner-label';
+      label.style.cssText = 'color:#fff;font-size:13px;font-family:"Microsoft YaHei",sans-serif;margin-top:10px;' +
+        'text-shadow:0 1px 3px rgba(0,0,0,0.6);';
+      label.textContent = text;
+      spinner.appendChild(label);
+    }
+
+    document.body.appendChild(spinner);
+    _imageSpinner = spinner;
+    _startSpinnerTracking();
+  }
+
+  function hideImageSpinner() {
+    _stopSpinnerTracking();
+    if (_imageSpinner) { _imageSpinner.remove(); _imageSpinner = null; }
+    _spinnerTarget = null;
+  }
+
+  // Inject spin keyframes once
+  if (!document.querySelector('#ai-spin-style')) {
+    var styleEl = document.createElement('style');
+    styleEl.id = 'ai-spin-style';
+    styleEl.textContent =
+      '@keyframes ai-spin { to { transform: rotate(360deg); } }' +
+      '@keyframes ai-fade-in { from { opacity:0; } to { opacity:1; } }';
+    document.head.appendChild(styleEl);
+  }
+
+  function showImageToast(text) {
+    var toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;bottom:100px;left:50%;transform:translateX(-50%);z-index:2147483647;' +
+      'background:rgba(0,0,0,0.85);color:#fff;padding:10px 24px;border-radius:20px;' +
+      'font-size:14px;font-family:sans-serif;pointer-events:none;transition:opacity 0.3s;white-space:nowrap;';
+    toast.textContent = text;
+    document.body.appendChild(toast);
+    setTimeout(function () { toast.style.opacity = '0'; }, 3000);
+    setTimeout(function () { if (toast.parentNode) toast.remove(); }, 3500);
+  }
+
+  function showImageResultOverlay(originalSrc, _imageSrc, items) {
+    var existing = document.querySelector('.ai-image-result-overlay');
+    if (existing) existing.remove();
+
+    // Find the original image element
+    var imgs = document.querySelectorAll('img');
+    var target = null;
+    for (var i = 0; i < imgs.length; i++) {
+      if (imgs[i].src === originalSrc || imgs[i].src === originalSrc.replace(/^https?:/, '')) {
+        target = imgs[i];
+        break;
+      }
+    }
+    if (!target) { showImageToast('图片已翻译，但原图元素未找到'); return; }
+
+    var rect = target.getBoundingClientRect();
+    var natW = target.naturalWidth || target.width;
+    var natH = target.naturalHeight || target.height;
+    var dispW = rect.width;
+    var dispH = rect.height;
+    var sx = dispW / (natW || dispW);
+    var sy = dispH / (natH || dispH);
+
+    // ── Build the overlay ──
+    var wrap = document.createElement('div');
+    wrap.className = 'ai-image-result-overlay';
+    wrap.style.cssText =
+      'position:fixed;z-index:2147483646;' +
+      'left:' + rect.left + 'px;top:' + rect.top + 'px;' +
+      'width:' + dispW + 'px;height:' + dispH + 'px;' +
+      'animation:ai-fade-in 0.25s ease;pointer-events:auto;';
+
+    // Canvas layer — draws translated text on top of original image
+    var canvas = document.createElement('canvas');
+    canvas.width = dispW;
+    canvas.height = dispH;
+    canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;';
+    var ctx = canvas.getContext('2d');
+
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      var x = Math.round(item.x * sx);
+      var y = Math.round(item.y * sy);
+      var w = Math.round(item.w * sx);
+      var h = Math.round(item.h * sy);
+
+      var fontSize = Math.max(9, Math.min(h, 64));
+      ctx.font = fontSize + 'px "Microsoft YaHei", "SimHei", "PingFang SC", sans-serif';
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+
+      // Shadow for readability on any background
+      ctx.shadowColor = 'rgba(0,0,0,0.7)';
+      ctx.shadowBlur = 3;
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 0;
+      ctx.fillStyle = '#fff';
+
+      // Draw translated text, allow slight overflow beyond original rect
+      var maxWidth = Math.max(w * 1.5, dispW - x - 4);
+      var lineHeight = fontSize * 1.25;
+      var words = item.translated.split('');
+      var line = '';
+      var lineY = y;
+
+      for (var ci = 0; ci < words.length; ci++) {
+        var testLine = line + words[ci];
+        if (ctx.measureText(testLine).width > maxWidth && line.length > 0) {
+          ctx.fillText(line, x, lineY);
+          line = words[ci];
+          lineY += lineHeight;
+        } else {
+          line = testLine;
+        }
+      }
+      if (line) {
+        ctx.fillText(line, x, lineY);
+      }
+    }
+    wrap.appendChild(canvas);
+    document.body.appendChild(wrap);
+
+    // ── Position tracking on scroll/resize ──
+    var reposRaf;
+    function reposition() {
+      var r = target.getBoundingClientRect();
+      wrap.style.left = r.left + 'px';
+      wrap.style.top = r.top + 'px';
+      wrap.style.width = r.width + 'px';
+      wrap.style.height = r.height + 'px';
+    }
+    reposRaf = requestAnimationFrame(function tick() {
+      reposition();
+      reposRaf = requestAnimationFrame(tick);
+    });
+
+    function close() {
+      cancelAnimationFrame(reposRaf);
+      wrap.remove();
+      document.removeEventListener('keydown', escHandler);
+    }
+
+    // Esc to close
+    var escHandler = function (e) { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', escHandler);
+
+    // Click outside to close
+    setTimeout(function () {
+      var outsideHandler = function (e) {
+        if (!wrap.contains(e.target) && e.target !== target) { close(); }
+      };
+      document.addEventListener('click', outsideHandler, true);
+      var origClose = close;
+      close = function () {
+        document.removeEventListener('click', outsideHandler, true);
+        origClose();
+      };
+    }, 0);
+  }
+
+  function captureBlobImage(srcUrl, sendResponse) {
+    fetch(srcUrl).then(function (r) { return r.blob(); }).then(function (blob) {
+      var reader = new FileReader();
+      reader.onloadend = function () {
+        var dataUrl = reader.result;
+        var commaIdx = dataUrl.indexOf(',');
+        sendResponse({ base64: commaIdx >= 0 ? dataUrl.substring(commaIdx + 1) : null });
+      };
+      reader.onerror = function () { sendResponse({ base64: null }); };
+      reader.readAsDataURL(blob);
+    }).catch(function () { sendResponse({ base64: null }); });
+  }
 
   // ─── Initialization ───────────────────────────────────────────────
 
