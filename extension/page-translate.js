@@ -1,7 +1,9 @@
-// page-translate.js — Page-level DOM translation via Go backend
+// page-translate.js v2 — Text-node-based page translation via Go backend
+// Walks #text nodes via TreeWalker, translates each node's content,
+// and replaces only textNode.textContent — never touches HTML elements.
+// This approach preserves all page styles, layouts, and functionality.
 (function () {
   'use strict';
-
 
   if (window.__ai_page_translate_loaded__) return;
   window.__ai_page_translate_loaded__ = true;
@@ -10,7 +12,7 @@
   if (!document.getElementById('ot-page-style')) {
     const style = document.createElement('style');
     style.id = 'ot-page-style';
-    style.textContent = '@keyframes ot-spin{to{transform:rotate(360deg)}}';
+    style.textContent = '';
     (document.head || document.documentElement).appendChild(style);
   }
 
@@ -20,12 +22,6 @@
     'TEXTAREA', 'INPUT', 'TEMPLATE', 'OBJECT', 'EMBED',
     'APPLET', 'MAP', 'AREA', 'MATH', 'VIDEO', 'AUDIO', 'LINK', 'META', 'BR',
     'HR', 'WBR', 'HEAD', 'TITLE',
-  ]);
-
-  const INLINE_TAGS = new Set([
-    'SPAN', 'B', 'I', 'U', 'EM', 'STRONG', 'SMALL', 'MARK', 'SUB', 'SUP',
-    'A', 'ABBR', 'CITE', 'CODE', 'DEL', 'DFN', 'INS', 'KBD', 'Q', 'S', 'SAMP',
-    'TIME', 'VAR', 'LABEL', 'FONT',
   ]);
 
   const SKIP_ROLES = new Set([
@@ -65,6 +61,11 @@
 
   const memCache = new Map();
   const idleCB = window.requestIdleCallback || function (cb, opts) { return setTimeout(cb, (opts && opts.timeout) || 100); };
+
+  // Maps original (cleanText.toLowerCase()) → translation, for bilingual toggle
+  const pageTranslationMap = new Map();
+  // Accumulated {src, dst} pairs for snapshot persistence
+  let translatedPairs = [];
 
   // ─── Cache helpers ──────────────────────────────────────────────────
   function cacheGet(key) {
@@ -231,12 +232,12 @@
       // 1. Load page snapshot (instant restore for revisit)
       var snapPairs = await dbLoadPageSnapshot(location.href);
       if (snapPairs.length > 0) {
-        snapPairs.forEach(function (r) { if (r.src && r.dst) cacheSet(r.src, r.dst); });
+        snapPairs.forEach(function (r) { if (r.src && r.dst) { cacheSet(r.src.toLowerCase(), r.dst); pageTranslationMap.set(r.src.toLowerCase(), r.dst); } });
       }
       // 2. Load domain phrases (cross-page reuse)
       var rows = await dbExportDomain(host);
       rows.sort(function (a, b) { return b.hits - a.hits; });
-      rows.forEach(function (r) { if (r.src && r.dst && !memCache.has(r.src)) cacheSet(r.src, r.dst); });
+      rows.forEach(function (r) { if (r.src && r.dst && !memCache.has(r.src.toLowerCase())) cacheSet(r.src.toLowerCase(), r.dst); });
     } catch (_) {}
     dbReady = true;
   }
@@ -245,9 +246,6 @@
   function isVisible(el) {
     var style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
-    // NOTE: 不检查 opacity — 元素可能正在 fade-in 动画中 (opacity 0→1)，
-    // 此时已有完整 DOM 内容，应当翻译。CSS transition 不会触发 mutation，
-    // 等动画结束再扫会永久错过 (Ozon Vue Portal 下拉菜单根因)。
     var rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return false;
     return true;
@@ -259,18 +257,10 @@
     if (el.getAttribute('aria-hidden') === 'true') return true;
     if (el.getAttribute('translate') === 'no') return true;
     if (el.classList.contains('notranslate')) return true;
-    if (el.hasAttribute('data-ot-translated')) return true;
-    if (el._otTranslated) return true;
     if (el.isContentEditable) return true;
     var role = el.getAttribute('role');
     if (role && SKIP_ROLES.has(role)) return true;
     if (el.closest('[contenteditable="true"]')) return true;
-    return false;
-  }
-
-  function isSubtreeSkippable(el) {
-    if (el.hasAttribute && el.hasAttribute('data-ot-translated')) return true;
-    if (el.closest && (el.closest('svg') || el.closest('math') || el.closest('[data-ot-translated]'))) return true;
     return false;
   }
 
@@ -321,118 +311,130 @@
     return _pageIsJapanese;
   }
 
-  var debugLeafLog = 0;
-  function isTranslatableLeaf(el) {
-    // Prevent re-scanning already-queued elements
-    if (el._otDone) return false;
+  // ─── Text Node Walker ───────────────────────────────────────────────
+  // TreeWalker filter: accepts text nodes that need translation
+  function acceptTextNode(node) {
+    var parent = node.parentElement;
+    if (!parent) return NodeFilter.FILTER_REJECT;
+    if (SKIP_TAGS.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
+    if (parent.closest && (parent.closest('svg') || parent.closest('math'))) return NodeFilter.FILTER_REJECT;
+    if (shouldSkipEl(parent)) return NodeFilter.FILTER_REJECT;
 
-    if (!isVisible(el)) {
-      return false;
-    }
-
-    // Collect direct text (excluding deeply nested block elements)
-    var text = '', hasBlockChild = false, interactiveChildren = 0;
-    for (var ci = 0; ci < el.childNodes.length; ci++) {
-      var child = el.childNodes[ci];
-      if (child.nodeType === Node.TEXT_NODE) {
-        text += child.textContent;
-      } else if (child.nodeType === Node.ELEMENT_NODE) {
-        if (child.tagName === 'A' || child.tagName === 'BUTTON') {
-          interactiveChildren++;
-          text += child.textContent;
-        } else if (INLINE_TAGS.has(child.tagName)) {
-          text += child.textContent;
-        } else if (!SKIP_TAGS.has(child.tagName)) {
-          hasBlockChild = true;
-        }
-      }
-    }
-    text = text.trim();
-    if (text.length < 2) {
-      return false;
-    }
-
-    // 多个 <a>/<button> 兄弟 → 该容器是导航/菜单组，不能整体当 leaf 翻译
-    // (textContent=translation 会摧毁所有链接结构、href 和事件绑定，
-    //  Ozon 下拉菜单 vue-portal-target 就栽在这里 — 翻译完点不开)
-    if (interactiveChildren >= 2) {
-      return false;
-    }
+    var text = node.textContent.trim();
+    if (text.length < 2) return NodeFilter.FILTER_REJECT;
 
     // Pure numeric / emoji / symbols
     var stripped = text.replace(/[\s\d\p{P}\p{S}]+/gu, '');
-    if (stripped.length < 1) {
-      return false;
-    }
+    if (stripped.length < 1) return NodeFilter.FILTER_REJECT;
 
     // Skip if text is already in target language
-    if (isTargetLanguage(stripped)) {
-      return false;
-    }
+    if (isTargetLanguage(stripped)) return NodeFilter.FILTER_REJECT;
 
-    // Mark mixed-content elements (text + block children like images/icons)
-    // so safeReplace knows to preserve non-text children
-    if (hasBlockChild) {
-      el._otMixed = true;
-      el._otDirectText = text;
-    }
-
-    return true;
+    return NodeFilter.FILTER_ACCEPT;
   }
 
-  // ─── Scan DOM ────────────────────────────────────────────────────────
-  var scanVisited = 0, scanSkipped = 0, scanLeaf = 0, scanRecurse = 0;
-  function scanDOM(root, _inHidden) {
-    if (!root || !root.tagName) return;
-    if (shouldSkipEl(root)) { scanVisited++; scanSkipped++; return; }
-    if (isSubtreeSkippable(root)) { scanVisited++; scanSkipped++; return; }
+  // Group contiguous sibling text nodes under the same parent
+  function groupSiblingTextNodes(textNodes) {
+    var groups = [];
+    var current = null;
 
-    scanVisited++;
-    if (isTranslatableLeaf(root)) {
-      scanLeaf++;
-      root._otDone = true;
-      enqueue(root);
-      // Even if it's a leaf, it might have a shadowRoot
-    }
+    for (var i = 0; i < textNodes.length; i++) {
+      var tn = textNodes[i];
+      var parent = tn.parentElement;
 
-    // Shadow DOM support
-    if (root.shadowRoot) {
-      scanDOM(root.shadowRoot, _inHidden);
-    }
-
-    var children = root.children;
-    if (!children || children.length === 0) return;
-    scanRecurse++;
-    for (var i = 0; i < children.length; i++) {
-      var child = children[i];
-      if (!child.tagName) continue;
-      if (shouldSkipEl(child) || isSubtreeSkippable(child)) { scanVisited++; scanSkipped++; continue; }
-      scanVisited++;
-      if (isTranslatableLeaf(child)) {
-        scanLeaf++;
-        child._otDone = true;
-        enqueue(child);
+      if (current && parent === current.parent) {
+        // Check if tn is the direct nextSibling of the group's last node
+        var lastNode = current.nodes[current.nodes.length - 1];
+        if (lastNode.nextSibling === tn) {
+          current.nodes.push(tn);
+          current.text += tn.textContent;
+          continue;
+        }
       }
-      // Always recurse into children unless skippable, to ensure we find all nested text
-      if (child.children && child.children.length > 0) {
-        scanRecurse++;
-        scanDOM(child, _inHidden);
-      } else if (child.shadowRoot) {
-        scanDOM(child.shadowRoot, _inHidden);
+
+      // Start a new group
+      if (current) {
+        current.cleanText = current.text.trim();
+        current.key = current.cleanText.toLowerCase();
+        current.id = current.parent.tagName + '|' + current.key;
+        groups.push(current);
       }
+      current = {
+        parent: parent,
+        nodes: [tn],
+        text: tn.textContent,
+        cleanText: null,
+        key: null,
+        id: null,
+        _otRetries: 0
+      };
+    }
+    if (current) {
+      current.cleanText = current.text.trim();
+      current.key = current.cleanText.toLowerCase();
+      current.id = current.parent.tagName + '|' + current.key;
+      groups.push(current);
+    }
+    return groups;
+  }
+
+  // ─── Scan: TreeWalker → groups → enqueue ────────────────────────────
+  function scanTextNodes(root, opts) {
+    if (!root || !root.nodeType) return;
+
+    var skipPageMarked = !(opts && opts.isMutation);
+
+    var textNodes = [];
+    try {
+      var walker = document.createTreeWalker(
+        root,
+        NodeFilter.SHOW_TEXT,
+        { acceptNode: acceptTextNode },
+        false
+      );
+
+      var node;
+      while ((node = walker.nextNode())) {
+        if (skipPageMarked && node.parentElement && node.parentElement.hasAttribute('data-ot-page')) continue;
+        textNodes.push(node);
+      }
+    } catch (_) { return; }
+
+    // Handle shadow DOM: TreeWalker doesn't enter shadow roots.
+    // Recurse into shadowRoot on the current root and on any child
+    // that hosts a shadow tree, so deeply nested shadow DOM is covered.
+    function scanShadow(rootEl) {
+      if (rootEl.shadowRoot) {
+        scanTextNodes(rootEl.shadowRoot, opts);
+      }
+      if (rootEl.children) {
+        for (var i = 0; i < rootEl.children.length; i++) {
+          scanShadow(rootEl.children[i]);
+        }
+      }
+    }
+    scanShadow(root);
+
+    var groups = groupSiblingTextNodes(textNodes);
+    for (var k = 0; k < groups.length; k++) {
+      enqueueGroup(groups[k]);
     }
   }
 
-  function enqueue(el) {
-    if (el._otQueued) return;
-    el._otQueued = true;
-    el._otRetries = 0;
+  function enqueueGroup(group) {
+    if (!group.cleanText || group.cleanText.length < 2) return;
+    // Note: do NOT skip parents with data-ot-page here.
+    // scanTextNodes already filters them for non-mutation scans.
+    // Mutation scans intentionally allow new text nodes under marked parents.
 
-    var rect = el.getBoundingClientRect();
-    if (rect.top >= 0 && rect.bottom <= window.innerHeight) {
-      viewQ.push(el);
+    // Mark parent to prevent re-scanning (idempotent)
+    group.parent.setAttribute('data-ot-page', '');
+
+    var rect = group.parent.getBoundingClientRect();
+    if (rect.top >= -300 && rect.bottom <= window.innerHeight + 300) {
+      viewQ.push(group);
     } else {
-      bgQ.push(el);
+      bgQ.push(group);
     }
     pendingCount++;
   }
@@ -481,50 +483,67 @@
   function takeBatch(q, maxCount) {
     var batch = [], chars = 0;
     while (q.length > 0 && batch.length < maxCount && chars < CHAR_LIMIT) {
-      var el = q[0];
-      if (!el.isConnected || el._otTranslated) { q.shift(); continue; }
+      var g = q[0];
+      if (!g.parent.isConnected) { q.shift(); pendingCount--; continue; }
+      // Verify text nodes are still attached
+      var detached = false;
+      for (var ni = 0; ni < g.nodes.length; ni++) {
+        if (g.nodes[ni].parentNode !== g.parent) { detached = true; break; }
+      }
+      if (detached) { q.shift(); pendingCount--; continue; }
       q.shift();
-      batch.push(el);
-      chars += (el.textContent || '').length;
+      batch.push(g);
+      chars += g.cleanText.length;
     }
     return batch;
   }
 
   // ─── Translate ───────────────────────────────────────────────────────
-  async function translateBatch(leaves) {
-    // Filter dead / already-translated nodes
+  async function translateBatch(groups) {
+    // Filter dead groups
     var valid = [];
-    for (var i = 0; i < leaves.length; i++) {
-      if (leaves[i].isConnected && !leaves[i]._otTranslated) valid.push(leaves[i]);
+    for (var i = 0; i < groups.length; i++) {
+      var g = groups[i];
+      if (!g.parent.isConnected) continue;
+      var allAttached = true;
+      for (var ni = 0; ni < g.nodes.length; ni++) {
+        if (g.nodes[ni].parentNode !== g.parent) { allAttached = false; break; }
+      }
+      if (!allAttached) continue;
+      valid.push(g);
     }
     if (!valid.length) return;
 
     // ── L0: local dictionary ────────────────────────────────────────────
     var dict = window.__ai_dict;
-    var texts = valid.map(function (el) { return (el.textContent || '').trim(); });
     var needModel = [];
     for (var j = 0; j < valid.length; j++) {
-      var key = texts[j].toLowerCase();
+      var group = valid[j];
+      var ck = group.key;
       // Check dictionary first (sub-ms, no network)
-      var dictHit = dict && dict.localTranslate(texts[j]);
+      var dictHit = dict && dict.localTranslate(group.cleanText);
       if (dictHit) {
         var pp = dict.postProcess(dictHit);
-        cacheSet(key, pp);
-        applyTranslation(valid[j], pp);
+        cacheSet(ck, pp);
+        pageTranslationMap.set(ck, pp);
+        translatedPairs.push({ src: group.cleanText, dst: pp });
+        applyGroupTranslation(group, pp);
         continue;
       }
       // ── L1: memory cache ──────────────────────────────────────────────
-      var hit = cacheGet(key);
+      var hit = cacheGet(ck);
       if (hit !== undefined) {
-        applyTranslation(valid[j], hit);
+        pageTranslationMap.set(ck, hit);
+        translatedPairs.push({ src: group.cleanText, dst: hit });
+        applyGroupTranslation(group, hit);
       } else {
-        needModel.push(valid[j]);
+        needModel.push(group);
       }
     }
     if (!needModel.length) return;
 
     // ── L2: IndexedDB domain phrases ──────────────────────────────────
-    var needTexts = needModel.map(function (el) { return (el.textContent || '').trim(); });
+    var needTexts = needModel.map(function (g) { return g.cleanText; });
     var uniqueTexts = [];
     var seenTexts = {};
     for (var ui = 0; ui < needTexts.length; ui++) {
@@ -538,21 +557,22 @@
           var t = needTexts[k];
           if (dbHits.has(t)) {
             var dst = dbHits.get(t);
-            cacheSet(t.toLowerCase(), dst);
-            applyTranslation(needModel[k], dst);
+            var dk = t.toLowerCase();
+            cacheSet(dk, dst);
+            pageTranslationMap.set(dk, dst);
+            translatedPairs.push({ src: t, dst: dst });
+            applyGroupTranslation(needModel[k], dst);
           } else {
             stillNeed.push(needModel[k]);
           }
         }
         needModel = stillNeed;
-        needTexts = needModel.map(function (el) { return (el.textContent || '').trim(); });
+        needTexts = needModel.map(function (g) { return g.cleanText; });
       }
     }
     if (!needModel.length) return;
 
     // ── L3: translation API ───────────────────────────────────────────
-    needModel.forEach(function (el) { addSpinner(el); });
-
     var results;
     try {
       results = await fetchTranslationBatch(needTexts);
@@ -560,22 +580,23 @@
       results = new Array(needTexts.length).fill('');
     }
 
-    needModel.forEach(function (el) { removeSpinner(el); });
-
     if (!results || !Array.isArray(results)) {
-      needModel.forEach(function (el) { requeueOrGiveUp(el); });
+      needModel.forEach(function (g) { requeueOrGiveUp(g); });
       return;
     }
 
     var toSave = [];
     for (var mi = 0; mi < needModel.length; mi++) {
-      var el = needModel[mi];
+      var mg = needModel[mi];
       var translation = results[mi] || '';
       var src = needTexts[mi];
-      if (!translation) { requeueOrGiveUp(el); continue; }
-      cacheSet(src.toLowerCase(), translation);
+      if (!translation) { requeueOrGiveUp(mg); continue; }
+      var sk = src.toLowerCase();
+      cacheSet(sk, translation);
+      pageTranslationMap.set(sk, translation);
       toSave.push({ src: src, dst: translation });
-      applyTranslation(el, translation);
+      translatedPairs.push({ src: src, dst: translation });
+      applyGroupTranslation(mg, translation);
     }
 
     if (toSave.length > 0) {
@@ -625,193 +646,163 @@
     });
   }
 
-  function requeueOrGiveUp(el) {
-    removeSpinner(el);
-    el._otRetries = (el._otRetries || 0) + 1;
-    if (el._otRetries >= MAX_RETRIES) {
-      el._otDone = false;
-      el._otQueued = false;
+  function requeueOrGiveUp(group) {
+    group._otRetries = (group._otRetries || 0) + 1;
+    if (group._otRetries >= MAX_RETRIES) {
       pendingCount--;
       return;
     }
-    viewQ.push(el);
-  }
-
-  // ─── Spinner ─────────────────────────────────────────────────────────
-  function addSpinner(el) {
-    if (el.querySelector && el.querySelector('.ot-sp')) return;
-    var s = document.createElement('span');
-    s.className = 'ot-sp';
-    s.style.cssText = 'display:inline-block;width:9px;height:9px;margin-left:3px;'
-      + 'border:2px solid #fce7f3;border-top-color:#e83e8c;border-radius:50%;'
-      + 'animation:ot-spin .6s linear infinite;vertical-align:middle;flex-shrink:0';
-    el.appendChild(s);
-  }
-
-  function removeSpinner(el) {
-    if (el.querySelector) {
-      var s = el.querySelector('.ot-sp');
-      if (s) s.remove();
-    }
+    viewQ.push(group);
   }
 
   // ─── Apply Translation ──────────────────────────────────────────────
-  function applyTranslation(el, translation) {
-    if (!el.isConnected || el._otTranslated) return;
-    el.setAttribute('data-ot-translated', '');
-    el.setAttribute('data-ot-original', el._otDirectText || el.textContent.trim());
-    el.setAttribute('data-ot-translation', translation);
-    el._otTranslated = true;
-    pendingCount--;
-    translatedCount++;
-    safeReplace(el, translation);
+
+  // Store original→translation pair on the parent element as JSON,
+  // so bilingual toggle can reconstruct wraps even after monolingual
+  // replacement has overwritten the original text nodes.
+  function recordPair(parent, original, translation) {
+    var existing = parent.getAttribute('data-ot-pairs');
+    var pairs = [];
+    try { if (existing) pairs = JSON.parse(existing); } catch (_) {}
+    pairs.push({ o: original, t: translation });
+    if (pairs.length > 50) pairs = pairs.slice(-50);
+    parent.setAttribute('data-ot-pairs', JSON.stringify(pairs));
   }
 
-  function safeReplace(el, translation) {
-    var original = el.getAttribute('data-ot-original') || el.textContent.trim();
-
-    // Mixed-content elements (text + block children like img/svg):
-    // only replace text portions, preserve non-text children in place.
-    if (el._otMixed) {
-      // Collect block-level children to preserve (img, svg, etc.)
-      var preserved = [];
-      for (var ci = 0; ci < el.childNodes.length; ci++) {
-        var c = el.childNodes[ci];
-        if (c.nodeType === Node.ELEMENT_NODE && !INLINE_TAGS.has(c.tagName) && !SKIP_TAGS.has(c.tagName)) {
-          preserved.push(c);
-        }
-      }
-
-      if (!bilingualMode) {
-        // Replace text content of first text-bearing node, clear others
-        var found = false;
-        for (var ci2 = 0; ci2 < el.childNodes.length; ci2++) {
-          var c2 = el.childNodes[ci2];
-          if (c2.nodeType === Node.TEXT_NODE) {
-            if (!found) { c2.textContent = translation; found = true; }
-            else { c2.textContent = ''; }
-          } else if (c2.nodeType === Node.ELEMENT_NODE && INLINE_TAGS.has(c2.tagName)) {
-            if (!found) { c2.textContent = translation; found = true; }
-            else { c2.textContent = ''; }
-          }
-        }
-        if (!found) {
-          el.insertBefore(document.createTextNode(translation), el.firstChild);
-        }
-        return;
-      }
-
-      // Bilingual mode for mixed elements
-      el.textContent = '';
-      var frag = document.createDocumentFragment();
-      var origSpan = document.createElement('span');
-      origSpan.className = 'ot-orig';
-      origSpan.textContent = original;
-      var transSpan = document.createElement('span');
-      transSpan.className = 'ot-trans';
-      transSpan.textContent = translation;
-      var wrap = document.createElement('span');
-      wrap.className = 'ot-bi-wrap';
-      wrap.appendChild(transSpan);
-      wrap.appendChild(origSpan);
-      frag.appendChild(wrap);
-      el.appendChild(frag);
-      for (var pi = 0; pi < preserved.length; pi++) {
-        el.appendChild(preserved[pi]);
-      }
-      return;
+  function applyGroupTranslation(group, translation) {
+    if (!group.parent.isConnected) return;
+    for (var i = 0; i < group.nodes.length; i++) {
+      if (group.nodes[i].parentNode !== group.parent) return;
     }
+
+    pendingCount--;
+    translatedCount++;
+
+    recordPair(group.parent, group.cleanText, translation);
 
     if (!bilingualMode) {
-      el.textContent = translation;
-      return;
+      applyMonolingual(group, translation);
+    } else {
+      applyBilingual(group, translation);
     }
+  }
 
-    // Build bilingual DOM: .ot-orig + .ot-trans inside .ot-bi-wrap
-    var frag = document.createDocumentFragment();
-    var origSpan = document.createElement('span');
-    origSpan.className = 'ot-orig';
-    origSpan.textContent = original;
+  function applyMonolingual(group, translation) {
+    // Replace text content of the first text node, clear the rest
+    group.nodes[0].textContent = translation;
+    for (var i = 1; i < group.nodes.length; i++) {
+      group.nodes[i].textContent = '';
+    }
+  }
+
+  function applyBilingual(group, translation) {
+    var original = group.cleanText;
+
+    var wrap = document.createElement('span');
+    wrap.className = 'ot-bi-wrap';
+    wrap.setAttribute('data-ot-original', original);
+    wrap.setAttribute('data-ot-translation', translation);
 
     var transSpan = document.createElement('span');
     transSpan.className = 'ot-trans';
     transSpan.textContent = translation;
 
-    var wrap = document.createElement('span');
-    wrap.className = 'ot-bi-wrap';
+    var origSpan = document.createElement('span');
+    origSpan.className = 'ot-orig';
+    origSpan.textContent = original;
+
     wrap.appendChild(transSpan);
     wrap.appendChild(origSpan);
 
-    frag.appendChild(wrap);
+    // Replace first text node with the wrapper, clear remaining
+    var firstNode = group.nodes[0];
+    try {
+      firstNode.parentNode.replaceChild(wrap, firstNode);
+    } catch (_) { return; }
 
-    // Preserve any non-text children (images, etc.)
-    var nonTextChildren = [];
-    for (var ci = 0; ci < el.childNodes.length; ci++) {
-      var child = el.childNodes[ci];
-      if (child.nodeType === Node.ELEMENT_NODE && !INLINE_TAGS.has(child.tagName)) {
-        nonTextChildren.push(child);
-      }
-    }
-
-    el.textContent = '';
-    el.appendChild(frag);
-    for (var ni = 0; ni < nonTextChildren.length; ni++) {
-      el.appendChild(nonTextChildren[ni]);
+    for (var i = 1; i < group.nodes.length; i++) {
+      group.nodes[i].textContent = '';
     }
   }
 
   // ─── Bilingual toggle ───────────────────────────────────────────────
   function refreshBilingualRender() {
-    var nodes = document.querySelectorAll('[data-ot-translated]');
-    nodes.forEach(function (el) {
-      var original = el.getAttribute('data-ot-original');
-      var translation = el.getAttribute('data-ot-translation');
-      if (!original || !translation) return;
-
-      // Remove existing bilingual wraps
-      var wraps = el.querySelectorAll('.ot-bi-wrap');
-      wraps.forEach(function (w) { w.remove(); });
-
-      if (!bilingualMode) {
-        el.textContent = translation;
-      } else {
-        el.textContent = '';
-        var origSpan = document.createElement('span');
-        origSpan.className = 'ot-orig';
-        origSpan.textContent = original;
-
-        var transSpan = document.createElement('span');
-        transSpan.className = 'ot-trans';
-        transSpan.textContent = translation;
-
-        var wrap = document.createElement('span');
-        wrap.className = 'ot-bi-wrap';
-        wrap.appendChild(transSpan);
-        wrap.appendChild(origSpan);
-
-        el.appendChild(wrap);
+    if (bilingualMode) {
+      // Rebuild bilingual wraps from pageTranslationMap
+      var parents = document.querySelectorAll('[data-ot-page]');
+      for (var i = 0; i < parents.length; i++) {
+        rebuildBilingualForParent(parents[i]);
       }
-    });
+    } else {
+      // Collapse all bilingual wraps back to plain text nodes
+      var wraps = document.querySelectorAll('.ot-bi-wrap');
+      for (var j = wraps.length - 1; j >= 0; j--) {
+        var wrap = wraps[j];
+        var trans = wrap.querySelector('.ot-trans');
+        var text = trans ? trans.textContent : '';
+        try {
+          wrap.parentNode.replaceChild(document.createTextNode(text), wrap);
+        } catch (_) {}
+      }
+    }
+  }
+
+  function rebuildBilingualForParent(parent) {
+    var existing = parent.getAttribute('data-ot-pairs');
+    var pairs = [];
+    try { if (existing) pairs = JSON.parse(existing); } catch (_) {}
+    if (!pairs.length) return;
+
+    // Build lookup: translation text (lower) → original text
+    var transToOrig = {};
+    for (var pi = 0; pi < pairs.length; pi++) {
+      transToOrig[pairs[pi].t.toLowerCase()] = pairs[pi].o;
+    }
+
+    // Walk text nodes under this parent, match translation to original, create wraps
+    var walker = document.createTreeWalker(parent, NodeFilter.SHOW_TEXT, null, false);
+    var node;
+    while ((node = walker.nextNode())) {
+      var text = node.textContent.trim();
+      if (!text || text.length < 2) continue;
+      // Skip text nodes already inside an existing bilingual wrap
+      if (node.parentElement && node.parentElement.classList.contains('ot-bi-wrap')) continue;
+
+      var original = transToOrig[text.toLowerCase()];
+      if (!original) continue;
+
+      var wrap = document.createElement('span');
+      wrap.className = 'ot-bi-wrap';
+      wrap.setAttribute('data-ot-original', original);
+      wrap.setAttribute('data-ot-translation', text);
+
+      var transSpan = document.createElement('span');
+      transSpan.className = 'ot-trans';
+      transSpan.textContent = text;
+
+      var origSpan = document.createElement('span');
+      origSpan.className = 'ot-orig';
+      origSpan.textContent = original;
+
+      wrap.appendChild(transSpan);
+      wrap.appendChild(origSpan);
+
+      try {
+        node.parentNode.replaceChild(wrap, node);
+      } catch (_) {}
+    }
   }
 
   // ─── Snapshot save ──────────────────────────────────────────────────
   async function saveSnapshot() {
     if (!snapshotDirty || translatedCount === 0) return;
     snapshotDirty = false;
-    var pairs = [];
-    document.querySelectorAll('[data-ot-translated]').forEach(function (el) {
-      var src = el.getAttribute('data-ot-original');
-      var dst = el.getAttribute('data-ot-translation');
-      if (src && dst) pairs.push({ src: src, dst: dst });
-    });
-    if (pairs.length > 0) {
-      try { await dbSavePageSnapshot(host, location.href, pairs); } catch (_) {}
+    if (translatedPairs.length > 0) {
+      try { await dbSavePageSnapshot(host, location.href, translatedPairs); } catch (_) {}
     }
   }
 
   // ─── IntersectionObserver — 兜底：节点真正可见时再扫一次 ─────────────
-  // 用途：DOM 已插入但 isVisible=false (display:none / 0×0 / 折叠容器)，
-  //       当节点进入视口或尺寸变非零时强制重扫。覆盖 portal / 折叠菜单 / lazy DOM。
   var visibilityObserver = null;
   function ensureVisibilityObserver() {
     if (visibilityObserver || typeof IntersectionObserver === 'undefined') return visibilityObserver;
@@ -823,9 +814,7 @@
           var t = ent.target;
           visibilityObserver.unobserve(t);
           if (t._otVisWatch) t._otVisWatch = false;
-          // 节点已在视口内，清掉 _otDone 标记给子树一次重扫机会
-          // (旧 scan 可能因 isVisible=false 提前 return，子节点根本没遍历到)
-          scanDOM(t);
+          scanTextNodes(t, { isMutation: true });
         }
       }
     }, { root: null, threshold: 0.01 });
@@ -861,15 +850,13 @@
             for (var j = 0; j < m.addedNodes.length; j++) {
               var node = m.addedNodes[j];
               if (node.nodeType !== Node.ELEMENT_NODE) continue;
-              scanDOM(node);
-              // 兜底：节点可能此刻还隐藏 (动画/折叠/portal target 空壳)，
-              // 注册 IntersectionObserver，等真正进入视口再扫一次。
-              if (!node._otDone) watchVisibility(node);
+              scanTextNodes(node, { isMutation: true });
+              // Register IntersectionObserver for elements that might be hidden now
+              watchVisibility(node);
             }
           } else if (m.type === 'attributes' && visAttrs.has(m.attributeName)) {
             if (m.target.nodeType === Node.ELEMENT_NODE && isVisible(m.target)) {
-              // When a container becomes visible, scan it and its children
-              scanDOM(m.target);
+              scanTextNodes(m.target, { isMutation: true });
             }
           }
         }
@@ -892,13 +879,13 @@
       requestAnimationFrame(function () {
         var promoted = [], remaining = [];
         for (var i = 0; i < bgQ.length; i++) {
-          var el = bgQ[i];
-          if (!el.isConnected) { pendingCount--; continue; }
-          var rect = el.getBoundingClientRect();
-          if (rect.top >= 0 && rect.bottom <= window.innerHeight) {
-            promoted.push(el);
+          var g = bgQ[i];
+          if (!g.parent.isConnected) { pendingCount--; continue; }
+          var rect = g.parent.getBoundingClientRect();
+          if (rect.top >= -300 && rect.bottom <= window.innerHeight + 300) {
+            promoted.push(g);
           } else {
-            remaining.push(el);
+            remaining.push(g);
           }
         }
         bgQ = remaining;
@@ -912,7 +899,7 @@
   function start() {
     if (isActive) return;
     isActive = true;
-    scanDOM(document.body);
+    scanTextNodes(document.body);
     startPump();
     watchMutations();
     watchScroll();
@@ -948,6 +935,27 @@
 
   function clearPageCache() {
     memCache.clear();
+    pageTranslationMap.clear();
+    translatedPairs = [];
+    translatedCount = 0;
+
+    // Restore original text: remove all bilingual wraps
+    var wraps = document.querySelectorAll('.ot-bi-wrap');
+    for (var i = wraps.length - 1; i >= 0; i--) {
+      var wrap = wraps[i];
+      var orig = wrap.getAttribute('data-ot-original') || '';
+      try {
+        wrap.parentNode.replaceChild(document.createTextNode(orig), wrap);
+      } catch (_) {}
+    }
+
+    // Remove page markers and pair data
+    var markers = document.querySelectorAll('[data-ot-page]');
+    for (var j = 0; j < markers.length; j++) {
+      markers[j].removeAttribute('data-ot-page');
+      markers[j].removeAttribute('data-ot-pairs');
+    }
+
     openDB().then(function (db) {
       var tx = db.transaction([SNAP_STORE, STORE], 'readwrite');
       tx.objectStore(SNAP_STORE).clear();
@@ -995,7 +1003,7 @@
 
   function resumeFromVideo() {
     pausedByVideo = false;
-    scanDOM(document.body);
+    scanTextNodes(document.body);
     startPump();
     showToast('视频翻译已结束，页面翻译已恢复');
   }
