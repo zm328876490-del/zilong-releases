@@ -352,7 +352,7 @@ function generateSessionId() {
   // ─── Bookmark Tab (right edge, like a bookmark peeking out) ─────────
   const fab = document.createElement('div');
   fab.id = '__ai_fab__';
-  fab.title = 'AI 翻译';
+  fab.title = 'AI 语音配音';
   fab.innerHTML = `
     <style>
       #__ai_fab__ {
@@ -517,6 +517,19 @@ function generateSessionId() {
           ',resizable=1,scrollbars=0,status=0,toolbar=0,menubar=0,location=0');
         if (pw) window.__ai_preopened_window__ = pw;
       }
+
+      // Prime video playback while user gesture is still active.
+      // Muted autoplay is allowed in all browsers; this ensures the
+      // video is already playing by the time ASR capture starts, even
+      // when later play() calls (outside the gesture window) would be
+      // blocked by autoplay policy.
+      if (video.paused) {
+        window.__ai__.preprimedVideo = video;
+        window.__ai__.preprimedOriginalMuted = video.muted;
+        video.muted = true;
+        video.play().catch(function () {});
+      }
+
       start();
     }
   });
@@ -536,7 +549,240 @@ function generateSessionId() {
     }
   };
 
-  const contentDiv = overlay.querySelector('#__subtitle_content__');
+  // ─── Per-Video FAB System ───────────────────────────────────────────
+  // Each qualifying <video> on the page gets a small round FAB at its
+  // bottom-center, shown on hover. Hover detection uses mouseenter/
+  // mouseleave directly on the <video> element — no overlay, so native
+  // video controls (play/pause/seek/volume) are never blocked.
+  // The global FAB at the right edge stays as fallback for iframe
+  // videos (YouTube) and pages where per-video detection fails.
+
+  var _perVideoFabVideos = [];   // video elements that have FABs
+  var _fabRafId = null;         // single RAF loop for all per-video FABs
+  var _fabScanTimer = null;     // periodic poll for new/changed videos
+  var _fabObserver = null;      // MutationObserver for video additions
+  var FAB_MIN_AREA = 200 * 150; // ~200×150 px minimum
+  var FAB_SIZE = 32;            // diameter in px
+  var FAB_BOTTOM_OFFSET = 8;    // px gap from bottom of video rect
+
+  function injectPerVideoFABStyles() {
+    if (document.getElementById('__ai_video_fab_styles__')) return;
+    var style = document.createElement('style');
+    style.id = '__ai_video_fab_styles__';
+    style.textContent = [
+      '.__ai_video_fab_btn__ {',
+      'position:fixed !important;',
+      'z-index:2147483646 !important;',
+      'width:32px !important;',
+      'height:32px !important;',
+      'border-radius:50% !important;',
+      'background:linear-gradient(135deg,#7c3aed,#6d28d9) !important;',
+      'box-shadow:0 2px 10px rgba(124,58,237,0.5) !important;',
+      'display:none !important;',
+      'align-items:center !important;',
+      'justify-content:center !important;',
+      'cursor:pointer !important;',
+      'pointer-events:all !important;',
+      'transition:transform 0.15s,box-shadow 0.15s !important;',
+      'user-select:none !important;',
+      '}',
+      '.__ai_video_fab_btn__:hover {',
+      'transform:scale(1.15) !important;',
+      'box-shadow:0 4px 18px rgba(124,58,237,0.7) !important;',
+      '}'
+    ].join('\n');
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function createPerVideoFAB(video) {
+    if (!video || !video.isConnected) return;
+    if (video.__ai_fab_btn__) return;
+    if (video.videoWidth * video.videoHeight < FAB_MIN_AREA) return;
+    if (video.duration <= 0) return;
+
+    var btn = document.createElement('div');
+    btn.className = '__ai_video_fab_btn__';
+    btn.title = 'AI 语音配音';
+    btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 20 20" style="display:block;pointer-events:none"><polygon points="4,2 18,10 4,18" fill="white"/></svg>';
+    btn.__ai_target_video__ = video;
+
+    var hideTimer = null;
+
+    function cancelHide() {
+      if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+    }
+
+    function scheduleHide() {
+      cancelHide();
+      hideTimer = setTimeout(function () {
+        btn.style.setProperty('display', 'none', 'important');
+      }, 150);
+    }
+
+    function showBtn() {
+      cancelHide();
+      btn.style.setProperty('display', 'flex', 'important');
+    }
+
+    // Hover detection directly on the <video> element — no overlay,
+    // no interference with native video controls.
+    video.addEventListener('mouseenter', showBtn);
+    video.addEventListener('mouseleave', scheduleHide);
+
+    btn.addEventListener('mouseenter', cancelHide);
+    btn.addEventListener('mouseleave', function (e) {
+      var vr = video.getBoundingClientRect();
+      if (e.clientX >= vr.left && e.clientX <= vr.right &&
+          e.clientY >= vr.top && e.clientY <= vr.bottom) {
+        return; // cursor moved back to video
+      }
+      scheduleHide();
+    });
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      e.preventDefault();
+      cancelHide();
+      var v = btn.__ai_target_video__;
+      if (!v || !v.isConnected) return;
+      start(v);
+    });
+
+    document.body.appendChild(btn);
+
+    video.__ai_fab_btn__ = btn;
+    video.__ai_fab_show__ = showBtn;
+    video.__ai_fab_hide__ = scheduleHide;
+    video.__ai_fab_timer__ = hideTimer;
+    _perVideoFabVideos.push(video);
+
+    startFabRafLoop();
+  }
+
+  function removePerVideoFAB(video) {
+    if (!video) return;
+    var btn = video.__ai_fab_btn__;
+    var timer = video.__ai_fab_timer__;
+    if (timer) { clearTimeout(timer); }
+    if (video.__ai_fab_show__) {
+      try { video.removeEventListener('mouseenter', video.__ai_fab_show__); } catch (_) {}
+    }
+    if (video.__ai_fab_hide__) {
+      try { video.removeEventListener('mouseleave', video.__ai_fab_hide__); } catch (_) {}
+    }
+    if (btn && btn.parentNode) { btn.parentNode.removeChild(btn); }
+    delete video.__ai_fab_btn__;
+    delete video.__ai_fab_show__;
+    delete video.__ai_fab_hide__;
+    delete video.__ai_fab_timer__;
+    var idx = _perVideoFabVideos.indexOf(video);
+    if (idx >= 0) { _perVideoFabVideos.splice(idx, 1); }
+    if (_perVideoFabVideos.length === 0) { stopFabRafLoop(); }
+  }
+
+  function repositionPerVideoFAB(video) {
+    if (!video || !video.isConnected) {
+      removePerVideoFAB(video);
+      return;
+    }
+    var btn = video.__ai_fab_btn__;
+    if (!btn) return;
+
+    var rect = video.getBoundingClientRect();
+    var hidden = rect.width <= 0 || rect.height <= 0 ||
+                 rect.bottom <= 0 || rect.top >= window.innerHeight ||
+                 video.videoWidth * video.videoHeight < FAB_MIN_AREA;
+
+    if (hidden) {
+      btn.style.setProperty('display', 'none', 'important');
+      return;
+    }
+
+    var btnLeft = rect.left + rect.width / 2 - FAB_SIZE / 2;
+    var btnTop = rect.bottom - FAB_SIZE - FAB_BOTTOM_OFFSET;
+    btnLeft = Math.max(0, Math.min(btnLeft, window.innerWidth - FAB_SIZE));
+    btnTop = Math.max(0, Math.min(btnTop, window.innerHeight - FAB_SIZE));
+    btn.style.setProperty('left', btnLeft + 'px', 'important');
+    btn.style.setProperty('top', btnTop + 'px', 'important');
+  }
+
+  function positionAllPerVideoFABs() {
+    for (var i = _perVideoFabVideos.length - 1; i >= 0; i--) {
+      repositionPerVideoFAB(_perVideoFabVideos[i]);
+    }
+  }
+
+  function startFabRafLoop() {
+    if (_fabRafId) return;
+    function loop() {
+      _fabRafId = requestAnimationFrame(loop);
+      if (isRunning) return;
+      positionAllPerVideoFABs();
+    }
+    _fabRafId = requestAnimationFrame(loop);
+  }
+
+  function stopFabRafLoop() {
+    if (_fabRafId) {
+      cancelAnimationFrame(_fabRafId);
+      _fabRafId = null;
+    }
+  }
+
+  function scanForVideoElements() {
+    var videos = document.querySelectorAll('video');
+    for (var i = 0; i < videos.length; i++) {
+      var v = videos[i];
+      if (!v.isConnected) continue;
+      if (v.videoWidth * v.videoHeight < FAB_MIN_AREA) continue;
+      if (v.duration <= 0) continue;
+      if (!v.__ai_fab_btn__) {
+        createPerVideoFAB(v);
+      }
+    }
+  }
+
+  function hideAllPerVideoFABs() {
+    for (var i = 0; i < _perVideoFabVideos.length; i++) {
+      var v = _perVideoFabVideos[i];
+      var btn = v.__ai_fab_btn__;
+      var timer = v.__ai_fab_timer__;
+      if (timer) { clearTimeout(timer); v.__ai_fab_timer__ = null; }
+      if (btn) { btn.style.setProperty('display', 'none', 'important'); }
+    }
+  }
+
+  // Initialize per-video FAB system
+  (function initPerVideoFABSystem() {
+    injectPerVideoFABStyles();
+
+    _fabObserver = new MutationObserver(function (mutations) {
+      var found = false;
+      for (var i = 0; i < mutations.length && !found; i++) {
+        var added = mutations[i].addedNodes;
+        for (var j = 0; j < added.length && !found; j++) {
+          var node = added[j];
+          if (node.nodeType === 1) {
+            if (node.tagName === 'VIDEO' ||
+                (node.querySelectorAll && node.querySelectorAll('video').length > 0)) {
+              found = true;
+            }
+          }
+        }
+      }
+      if (found) { scanForVideoElements(); }
+    });
+    _fabObserver.observe(document.body || document.documentElement, {
+      childList: true, subtree: true
+    });
+
+    scanForVideoElements();
+
+    _fabScanTimer = setInterval(function () {
+      scanForVideoElements();
+    }, 2500);
+  })();
+
+  var contentDiv = overlay.querySelector('#__subtitle_content__');
 
   // ─── Display Settings (applied in real-time) ──────────────────────
   function applySubtitleEnabled(enabled) {
@@ -1209,7 +1455,11 @@ function generateSessionId() {
     }
 
     try {
-      video.muted = false;
+      // Best-effort unmute: some browsers (Safari < 17) may produce
+      // silent captureStream tracks when muted. In Chrome/Firefox/Edge
+      // captureStream works regardless of muted state. If the browser
+      // blocks unmuting (autoplay policy), keep muted — ASR still works.
+      try { video.muted = false; } catch (_) {}
 
       // CRITICAL: ensure AudioWorklet is fully loaded BEFORE we call
       // video.captureStream(). Otherwise the 100-500ms worklet load
@@ -2775,7 +3025,10 @@ function generateSessionId() {
     window.postMessage({ source: '__ai_video_translate__', type: paused ? 'video_started' : 'video_stopped' }, '*');
   }
 
-  async function start() {
+  async function start(targetVideo) {
+    // Hide all per-video FABs during translation
+    hideAllPerVideoFABs();
+
     // Full cleanup if already running from a previous video
     if (isRunning) {
       cleanupOffline();
@@ -2821,11 +3074,16 @@ function generateSessionId() {
     }
 
     // VOD → floating window or offline recording; live → real-time ASR
-    var video = findVideoElement();
+    // targetVideo from per-video FAB; fallback to heuristic for global FAB
+    var video = targetVideo || findVideoElement();
+    loadingTarget = video;
     if (video && !isLiveStream(video)) {
       if (window.startFloatingWindowMode) {
         window.startFloatingWindowMode(video);
       } else {
+        // Clean up preprime state if floating mode is unavailable
+        window.__ai__.preprimedVideo = undefined;
+        delete window.__ai__.preprimedOriginalMuted;
         startOfflineRecording(video);
         if (ws) {
           ws.onclose = null;
@@ -2840,6 +3098,8 @@ function generateSessionId() {
     }
 
     // No video or live stream — real-time ASR
+    window.__ai__.preprimedVideo = undefined;
+    delete window.__ai__.preprimedOriginalMuted;
     startASRMode();
   }
 

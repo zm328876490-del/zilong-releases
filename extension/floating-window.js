@@ -250,7 +250,7 @@
         '<div id="video-wrap"><canvas id="delayed-canvas"></canvas><div id="sub-overlay"><div id="sub-original"></div><div id="sub-translation"></div></div><div id="status-tag">AI 翻译 · -' + (FRAME_DELAY_MS / 1000) + 's</div></div>' +
         '<div id="audio-panel"><span>🔊</span><span id="audio-status">已就绪</span></div>' +
         '<audio id="tts-player" style="display:none"></audio>' +
-        '<div id="audio-primer"><div class="primer-btn">▶ 点击启动翻译</div><div class="primer-hint">浏览器要求在此处点一下，<br>才能在浮窗内播放配音</div></div>' +
+        '<div id="audio-primer"><div class="primer-btn">▶ 点击启动翻译</div><div class="primer-hint">浏览器要求，<br>原视频打开声音才能在浮窗内播放配音</div></div>' +
         '<div id="loading-overlay" class="hidden"><div id="loading-wave"><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div></div><div id="loading-text">AI 翻译配音准备中...</div></div>' +
         '</body>\n</html>');
       ai.floatingWindow.document.close();
@@ -1462,26 +1462,29 @@
 
     createVideoOverlay(video);
 
-    // Duck the source video to near-silent (1%) — full mute would kill
-    // the ASR pipeline because backend Whisper reads from the same audio
-    // track. 1% is inaudible to the user but the signal still flows.
+    // Duck the source video to near-silent (1%) so the original audio is
+    // inaudible to the user but the signal still flows through captureStream.
+    // The muted attribute is NOT forced here — playback logic manages it to
+    // satisfy browser autoplay policy (muted play is always allowed).
     //
     // Many sites (YouTube/B站/TikTok-style MSE players) listen to
-    // `volumechange` and immediately reset volume/muted from their own
+    // `volumechange` and immediately reset volume from their own
     // state, so a one-shot assignment isn't enough. Guard with both a
     // `volumechange` listener (catches synchronous flips) AND a 250ms
     // poller (catches async flips and players that swap the audio track).
-    _videoSavedMuted = video.muted;
+    // If the video was pre-primed (muted play in the FAB click handler),
+    // restore the original muted state on cleanup, not the primed one.
+    _videoSavedMuted = (ai.preprimedOriginalMuted !== undefined && ai.preprimedVideo === video)
+        ? ai.preprimedOriginalMuted
+        : video.muted;
+    delete ai.preprimedOriginalMuted;
+    ai.preprimedVideo = undefined;
     _videoSavedVolume = video.volume;
     _volumeGuardTarget = video;
-    try { video.muted = false; } catch (_) {}
     try { video.volume = FLOATING_DUCKED_VOLUME; } catch (_) {}
 
     _volumeGuardListener = function () {
       if (!_volumeGuardTarget) return;
-      if (_volumeGuardTarget.muted) {
-        try { _volumeGuardTarget.muted = false; } catch (_) {}
-      }
       if (Math.abs(_volumeGuardTarget.volume - FLOATING_DUCKED_VOLUME) > 0.005) {
         try { _volumeGuardTarget.volume = FLOATING_DUCKED_VOLUME; } catch (_) {}
       }
@@ -1491,16 +1494,9 @@
     if (_volumeGuardInterval) { clearInterval(_volumeGuardInterval); }
     _volumeGuardInterval = setInterval(function () {
       if (!_volumeGuardTarget) return;
-      var changed = false;
-      if (_volumeGuardTarget.muted) {
-        try { _volumeGuardTarget.muted = false; } catch (_) {}
-        changed = true;
-      }
       if (Math.abs(_volumeGuardTarget.volume - FLOATING_DUCKED_VOLUME) > 0.005) {
         try { _volumeGuardTarget.volume = FLOATING_DUCKED_VOLUME; } catch (_) {}
-        changed = true;
       }
-      if (changed) {}
     }, 250);
 
     // Tell the popup to disable the "原声音量" slider — it's meaningless
@@ -1659,15 +1655,22 @@
     // triggers an async seek; if play() runs first the video may
     // briefly output audio from the old position, corrupting timestamps.
     function startVideoPlayback() {
-      video.play().catch(function (e) {
-        video.muted = true;
-        video.play().catch(function () {});
+      // Always play muted first — satisfies browser autoplay policy
+      // everywhere (Chrome/Firefox/Edge/Safari). captureStream() produces
+      // audio regardless of the muted attribute in modern browsers.
+      video.muted = true;
+      video.play().then(function () {
+        // Playback started. Try to unmute for browsers where captureStream
+        // needs an unmuted video (Safari < 17 may produce silence otherwise).
+        // Failure is harmless — ASR still gets audio via captureStream.
+        try { video.muted = false; } catch (_) {}
+      }).catch(function () {
         var sEl = ai.floatingWindow && !ai.floatingWindow.closed
           ? ai.floatingWindow.document.getElementById('audio-status') : null;
-        if (sEl) sEl.textContent = '视频播放被阻止';
+        if (sEl) sEl.textContent = '视频播放被阻止，请手动点击页面中的视频播放按钮';
       });
-      // Start ASR after play — PCM is buffered locally during WS warmup
-      // and flushed to backend when pipeline is ready.
+      // Start ASR after play is initiated. PCM is buffered locally during
+      // WS warmup and flushed to backend when pipeline is ready.
       ai.startASRMode();
     }
     if (video.seeking) {

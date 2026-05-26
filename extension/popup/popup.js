@@ -51,7 +51,6 @@
     const result = await chrome.storage.local.get(['translationSettings', 'pageBilingual']);
     const settings = result.translationSettings || DEFAULT_SETTINGS;
     // pageBilingual may be stored at top level by the toggle handler.
-    // Merge it into settings so the checkbox reflects the user's actual choice.
     if (result.pageBilingual !== undefined) {
       settings.pageBilingual = result.pageBilingual;
     }
@@ -134,13 +133,11 @@
   }
 
   // ─── Event listeners ──────────────────────────────────────────────
-  // Target language change: rebuild TTS voices first, then save
   targetLangSelect.addEventListener('change', function () {
     saveSettings();
     syncPageLangEngine();
   });
 
-  // Engine change: open ollama modal when "本地" selected
   translateEngineSelect.addEventListener('change', function () {
     if (translateEngineSelect.value === 'ollama') {
       showOllamaModal();
@@ -151,7 +148,6 @@
     }
   });
 
-  // Auto-save on input change
   [sourceLangSelect].forEach(
     function (el) {
       el.addEventListener('change', function () { saveSettings(); syncPageLangEngine(); });
@@ -184,7 +180,6 @@
     hideOllamaModal();
   });
 
-  // Click overlay to close
   ollamaModal.addEventListener('click', function (e) {
     if (e.target === ollamaModal) {
       translateEngineSelect.value = prevEngine;
@@ -192,7 +187,6 @@
     }
   });
 
-  // Subtitle toggle: save and push immediately; show/hide size slider
   subtitleToggle.addEventListener('change', function () {
     updateSubtitleSizeVisibility();
     saveSettings();
@@ -284,9 +278,6 @@
   }
 
   // ─── Floating-mode slider gating ──────────────────────────────────
-  // While the floating popup window is up, the source <video> is muted
-  // (see floating-window.js). The "原声音量" slider therefore controls
-  // nothing — disable it so the UI does not lie to the user.
   function setSubtitleSizeDisabled(disabled) {
     subtitleSizeSlider.disabled = !!disabled;
     subtitleSizeSlider.style.opacity = disabled ? '0.4' : '1';
@@ -334,7 +325,6 @@
           isRunning = true;
           setStatus('listening');
         }
-        // Sync slider disabled states with floating mode.
         setSubtitleSizeDisabled(!!(response && response.floatingMode));
         setOriginalVolumeDisabled(!!(response && response.floatingMode));
       }

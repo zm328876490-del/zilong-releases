@@ -611,7 +611,6 @@
 
   async function fetchTranslationBatch(texts) {
     // Google Translate goes through the browser so it respects the system proxy.
-    // Microsoft and Ollama go through the Go backend.
     if (engine === 'google') {
       return new Promise(function (resolve) {
         chrome.runtime.sendMessage({
@@ -627,13 +626,18 @@
       });
     }
 
+    // PAGE TRANSLATION ONLY: Ollama is unsuitable for short-text batch translation.
+    // Auto-fallback to Microsoft. This does NOT affect video/subtitle translation
+    // which uses a completely separate code path (content.js → background.js).
+    var effectiveEngine = (engine === 'ollama') ? 'microsoft' : engine;
+
     return new Promise(function (resolve) {
       chrome.runtime.sendMessage({
         type: 'PAGE_FETCH_TRANSLATION',
         url: API,
         body: {
           texts: texts, from: sourceLang, to: targetLang,
-          engine: engine, ollamaUrl: ollamaUrl, ollamaModel: ollamaModel,
+          engine: effectiveEngine, ollamaUrl: ollamaUrl, ollamaModel: ollamaModel,
         },
       }, function (resp) {
         if (chrome.runtime.lastError) {
