@@ -370,9 +370,11 @@
       return false;
     }
 
-    // Don't translate elements that have translatable block children
+    // Mark mixed-content elements (text + block children like images/icons)
+    // so safeReplace knows to preserve non-text children
     if (hasBlockChild) {
-      return false;
+      el._otMixed = true;
+      el._otDirectText = text;
     }
 
     return true;
@@ -549,101 +551,37 @@
     if (!needModel.length) return;
 
     // ── L3: translation API ───────────────────────────────────────────
-    if (engine === 'ollama') {
-      await fetchTranslationStream(needModel, needTexts);
-    } else {
-      needModel.forEach(function (el) { addSpinner(el); });
+    needModel.forEach(function (el) { addSpinner(el); });
 
-      var results;
-      try {
-        results = await fetchTranslationBatch(needTexts);
-      } catch (_) {
-        results = new Array(needTexts.length).fill('');
-      }
-
-      needModel.forEach(function (el) { removeSpinner(el); });
-
-      if (!results || !Array.isArray(results)) {
-        needModel.forEach(function (el) { requeueOrGiveUp(el); });
-        return;
-      }
-
-      var toSave = [];
-      for (var mi = 0; mi < needModel.length; mi++) {
-        var el = needModel[mi];
-        var translation = results[mi] || '';
-        var src = needTexts[mi];
-        if (!translation) { requeueOrGiveUp(el); continue; }
-        cacheSet(src.toLowerCase(), translation);
-        toSave.push({ src: src, dst: translation });
-        applyTranslation(el, translation);
-      }
-
-      if (toSave.length > 0) {
-        dbSave(host, toSave).catch(function () {});
-        snapshotDirty = true;
-        if (Math.random() < 0.02) dbPrune();
-      }
-    }
-  }
-
-  async function fetchTranslationStream(leaves, texts) {
-    // Direct fetch to Go backend — reads NDJSON line by line, applying
-    // each result as it arrives so spinner disappears progressively.
-    leaves.forEach(function (el) { addSpinner(el); });
-
+    var results;
     try {
-      var resp = await fetch(API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          texts: texts, from: sourceLang, to: targetLang,
-          engine: engine, ollamaUrl: ollamaUrl, ollamaModel: ollamaModel,
-        }),
-      });
-      if (!resp.ok) {
-        leaves.forEach(function (el) { removeSpinner(el); requeueOrGiveUp(el); });
-        return;
-      }
-
-      var reader = resp.body.getReader();
-      var decoder = new TextDecoder();
-      var buf = '';
-      var toSave = [];
-
-      while (true) {
-        var chunk = await reader.read();
-        if (chunk.done) break;
-        buf += decoder.decode(chunk.value, { stream: true });
-        var lines = buf.split('\n');
-        buf = lines.pop(); // keep incomplete line
-
-        for (var li = 0; li < lines.length; li++) {
-          var line = lines[li].trim();
-          if (!line) continue;
-          try {
-            var item = JSON.parse(line);
-            var idx = item.i;
-            var translation = item.t;
-            if (idx >= 0 && idx < leaves.length && translation) {
-              var el = leaves[idx];
-              var src = texts[idx];
-              removeSpinner(el);
-              cacheSet(src.toLowerCase(), translation);
-              toSave.push({ src: src, dst: translation });
-              applyTranslation(el, translation);
-            }
-          } catch (_) {}
-        }
-      }
-
-      if (toSave.length > 0) {
-        dbSave(host, toSave).catch(function () {});
-        snapshotDirty = true;
-        if (Math.random() < 0.02) dbPrune();
-      }
+      results = await fetchTranslationBatch(needTexts);
     } catch (_) {
-      leaves.forEach(function (el) { removeSpinner(el); requeueOrGiveUp(el); });
+      results = new Array(needTexts.length).fill('');
+    }
+
+    needModel.forEach(function (el) { removeSpinner(el); });
+
+    if (!results || !Array.isArray(results)) {
+      needModel.forEach(function (el) { requeueOrGiveUp(el); });
+      return;
+    }
+
+    var toSave = [];
+    for (var mi = 0; mi < needModel.length; mi++) {
+      var el = needModel[mi];
+      var translation = results[mi] || '';
+      var src = needTexts[mi];
+      if (!translation) { requeueOrGiveUp(el); continue; }
+      cacheSet(src.toLowerCase(), translation);
+      toSave.push({ src: src, dst: translation });
+      applyTranslation(el, translation);
+    }
+
+    if (toSave.length > 0) {
+      dbSave(host, toSave).catch(function () {});
+      snapshotDirty = true;
+      if (Math.random() < 0.02) dbPrune();
     }
   }
 
@@ -721,7 +659,7 @@
   function applyTranslation(el, translation) {
     if (!el.isConnected || el._otTranslated) return;
     el.setAttribute('data-ot-translated', '');
-    el.setAttribute('data-ot-original', el.textContent.trim());
+    el.setAttribute('data-ot-original', el._otDirectText || el.textContent.trim());
     el.setAttribute('data-ot-translation', translation);
     el._otTranslated = true;
     pendingCount--;
@@ -731,6 +669,59 @@
 
   function safeReplace(el, translation) {
     var original = el.getAttribute('data-ot-original') || el.textContent.trim();
+
+    // Mixed-content elements (text + block children like img/svg):
+    // only replace text portions, preserve non-text children in place.
+    if (el._otMixed) {
+      // Collect block-level children to preserve (img, svg, etc.)
+      var preserved = [];
+      for (var ci = 0; ci < el.childNodes.length; ci++) {
+        var c = el.childNodes[ci];
+        if (c.nodeType === Node.ELEMENT_NODE && !INLINE_TAGS.has(c.tagName) && !SKIP_TAGS.has(c.tagName)) {
+          preserved.push(c);
+        }
+      }
+
+      if (!bilingualMode) {
+        // Replace text content of first text-bearing node, clear others
+        var found = false;
+        for (var ci2 = 0; ci2 < el.childNodes.length; ci2++) {
+          var c2 = el.childNodes[ci2];
+          if (c2.nodeType === Node.TEXT_NODE) {
+            if (!found) { c2.textContent = translation; found = true; }
+            else { c2.textContent = ''; }
+          } else if (c2.nodeType === Node.ELEMENT_NODE && INLINE_TAGS.has(c2.tagName)) {
+            if (!found) { c2.textContent = translation; found = true; }
+            else { c2.textContent = ''; }
+          }
+        }
+        if (!found) {
+          el.insertBefore(document.createTextNode(translation), el.firstChild);
+        }
+        return;
+      }
+
+      // Bilingual mode for mixed elements
+      el.textContent = '';
+      var frag = document.createDocumentFragment();
+      var origSpan = document.createElement('span');
+      origSpan.className = 'ot-orig';
+      origSpan.textContent = original;
+      var transSpan = document.createElement('span');
+      transSpan.className = 'ot-trans';
+      transSpan.textContent = translation;
+      var wrap = document.createElement('span');
+      wrap.className = 'ot-bi-wrap';
+      wrap.appendChild(transSpan);
+      wrap.appendChild(origSpan);
+      frag.appendChild(wrap);
+      el.appendChild(frag);
+      for (var pi = 0; pi < preserved.length; pi++) {
+        el.appendChild(preserved[pi]);
+      }
+      return;
+    }
+
     if (!bilingualMode) {
       el.textContent = translation;
       return;

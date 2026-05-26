@@ -253,99 +253,114 @@ func (t *Translator) translateOllamaBatch(w io.Writer, texts []string, from, to 
 	}
 
 	toName := langNameForOllama(to)
-	client := t.client
 
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 2)
-	var failCount int32
-
+	// Separate empty texts — they'll get empty results
+	indexMap := make([]int, 0, len(texts)) // original index for each non-empty text
+	payload := make([]string, 0, len(texts))
 	for i, text := range texts {
-		if atomic.LoadInt32(&failCount) > int32(len(texts)/2) {
-			break
-		}
 		txt := strings.TrimSpace(text)
 		if txt == "" {
 			continue
 		}
-		wg.Add(1)
-		go func(idx int, src string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			var result string
-			var err error
-			for attempt := 0; attempt < 3; attempt++ {
-				if attempt > 0 {
-					time.Sleep(time.Second)
-				}
-				result, err = translateOllamaSingle(src, toName, t.ollamaUrl, t.ollamaModel, client)
-				if err == nil {
-					break
-				}
-			}
-			if err != nil {
-				atomic.AddInt32(&failCount, 1)
-				return
-			}
-			mu.Lock()
-			b, _ := json.Marshal(map[string]interface{}{"i": idx, "t": result})
-			w.Write(append(b, '\n'))
-			mu.Unlock()
-		}(i, txt)
+		indexMap = append(indexMap, i)
+		payload = append(payload, txt)
 	}
-	wg.Wait()
-
-	if atomic.LoadInt32(&failCount) > 0 {
-		return nil // partial results acceptable
+	if len(payload) == 0 {
+		return nil
 	}
-	return nil
-}
 
-func translateOllamaSingle(text, toLang, ollamaUrl, model string, client *http.Client) (string, error) {
-	systemPrompt := "将以下文本翻译为" + toLang + "。只返回译文，不要解释，不要前缀。"
+	// Build single prompt: JSON array of all texts
+	payloadJSON, _ := json.Marshal(payload)
+	systemPrompt := fmt.Sprintf(
+		"将以下 JSON 数组中的每一条文本翻译为%s。返回相同长度和顺序的 JSON 字符串数组。只返回 JSON 数组，不要解释、不要 markdown 代码块、不要多余文字。",
+		toName,
+	)
 
 	reqBody := ollamaChatRequest{
-		Model: model,
+		Model: t.ollamaModel,
 		Messages: []ollamaChatMessage{
 			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: text},
+			{Role: "user", Content: string(payloadJSON)},
 		},
 		Stream:      false,
 		Temperature: 0,
 	}
 
-	bodyBytes, _ := json.Marshal(reqBody)
-	endpoint := ollamaUrl + "/v1/chat/completions"
+	var results []string
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Second)
+		}
+		bodyBytes, _ := json.Marshal(reqBody)
+		resp, err := t.client.Post(
+			t.ollamaUrl+"/v1/chat/completions",
+			"application/json",
+			strings.NewReader(string(bodyBytes)),
+		)
+		if err != nil {
+			continue
+		}
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			continue
+		}
 
-	resp, err := client.Post(endpoint, "application/json", strings.NewReader(string(bodyBytes)))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
+		var chatResp struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(respBody, &chatResp); err != nil || len(chatResp.Choices) == 0 {
+			continue
+		}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		content := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+		// Strip markdown code fences if model wraps output
+		content = strings.TrimPrefix(content, "```json")
+		content = strings.TrimPrefix(content, "```")
+		content = strings.TrimSuffix(content, "```")
+		content = strings.TrimSpace(content)
+
+		if err := json.Unmarshal([]byte(content), &results); err != nil {
+			// Try to extract JSON array with bracket matching
+			start := strings.Index(content, "[")
+			end := strings.LastIndex(content, "]")
+			if start >= 0 && end > start {
+				if err2 := json.Unmarshal([]byte(content[start:end+1]), &results); err2 != nil {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+		if len(results) > 0 {
+			break
+		}
 	}
 
-	var chatResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
+	// Map results back to original indices
+	out := make([]string, len(texts))
+	for ri, translated := range results {
+		if ri < len(indexMap) {
+			out[indexMap[ri]] = translated
+		}
 	}
-	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return "", err
+
+	// Write NDJSON output
+	for i, r := range out {
+		if r == "" {
+			continue
+		}
+		b, _ := json.Marshal(map[string]interface{}{"i": i, "t": r})
+		w.Write(append(b, '\n'))
 	}
-	if len(chatResp.Choices) == 0 {
-		return "", nil
-	}
-	return strings.TrimSpace(chatResp.Choices[0].Message.Content), nil
+	return nil
 }
 
 func langNameForOllama(lang string) string {

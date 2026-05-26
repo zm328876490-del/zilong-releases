@@ -3042,7 +3042,7 @@ function generateSessionId() {
 
       case 'SHOW_IMAGE_STATUS':
         if (message.text && message.text.indexOf('失败') !== -1) {
-          hideImageSpinner();
+          hideImageSpinner(message.srcUrl);
           showImageToast(message.text);
         } else if (message.srcUrl) {
           updateImageSpinner(message.srcUrl, message.text);
@@ -3052,7 +3052,7 @@ function generateSessionId() {
         break;
 
       case 'SHOW_IMAGE_RESULT':
-        hideImageSpinner();
+        hideImageSpinner(message.src);
         showImageResultOverlay(message.src, message.image, message.items);
         break;
 
@@ -3065,54 +3065,62 @@ function generateSessionId() {
 
   // ─── Image translation display ──────────────────────────────────────
 
-  var _imageSpinner = null;
-  var _spinnerTarget = null;
-  var _spinnerReposRaf = null;
+  // Per-image spinners: Map<srcUrl, {spinner, target, raf}>
+  var _imageSpinners = {};
+  var _translatedSrcs = {}; // track which images have been translated (normSrc → true)
+  var _imageOverlays = {}; // track overlay elements (normSrc → wrap element)
 
-  function _reposSpinner() {
-    if (!_imageSpinner || !_spinnerTarget) return;
-    var rect = _spinnerTarget.getBoundingClientRect();
-    _imageSpinner.style.left = rect.left + 'px';
-    _imageSpinner.style.top = rect.top + 'px';
-    _imageSpinner.style.width = rect.width + 'px';
-    _imageSpinner.style.height = rect.height + 'px';
+  function _reposSpinner(entry) {
+    if (!entry || !entry.spinner || !entry.target || !entry.target.isConnected) return;
+    var rect = entry.target.getBoundingClientRect();
+    entry.spinner.style.left = rect.left + 'px';
+    entry.spinner.style.top = rect.top + 'px';
+    entry.spinner.style.width = rect.width + 'px';
+    entry.spinner.style.height = rect.height + 'px';
   }
 
-  function _startSpinnerTracking() {
-    if (_spinnerReposRaf) return;
+  function _startOneSpinnerTracking(entry) {
+    if (entry._raf) return;
     var ticking = false;
     function step() {
-      _spinnerReposRaf = requestAnimationFrame(step);
-      if (!ticking) { ticking = true; _reposSpinner(); ticking = false; }
+      entry._raf = requestAnimationFrame(step);
+      if (!ticking) { ticking = true; _reposSpinner(entry); ticking = false; }
     }
-    _spinnerReposRaf = requestAnimationFrame(step);
+    entry._raf = requestAnimationFrame(step);
   }
 
-  function _stopSpinnerTracking() {
-    if (_spinnerReposRaf) { cancelAnimationFrame(_spinnerReposRaf); _spinnerReposRaf = null; }
+  function _stopOneSpinnerTracking(entry) {
+    if (entry._raf) { cancelAnimationFrame(entry._raf); entry._raf = null; }
+  }
+
+  function normalizeSrc(srcUrl) {
+    return srcUrl.replace(/^https?:/, '');
+  }
+
+  function findImageBySrc(srcUrl) {
+    var imgs = document.querySelectorAll('img');
+    var norm = normalizeSrc(srcUrl);
+    for (var i = 0; i < imgs.length; i++) {
+      if (normalizeSrc(imgs[i].src) === norm) return imgs[i];
+    }
+    return null;
   }
 
   function updateImageSpinner(srcUrl, text) {
-    if (_imageSpinner) {
-      var label = _imageSpinner.querySelector('.ai-spinner-label');
+    var key = normalizeSrc(srcUrl);
+    var entry = _imageSpinners[key];
+    if (entry) {
+      var label = entry.spinner.querySelector('.ai-spinner-label');
       if (label) label.textContent = text || '';
       return;
     }
-    hideImageSpinner();
-    var imgs = document.querySelectorAll('img');
-    var target = null;
-    for (var i = 0; i < imgs.length; i++) {
-      if (imgs[i].src === srcUrl || imgs[i].src === srcUrl.replace(/^https?:/, '')) {
-        target = imgs[i];
-        break;
-      }
-    }
+    var target = findImageBySrc(srcUrl);
     if (!target) { showImageToast(text); return; }
-    _spinnerTarget = target;
 
     var rect = target.getBoundingClientRect();
     var spinner = document.createElement('div');
     spinner.className = 'ai-image-spinner';
+    spinner.setAttribute('data-img-src', key);
     spinner.style.cssText =
       'position:fixed;z-index:2147483645;' +
       'left:' + rect.left + 'px;top:' + rect.top + 'px;' +
@@ -3136,14 +3144,28 @@ function generateSessionId() {
     }
 
     document.body.appendChild(spinner);
-    _imageSpinner = spinner;
-    _startSpinnerTracking();
+    entry = { spinner: spinner, target: target };
+    _imageSpinners[key] = entry;
+    _startOneSpinnerTracking(entry);
   }
 
-  function hideImageSpinner() {
-    _stopSpinnerTracking();
-    if (_imageSpinner) { _imageSpinner.remove(); _imageSpinner = null; }
-    _spinnerTarget = null;
+  function hideImageSpinner(srcUrl) {
+    if (srcUrl) {
+      var key = normalizeSrc(srcUrl);
+      var entry = _imageSpinners[key];
+      if (entry) {
+        _stopOneSpinnerTracking(entry);
+        if (entry.spinner) entry.spinner.remove();
+        delete _imageSpinners[key];
+      }
+      return;
+    }
+    // Remove all spinners
+    Object.keys(_imageSpinners).forEach(function (k) {
+      _stopOneSpinnerTracking(_imageSpinners[k]);
+      if (_imageSpinners[k].spinner) _imageSpinners[k].spinner.remove();
+    });
+    _imageSpinners = {};
   }
 
   // Inject spin keyframes once
@@ -3168,19 +3190,16 @@ function generateSessionId() {
   }
 
   function showImageResultOverlay(originalSrc, _imageSrc, items) {
-    var existing = document.querySelector('.ai-image-result-overlay');
-    if (existing) existing.remove();
-
-    // Find the original image element
-    var imgs = document.querySelectorAll('img');
-    var target = null;
-    for (var i = 0; i < imgs.length; i++) {
-      if (imgs[i].src === originalSrc || imgs[i].src === originalSrc.replace(/^https?:/, '')) {
-        target = imgs[i];
-        break;
-      }
+    var normSrc = normalizeSrc(originalSrc);
+    // Remove old overlay for this specific image (if any)
+    if (_imageOverlays[normSrc]) {
+      _imageOverlays[normSrc].remove();
+      delete _imageOverlays[normSrc];
     }
+
+    var target = findImageBySrc(originalSrc);
     if (!target) { showImageToast('图片已翻译，但原图元素未找到'); return; }
+    _translatedSrcs[normSrc] = true;
 
     var rect = target.getBoundingClientRect();
     var natW = target.naturalWidth || target.width;
@@ -3193,18 +3212,26 @@ function generateSessionId() {
     // ── Build the overlay ──
     var wrap = document.createElement('div');
     wrap.className = 'ai-image-result-overlay';
+    wrap.setAttribute('data-img-src', normSrc);
     wrap.style.cssText =
       'position:fixed;z-index:2147483646;' +
       'left:' + rect.left + 'px;top:' + rect.top + 'px;' +
       'width:' + dispW + 'px;height:' + dispH + 'px;' +
       'animation:ai-fade-in 0.25s ease;pointer-events:auto;';
 
-    // Canvas layer — draws translated text on top of original image
+    // Canvas layer — draws original image, masks original text, then draws translation
     var canvas = document.createElement('canvas');
     canvas.width = dispW;
     canvas.height = dispH;
     canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;';
     var ctx = canvas.getContext('2d');
+
+    // Draw original image onto canvas (so we can sample pixels for inpainting)
+    ctx.drawImage(target, 0, 0, dispW, dispH);
+
+    // Inpaint each OCR region: sample surrounding pixels → fill → draw translation
+    var canSample = false;
+    try { canSample = !!ctx.getImageData(0, 0, 1, 1); } catch (_) {}
 
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
@@ -3213,19 +3240,62 @@ function generateSessionId() {
       var w = Math.round(item.w * sx);
       var h = Math.round(item.h * sy);
 
+      // Expand region slightly to fully cover original text
+      var pad = Math.max(2, Math.round(h * 0.15));
+      var fx = Math.max(0, x - pad);
+      var fy = Math.max(0, y - pad);
+      var fw = Math.min(dispW - fx, w + pad * 2);
+      var fh = Math.min(dispH - fy, h + pad * 2);
+
+      if (canSample) {
+        // Sample border pixels (top/bottom/left/right strips)
+        var samples = [];
+        var sampleStep = Math.max(1, Math.round(Math.min(fw, fh) / 4));
+        // Top & bottom edges
+        for (var sx2 = fx; sx2 < fx + fw; sx2 += sampleStep) {
+          var px = ctx.getImageData(Math.round(sx2), fy, 1, 1).data;
+          samples.push(px);
+          if (fy + fh < dispH) {
+            var px2 = ctx.getImageData(Math.round(sx2), fy + fh - 1, 1, 1).data;
+            samples.push(px2);
+          }
+        }
+        // Left & right edges
+        for (var sy2 = fy; sy2 < fy + fh; sy2 += sampleStep) {
+          var px3 = ctx.getImageData(fx, Math.round(sy2), 1, 1).data;
+          samples.push(px3);
+          if (fx + fw < dispW) {
+            var px4 = ctx.getImageData(fx + fw - 1, Math.round(sy2), 1, 1).data;
+            samples.push(px4);
+          }
+        }
+        // Average color
+        var r = 0, g = 0, b = 0;
+        for (var si = 0; si < samples.length; si++) {
+          r += samples[si][0]; g += samples[si][1]; b += samples[si][2];
+        }
+        r = Math.round(r / samples.length);
+        g = Math.round(g / samples.length);
+        b = Math.round(b / samples.length);
+        ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+      } else {
+        // Cross-origin fallback: semi-transparent dark mask
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      }
+
+      ctx.fillRect(fx, fy, fw, fh);
+
+      // Draw translated text
       var fontSize = Math.max(9, Math.min(h, 64));
       ctx.font = fontSize + 'px "Microsoft YaHei", "SimHei", "PingFang SC", sans-serif';
       ctx.textBaseline = 'top';
       ctx.textAlign = 'left';
-
-      // Shadow for readability on any background
       ctx.shadowColor = 'rgba(0,0,0,0.7)';
       ctx.shadowBlur = 3;
       ctx.shadowOffsetX = 0;
       ctx.shadowOffsetY = 0;
       ctx.fillStyle = '#fff';
 
-      // Draw translated text, allow slight overflow beyond original rect
       var maxWidth = Math.max(w * 1.5, dispW - x - 4);
       var lineHeight = fontSize * 1.25;
       var words = item.translated.split('');
@@ -3248,6 +3318,7 @@ function generateSessionId() {
     }
     wrap.appendChild(canvas);
     document.body.appendChild(wrap);
+    _imageOverlays[normSrc] = wrap;
 
     // ── Position tracking on scroll/resize ──
     var reposRaf;
@@ -3266,6 +3337,8 @@ function generateSessionId() {
     function close() {
       cancelAnimationFrame(reposRaf);
       wrap.remove();
+      delete _translatedSrcs[normSrc];
+      delete _imageOverlays[normSrc];
       document.removeEventListener('keydown', escHandler);
     }
 

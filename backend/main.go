@@ -1538,30 +1538,6 @@ func findPython() string {
 	return "python"
 }
 
-// runDraw runs the PowerShell drawing script to render translations on the image.
-func runDraw(inPath, outPath string, items []imageTranslateItem) error {
-	scriptPath := filepath.Join(".", "scripts", "draw.ps1")
-
-	// Write items to temp JSON file (avoids cmd-line encoding issues with CJK)
-	itemsJSON, _ := json.Marshal(items)
-	tmpJSON := inPath + ".json"
-	if err := os.WriteFile(tmpJSON, itemsJSON, 0644); err != nil {
-		return err
-	}
-	defer os.Remove(tmpJSON)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Pass JSON file path as argument to avoid PowerShell command-line encoding issues
-	cmd := exec.CommandContext(ctx, "powershell", "-ExecutionPolicy", "Bypass", "-File", scriptPath, inPath, outPath, tmpJSON)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, string(out))
-	}
-	return nil
-}
-
 // handleFetchSubtitles fetches a YouTube timedtext URL server-side,
 // parses the XML, and returns [{text, start, end}, ...] as JSON.
 func handleFetchSubtitles(w http.ResponseWriter, r *http.Request) {

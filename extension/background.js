@@ -40,6 +40,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'PAGE_FETCH_TRANSLATION':
       handlePageTranslateFetch(message, sendResponse);
       return true; // async response
+
+    // ─── Ollama direct: single-prompt batch, bypasses Go backend ───────
+    case 'PAGE_OLLAMA_TRANSLATE':
+      handlePageOllamaTranslate(message, sendResponse);
+      return true; // async response
+
   }
 });
 
@@ -172,6 +178,80 @@ async function handlePageTranslateFetch(message, sendResponse) {
     }
     const data = await resp.json();
     sendResponse({ ok: true, status: resp.status, results: data.results || null });
+  } catch (e) {
+    sendResponse({ ok: false, status: 0, results: null, error: e.message });
+  }
+}
+
+// ─── Ollama direct batch: single prompt with JSON array → single inference ──
+
+function ollamaLangName(lang) {
+  const m = { 'zh-Hans': '简体中文', 'zh-Hant': '繁體中文', 'zh': '中文',
+    'en': 'English', 'ja': '日本語', 'ko': '한국어',
+    'fr': 'Français', 'de': 'Deutsch', 'es': 'Español',
+    'pt': 'Português', 'ru': 'Русский', 'th': 'ไทย', 'vi': 'Tiếng Việt' };
+  return m[lang] || lang;
+}
+
+async function handlePageOllamaTranslate(message, sendResponse) {
+  try {
+    const texts = message.texts || [];
+    if (texts.length === 0) { sendResponse({ ok: true, results: [] }); return; }
+
+    const url = (message.ollamaUrl || 'http://localhost:11434').replace(/\/$/, '');
+    const model = message.ollamaModel || 'qwen2.5:7b';
+    const toName = ollamaLangName(message.to || 'zh-Hans');
+    const payload = texts.filter(function (t) { return (t || '').trim(); });
+    const payloadJSON = JSON.stringify(payload);
+
+    const systemPrompt =
+      '将以下 JSON 数组中的每一条文本翻译为' + toName +
+      '。返回相同长度和顺序的 JSON 字符串数组。只返回 JSON 数组，不要解释、不要 markdown 代码块、不要多余文字。';
+
+    const resp = await fetch(url + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: payloadJSON },
+        ],
+        stream: false,
+        options: { temperature: 0 },
+      }),
+    });
+
+    if (!resp.ok) {
+      sendResponse({ ok: false, status: resp.status, results: null });
+      return;
+    }
+
+    const data = await resp.json();
+    const content = (data.choices && data.choices[0] && data.choices[0].message.content) || '[]';
+
+    // Parse JSON array from model response (strip markdown fences if present)
+    let raw = content.trim();
+    if (raw.startsWith('```')) {
+      raw = raw.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+    }
+    let translated = [];
+    try { translated = JSON.parse(raw); } catch (_) {
+      // Try to extract JSON array with bracket matching
+      const start = raw.indexOf('['), end = raw.lastIndexOf(']');
+      if (start >= 0 && end > start) {
+        try { translated = JSON.parse(raw.slice(start, end + 1)); } catch (_) {}
+      }
+    }
+
+    const results = new Array(texts.length).fill('');
+    for (let i = 0; i < Math.min(payload.length, translated.length); i++) {
+      // Map back to original indices (payload was filtered)
+      const origIdx = texts.indexOf(payload[i]);
+      if (origIdx >= 0) results[origIdx] = translated[i] || '';
+    }
+
+    sendResponse({ ok: true, results: results });
   } catch (e) {
     sendResponse({ ok: false, status: 0, results: null, error: e.message });
   }
