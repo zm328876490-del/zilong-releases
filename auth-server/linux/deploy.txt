@@ -1,0 +1,31 @@
+=== auth-server Docker 部署步骤 ===
+
+1. 上传整个 auth-server 目录到服务器 ~/auth-server/
+   （upload 时排除 linux/、.env、release/）
+
+2. 创建 .env 文件：
+
+   cd ~/auth-server
+   echo 'JWT_SECRET=你的jwt密钥' > .env
+   echo 'SMTP_PASSWORD=你的QQ邮箱授权码' >> .env
+
+3. 启动：
+
+   cd ~/auth-server
+   docker compose -f linux/docker-compose.yml up -d --build
+
+4. 查看日志：
+
+   docker logs -f auth-server
+
+5. 更新代码后重新构建：
+
+   cd ~/auth-server
+   docker compose -f linux/docker-compose.yml up -d --build
+
+=== MySQL 说明 ===
+
+   - 默认 root 密码: root（可通过 MYSQL_ROOT_PASSWORD 环境变量修改）
+   - 数据库名: auth_server
+   - 数据持久化在 Docker volume mysql_data 中
+   - 端口 3306 暴露在宿主机，不需要的话可在 docker-compose.yml 中移除

@@ -4,9 +4,12 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"ai-translation/auth-server/config"
@@ -17,13 +20,52 @@ import (
 )
 
 type Handler struct {
-	cfg  *config.Config
-	db   *model.DB
-	mail *mail.Sender
+	cfg     *config.Config
+	db      *model.DB
+	mail    *mail.Sender
+	ipLimit map[string]*ipWindow
+	ipMu    sync.Mutex
+}
+
+type ipWindow struct {
+	count  int
+	resetAt time.Time
 }
 
 func New(cfg *config.Config, db *model.DB, m *mail.Sender) *Handler {
-	return &Handler{cfg: cfg, db: db, mail: m}
+	h := &Handler{cfg: cfg, db: db, mail: m, ipLimit: make(map[string]*ipWindow)}
+	go h.ipCleanup()
+	return h
+}
+
+func (h *Handler) ipCleanup() {
+	for range time.Tick(10 * time.Minute) {
+		h.ipMu.Lock()
+		now := time.Now().UTC()
+		for k, w := range h.ipLimit {
+			if now.After(w.resetAt) {
+				delete(h.ipLimit, k)
+			}
+		}
+		h.ipMu.Unlock()
+	}
+}
+
+// allowIP returns true if ip has not exceeded 15 send-code requests in the last hour.
+func (h *Handler) allowIP(ip string) bool {
+	h.ipMu.Lock()
+	defer h.ipMu.Unlock()
+	now := time.Now().UTC()
+	w, ok := h.ipLimit[ip]
+	if !ok || now.After(w.resetAt) {
+		h.ipLimit[ip] = &ipWindow{count: 1, resetAt: now.Add(1 * time.Hour)}
+		return true
+	}
+	if w.count >= 15 {
+		return false
+	}
+	w.count++
+	return true
 }
 
 func jsonResp(w http.ResponseWriter, status int, v any) {
@@ -57,7 +99,18 @@ func (h *Handler) SendCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rate limit: 60s cooldown per email
+	// IP rate limit: 15 per hour
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	if !h.allowIP(ip) {
+		log.Printf("IP rate limit hit: %s", ip)
+		jsonResp(w, 429, map[string]string{"error": "请求过于频繁，请稍后再试"})
+		return
+	}
+
+	// Email rate limit: 60s cooldown per email
 	ok, err := h.db.CanSendCode(req.Email, 60*time.Second)
 	if err != nil {
 		jsonResp(w, 500, map[string]string{"error": "服务器错误"})

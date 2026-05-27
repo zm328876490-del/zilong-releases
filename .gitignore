@@ -1,3 +1,5 @@
 dist/
 release/
 .env
+auth-server.exe
+auth-server.exe~

@@ -26,7 +26,6 @@ navLinks.forEach(function (a) {
 // Hash routing
 function routeFromHash() {
   var hash = window.location.hash.replace('#', '') || 'login';
-  // Map old page hashes to tabs
   var map = { login: 'login', buy: 'buy', account: 'account' };
   switchTab(map[hash] || 'login');
 }

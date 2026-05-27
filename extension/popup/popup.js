@@ -47,7 +47,120 @@
   const licDot = document.querySelector('.lic-dot');
   const headerLogin = document.getElementById('headerLogin');
   const headerUpgrade = document.getElementById('headerUpgrade');
-  const engineBadge = document.getElementById('engineBadge');
+  // Custom engine dropdown
+  const engineDropdown = document.getElementById('engineDropdown');
+  const engineDropdownTrigger = document.getElementById('engineDropdownTrigger');
+  const engineIcon = document.getElementById('engineIcon');
+  const engineLabel = document.getElementById('engineLabel');
+  let engineDropdownOpen = false;
+
+  // Create panel at body level to avoid clipping
+  var engineDropdownPanel = document.createElement('div');
+  engineDropdownPanel.className = 'engine-dropdown-panel';
+  engineDropdownPanel.id = 'engineDropdownPanel';
+  engineDropdownPanel.style.display = 'none';
+  document.body.appendChild(engineDropdownPanel);
+
+  // Engine config with brand SVGs
+  const ENGINE_CONFIG = {
+    microsoft: {
+      label: '微软',
+      svg: '<svg viewBox="0 0 18 18" width="16" height="16"><rect x="1.5" y="1.5" width="6.5" height="6.5" rx="1" fill="#F25022"/><rect x="10" y="1.5" width="6.5" height="6.5" rx="1" fill="#7FBA00"/><rect x="1.5" y="10" width="6.5" height="6.5" rx="1" fill="#00A4EF"/><rect x="10" y="10" width="6.5" height="6.5" rx="1" fill="#FFB900"/></svg>',
+    },
+    google: {
+      label: 'Google',
+      svg: '<svg viewBox="0 0 18 18" width="16" height="16"><circle cx="9" cy="9" r="7" fill="none" stroke="#4285F4" stroke-width="1.3"/><path d="M9 2.5A6.5 6.5 0 0 0 2.8 7h2.3a4.3 4.3 0 0 1 7.5-1.8l-2 2h4.8V2.4l-1.7 1.7A6.5 6.5 0 0 0 9 2.5z" fill="#4285F4"/><text x="9" y="13.5" text-anchor="middle" font-size="8" font-weight="700" fill="#4285F4" font-family="Arial,sans-serif">G</text></svg>',
+    },
+    ollama: {
+      label: 'Ollama',
+      svg: '<svg viewBox="0 0 18 18" width="16" height="16"><ellipse cx="9" cy="13" rx="5" ry="2.5" fill="#1a1a1a"/><ellipse cx="9" cy="7" rx="3" ry="4" fill="#2d2d2d"/><ellipse cx="9" cy="6" rx="2" ry="2.5" fill="#3d3d3d"/><circle cx="7.5" cy="5.5" r="1" fill="#f5f5f5"/><circle cx="10.5" cy="5.5" r="1" fill="#f5f5f5"/><ellipse cx="8" cy="4" rx="1.5" ry="2" fill="#2d2d2d"/><ellipse cx="10" cy="4" rx="1.5" ry="2" fill="#2d2d2d"/></svg>',
+    },
+    deepseek: {
+      label: 'DeepSeek',
+      svg: '<svg viewBox="0 0 18 18" width="16" height="16"><path d="M3 12 Q5 6 9 5 Q13 4 15 8 Q14 12 11 14 Q7 16 4 14z" fill="#4F6CF6"/><path d="M5 11 Q7 8 9 7 Q11 6 13 9 Q12 11 10 12 Q8 13 6 12z" fill="#6B8AFF"/></svg>',
+    },
+    doubao: {
+      label: '豆包',
+      svg: '<svg viewBox="0 0 18 18" width="16" height="16"><polygon points="9,2 14,10 12,10 13,16 8,11 5,11 7,7 4,7" fill="#F53B00"/><polygon points="9,4 12,9 10,9 11,13 8,10 6,10 8,7 6,7" fill="#FF6B35"/></svg>',
+    },
+    qwen: {
+      label: '通义千问',
+      svg: '<svg viewBox="0 0 18 18" width="16" height="16"><path d="M3 11 Q5 8 9 7 Q13 7 15 10 Q14 11 12 12 Q10 13 8 12 Q6 11 4 10z" fill="#6B4EFF"/><circle cx="7" cy="7" r="1.5" fill="#8B6FFF"/><circle cx="11" cy="7" r="1.5" fill="#8B6FFF"/></svg>',
+    },
+    deepl: {
+      label: 'DeepL',
+      svg: '<svg viewBox="0 0 18 18" width="16" height="16"><rect x="2" y="2" width="14" height="14" rx="3" fill="#0F2B46"/><text x="9" y="13.5" text-anchor="middle" font-size="9" font-weight="800" fill="white" font-family="Arial,sans-serif">D</text></svg>',
+    },
+  };
+
+  function renderEngineDropdown(selectedEngine) {
+    engineIcon.innerHTML = ENGINE_CONFIG[selectedEngine]?.svg || '';
+    engineLabel.textContent = ENGINE_CONFIG[selectedEngine]?.label || selectedEngine;
+    engineDropdownPanel.innerHTML = Object.keys(ENGINE_CONFIG).map(function (key) {
+      var cfg = ENGINE_CONFIG[key];
+      var active = key === selectedEngine ? ' active' : '';
+      return '<div class="engine-option' + active + '" data-engine="' + key + '">' +
+        '<span class="engine-icon">' + cfg.svg + '</span>' +
+        '<span>' + cfg.label + '</span>' +
+        '</div>';
+    }).join('');
+    // Wire click handlers
+    engineDropdownPanel.querySelectorAll('.engine-option').forEach(function (opt) {
+      opt.addEventListener('click', function () {
+        var engine = opt.dataset.engine;
+        selectEngine(engine);
+        closeEngineDropdown();
+      });
+    });
+  }
+
+  function selectEngine(engine) {
+    translateEngineSelect.value = engine;
+    prevEngine = engine;
+    renderEngineDropdown(engine);
+    if (engine === 'ollama') {
+      showOllamaModal();
+    } else if (isOpenAIEngine(engine) || engine === 'deepl') {
+      showApiKeyModal(engine);
+    } else {
+      saveSettings();
+      syncPageLangEngine();
+    }
+  }
+
+  function toggleEngineDropdown() {
+    engineDropdownOpen ? closeEngineDropdown() : openEngineDropdown();
+  }
+
+  function openEngineDropdown() {
+    engineDropdownOpen = true;
+    var rect = engineDropdownTrigger.getBoundingClientRect();
+    engineDropdownPanel.style.top = (rect.bottom + 4) + 'px';
+    engineDropdownPanel.style.right = (window.innerWidth - rect.right) + 'px';
+    engineDropdownPanel.style.display = '';
+    engineDropdown.classList.add('open');
+    setTimeout(function () {
+      document.addEventListener('click', onOutsideClick);
+    }, 0);
+  }
+
+  function closeEngineDropdown() {
+    engineDropdownOpen = false;
+    engineDropdownPanel.style.display = 'none';
+    engineDropdown.classList.remove('open');
+    document.removeEventListener('click', onOutsideClick);
+  }
+
+  function onOutsideClick(e) {
+    if (!engineDropdown.contains(e.target)) {
+      closeEngineDropdown();
+    }
+  }
+
+  engineDropdownTrigger.addEventListener('click', function (e) {
+    e.stopPropagation();
+    toggleEngineDropdown();
+  });
 
   // API key modal elements
   const apiKeyModal = document.getElementById('apiKeyModal');
@@ -227,20 +340,7 @@
     syncPageLangEngine();
   });
 
-  translateEngineSelect.addEventListener('change', function () {
-    var engine = translateEngineSelect.value;
-    if (engine === 'ollama') {
-      showOllamaModal();
-    } else if (isOpenAIEngine(engine)) {
-      showApiKeyModal(engine);
-    } else if (engine === 'deepl') {
-      showApiKeyModal(engine);
-    } else {
-      prevEngine = engine;
-      saveSettings();
-      syncPageLangEngine();
-    }
-  });
+  // Engine switching handled by custom dropdown via selectEngine()
 
   [sourceLangSelect].forEach(
     function (el) {
@@ -256,6 +356,8 @@
   ollamaModelInput.addEventListener('change', function () { saveSettings(); });
 
   function showOllamaModal() {
+    var cfg = ENGINE_CONFIG['ollama'];
+    document.getElementById('ollamaModalTitle').innerHTML = (cfg ? cfg.svg : '') + ' ' + cfg.label + ' 本地翻译';
     ollamaModal.style.display = 'flex';
     _ollamaPostChecked = false;
     checkOllamaStatus();
@@ -273,6 +375,7 @@
 
   ollamaConfirmBtn.addEventListener('click', function () {
     prevEngine = 'ollama';
+    renderEngineDropdown('ollama');
     hideOllamaModal();
     saveSettings();
     syncPageLangEngine();
@@ -280,12 +383,14 @@
 
   ollamaCancelBtn.addEventListener('click', function () {
     translateEngineSelect.value = prevEngine;
+    renderEngineDropdown(prevEngine);
     hideOllamaModal();
   });
 
   ollamaModal.addEventListener('click', function (e) {
     if (e.target === ollamaModal) {
       translateEngineSelect.value = prevEngine;
+      renderEngineDropdown(prevEngine);
       hideOllamaModal();
     }
   });
@@ -300,8 +405,9 @@
   function showApiKeyModal(engine) {
     pendingApiEngine = engine;
     var isOpenAI = isOpenAIEngine(engine);
+    var cfg = ENGINE_CONFIG[engine] || {};
     if (isOpenAI) {
-      apiKeyModalTitle.textContent = '🤖 ' + engine + ' API 设置';
+      apiKeyModalTitle.innerHTML = (cfg.svg || '') + ' ' + cfg.label + ' API 设置';
       var preset = OPENAI_PRESETS[engine] || { url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' };
       apiUrlInput.value = apiUrlInput.value || preset.url;
       apiModelInput.value = apiModelInput.value || preset.model;
@@ -309,7 +415,7 @@
       apiModelGroup.style.display = '';
     } else {
       // DeepL
-      apiKeyModalTitle.textContent = '🌐 DeepL API 设置';
+      apiKeyModalTitle.innerHTML = (cfg.svg || '') + ' ' + cfg.label + ' API 设置';
       apiUrlGroup.style.display = 'none';
       apiModelGroup.style.display = 'none';
     }
@@ -324,6 +430,7 @@
   apiKeyConfirmBtn.addEventListener('click', function () {
     if (!pendingApiEngine) return;
     prevEngine = pendingApiEngine;
+    renderEngineDropdown(pendingApiEngine);
     hideApiKeyModal();
     saveSettings();
     syncPageLangEngine();
@@ -331,7 +438,16 @@
 
   apiKeyCancelBtn.addEventListener('click', function () {
     translateEngineSelect.value = prevEngine;
+    renderEngineDropdown(prevEngine);
     hideApiKeyModal();
+  });
+
+  apiKeyModal.addEventListener('click', function (e) {
+    if (e.target === apiKeyModal) {
+      translateEngineSelect.value = prevEngine;
+      renderEngineDropdown(prevEngine);
+      hideApiKeyModal();
+    }
   });
 
   apiKeyModal.addEventListener('click', function (e) {
@@ -491,20 +607,7 @@
     chrome.downloads.download({ url: INSTALLER_URL, filename: 'AI-Translation-Installer.exe', saveAs: true });
   });
 
-  // ─── Engine badge ──────────────────────────────────────────────────
-  engineBadge.addEventListener('change', function () {
-    var engine = engineBadge.value;
-    translateEngineSelect.value = engine;
-    prevEngine = engine;
-    if (engine === 'ollama') {
-      showOllamaModal();
-    } else if (isOpenAIEngine(engine) || engine === 'deepl') {
-      showApiKeyModal(engine);
-    } else {
-      saveSettings();
-      syncPageLangEngine();
-    }
-  });
+  // ─── Engine badge (custom dropdown, replaces old <select>) ──────────
 
   // ─── Login / Account links ──────────────────────────────────────────
   function openAppPage(hash) {
@@ -837,7 +940,7 @@
   // ─── Init ─────────────────────────────────────────────────────────
   async function init() {
     await loadSettings();
-    engineBadge.value = translateEngineSelect.value;
+    renderEngineDropdown(translateEngineSelect.value);
     checkLocalService();
     checkLoginState();
 
