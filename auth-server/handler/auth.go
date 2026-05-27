@@ -128,7 +128,12 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 500, map[string]string{"error": "登录失败"})
 		return
 	}
-	token, err := h.signJWT(user)
+	ver, err := h.db.IncrementTokenVersion(req.Email)
+	if err != nil {
+		jsonResp(w, 500, map[string]string{"error": "登录失败"})
+		return
+	}
+	token, err := h.signJWT(user, ver)
 	if err != nil {
 		jsonResp(w, 500, map[string]string{"error": "生成token失败"})
 		return
@@ -149,9 +154,14 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email, _ := claims["email"].(string)
+	tokenVer, _ := claims["ver"].(float64)
 	user, err := h.db.FindByEmail(email)
 	if err != nil {
 		jsonResp(w, 500, map[string]string{"error": "用户不存在"})
+		return
+	}
+	if int(tokenVer) != user.TokenVersion {
+		jsonResp(w, 401, map[string]string{"error": "已在其他设备登录，请重新登录"})
 		return
 	}
 	jsonResp(w, 200, map[string]any{"plan": user.Plan, "user": user})
@@ -176,6 +186,17 @@ func (h *Handler) SetPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	operatorEmail, _ := claims["email"].(string)
+	tokenVer, _ := claims["ver"].(float64)
+
+	operator, err := h.db.FindByEmail(operatorEmail)
+	if err != nil {
+		jsonResp(w, 404, map[string]string{"error": "用户不存在"})
+		return
+	}
+	if int(tokenVer) != operator.TokenVersion {
+		jsonResp(w, 401, map[string]string{"error": "已在其他设备登录，请重新登录"})
+		return
+	}
 	isAdmin := operatorEmail == "328876490@qq.com"
 
 	var req struct {
@@ -215,10 +236,11 @@ func (h *Handler) SetPlan(w http.ResponseWriter, r *http.Request) {
 	jsonResp(w, 200, map[string]string{"ok": "已更新"})
 }
 
-func (h *Handler) signJWT(user *model.User) (string, error) {
+func (h *Handler) signJWT(user *model.User, ver int) (string, error) {
 	claims := jwt.MapClaims{
 		"email": user.Email,
 		"plan":  user.Plan,
+		"ver":   ver,
 		"iat":   time.Now().Unix(),
 		"exp":   time.Now().Add(30 * 24 * time.Hour).Unix(),
 	}

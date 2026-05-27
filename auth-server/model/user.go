@@ -8,11 +8,12 @@ import (
 )
 
 type User struct {
-	ID        int64     `json:"id"`
-	Email     string    `json:"email"`
-	Plan      string    `json:"plan"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID           int64     `json:"id"`
+	Email        string    `json:"email"`
+	Plan         string    `json:"plan"`
+	TokenVersion int       `json:"-"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type DB struct {
@@ -33,11 +34,12 @@ func NewDB(dsn string) (*DB, error) {
 func (db *DB) Migrate() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS users (
-			id         BIGINT AUTO_INCREMENT PRIMARY KEY,
-			email      VARCHAR(128) NOT NULL UNIQUE,
-			plan       VARCHAR(16) NOT NULL DEFAULT 'trial',
-			created_at DATETIME NOT NULL DEFAULT (UTC_TIMESTAMP()),
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+			id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+			email         VARCHAR(128) NOT NULL UNIQUE,
+			plan          VARCHAR(16) NOT NULL DEFAULT 'trial',
+			token_version INT NOT NULL DEFAULT 1,
+			created_at    DATETIME NOT NULL DEFAULT (UTC_TIMESTAMP()),
+			updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS verify_codes (
 			id         BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -61,6 +63,8 @@ func (db *DB) Migrate() error {
 			return err
 		}
 	}
+	// Safe migration: add token_version to existing table
+	db.Exec(`ALTER TABLE users ADD COLUMN token_version INT NOT NULL DEFAULT 1`)
 	return nil
 }
 
@@ -78,13 +82,23 @@ func (db *DB) UpsertUser(email string) (*User, error) {
 func (db *DB) FindByEmail(email string) (*User, error) {
 	u := &User{}
 	err := db.QueryRow(
-		`SELECT id, email, plan, created_at, updated_at FROM users WHERE email=?`,
+		`SELECT id, email, plan, token_version, created_at, updated_at FROM users WHERE email=?`,
 		email,
-	).Scan(&u.ID, &u.Email, &u.Plan, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Email, &u.Plan, &u.TokenVersion, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	return u, nil
+}
+
+func (db *DB) IncrementTokenVersion(email string) (int, error) {
+	_, err := db.Exec(`UPDATE users SET token_version = token_version + 1 WHERE email=?`, email)
+	if err != nil {
+		return 0, err
+	}
+	var v int
+	err = db.QueryRow(`SELECT token_version FROM users WHERE email=?`, email).Scan(&v)
+	return v, err
 }
 
 func (db *DB) CanSendCode(email string, cooldown time.Duration) (bool, error) {

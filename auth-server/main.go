@@ -81,6 +81,13 @@ func main() {
 			http.Error(w, `{"error":"需要高级版"}`, 403)
 			return
 		}
+		email, _ := claims["email"].(string)
+		tokenVer, _ := claims["ver"].(float64)
+		user, _ := db.FindByEmail(email)
+		if user == nil || int(tokenVer) != user.TokenVersion {
+			http.Error(w, `{"error":"已在其他设备登录"}`, 401)
+			return
+		}
 		// Serve dist.zip for the installer bootstrapper
 		zipPath := os.Getenv("DIST_ZIP_PATH")
 		if zipPath == "" {
