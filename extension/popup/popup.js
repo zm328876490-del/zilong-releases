@@ -28,6 +28,11 @@
   const statusIndicator = document.getElementById('statusIndicator');
   const statusText = document.getElementById('statusText');
   const errorMsg = document.getElementById('errorMsg');
+  const serviceStatus = document.getElementById('serviceStatus');
+  const installBtn = document.getElementById('installBtn');
+
+  const INSTALLER_URL = 'http://localhost:14532/api/download/installer';
+  const LOCAL_HEALTH = 'http://localhost:29527/health';
 
   let isRunning = false;
 
@@ -306,9 +311,32 @@
     }
   });
 
+  // ─── Local Service ──────────────────────────────────────────────
+  async function checkLocalService() {
+    serviceStatus.textContent = '检测中...';
+    serviceStatus.className = 'service-status checking';
+    installBtn.style.display = 'none';
+    try {
+      var resp = await fetch(LOCAL_HEALTH);
+      if (resp.ok) {
+        serviceStatus.textContent = '本地服务: 运行中 ✅';
+        serviceStatus.className = 'service-status running';
+        return;
+      }
+    } catch (_) {}
+    serviceStatus.textContent = '本地服务: 未安装';
+    serviceStatus.className = 'service-status stopped';
+    installBtn.style.display = '';
+  }
+
+  installBtn.addEventListener('click', function () {
+    chrome.downloads.download({ url: INSTALLER_URL, filename: 'AI-Translation-Installer.exe', saveAs: true });
+  });
+
   // ─── Init ─────────────────────────────────────────────────────────
   async function init() {
     await loadSettings();
+    checkLocalService();
 
     // Sync separate keys for page-translate.js (which reads them individually)
     chrome.storage.local.set({

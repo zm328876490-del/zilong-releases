@@ -6,12 +6,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"ai-translation/auth-server/config"
 	"ai-translation/auth-server/handler"
 	"ai-translation/auth-server/mail"
 	"ai-translation/auth-server/model"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func cors(next http.HandlerFunc) http.HandlerFunc {
@@ -49,6 +52,34 @@ func main() {
 	mux.HandleFunc("/api/auth/login", cors(h.Login))
 	mux.HandleFunc("/api/auth/me", cors(h.Me))
 	mux.HandleFunc("/api/admin/set-plan", cors(h.SetPlan))
+	mux.HandleFunc("/api/download/installer", func(w http.ResponseWriter, r *http.Request) {
+		// Validate premium token
+		tokenStr := r.Header.Get("Authorization")
+		if tokenStr == "" {
+			http.Error(w, `{"error":"未登录"}`, 401)
+			return
+		}
+		tokenStr = strings.TrimPrefix(tokenStr, "Bearer ")
+		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+			return []byte(cfg.JWTSecret), nil
+		})
+		if err != nil || !token.Valid {
+			http.Error(w, `{"error":"token无效"}`, 401)
+			return
+		}
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok || claims["plan"] != "premium" {
+			http.Error(w, `{"error":"需要高级版"}`, 403)
+			return
+		}
+		// Serve dist.zip for the installer bootstrapper
+		zipPath := os.Getenv("DIST_ZIP_PATH")
+		if zipPath == "" {
+			zipPath = "dist.zip"
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		http.ServeFile(w, r, zipPath)
+	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"status":"ok"}`)

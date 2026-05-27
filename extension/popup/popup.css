@@ -225,6 +225,35 @@ select {
   padding-right: 28px;
 }
 
+/* ─── Local Service ─────────────────────── */
+.service-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.service-status {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.service-status.checking { color: #9ca3af; }
+.service-status.running   { color: #059669; }
+.service-status.stopped   { color: #dc2626; }
+
+.btn-install {
+  width: auto !important;
+  padding: 8px 16px !important;
+  margin: 0 !important;
+  font-size: 12px !important; font-weight: 700 !important;
+  border-radius: 10px !important;
+  background: linear-gradient(135deg, #059669, #10b981) !important;
+  color: #fff !important;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* ─── Button ─────────────────────────────── */
 button {
   width: 100%;
