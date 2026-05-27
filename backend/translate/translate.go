@@ -15,12 +15,18 @@ import (
 // ctxPair is an original→translated pair stored for context injection.
 type ctxPair struct{ original, translated string }
 
-// Translator supports multiple backends. Engine can be set to "microsoft", "google", or "ollama".
+// Translator supports multiple backends.
+// Engine can be "microsoft", "google", "ollama", "openai", or "deepl"; empty = auto.
 type Translator struct {
-	engine      string // "microsoft", "google", or "ollama"; empty = auto
+	engine      string
 	asyncFn     func(text, from, to string) (string, error)
 	ollamaUrl   string
 	ollamaModel string
+	openaiUrl   string
+	openaiKey   string
+	openaiModel string
+	deeplKey    string
+	deeplUrl    string
 	msToken     string
 	msTokenAt   time.Time
 	msTokenMu   sync.Mutex
@@ -28,7 +34,7 @@ type Translator struct {
 	cache       map[string]string
 	cacheKeys   []string
 	cacheMu     sync.RWMutex
-	// Rolling context window for ollama subtitle translation
+	// Rolling context window for LLM subtitle translation (ollama + openai)
 	ctxRing  []ctxPair
 	ctxIdx   int
 	ctxCount int
@@ -72,6 +78,21 @@ func (t *Translator) SetAsyncFn(fn func(text, from, to string) (string, error)) 
 func (t *Translator) SetOllama(url, model string) {
 	t.ollamaUrl = strings.TrimRight(url, "/")
 	t.ollamaModel = model
+}
+
+func (t *Translator) SetOpenAI(url, key, model string) {
+	t.openaiUrl = strings.TrimRight(url, "/")
+	t.openaiKey = key
+	t.openaiModel = model
+}
+
+func (t *Translator) SetDeepL(key, url string) {
+	t.deeplKey = key
+	if url != "" {
+		t.deeplUrl = strings.TrimRight(url, "/")
+	} else {
+		t.deeplUrl = "https://api-free.deepl.com"
+	}
 }
 
 func (t *Translator) Engine() string {
@@ -118,6 +139,18 @@ case "google":
 			t.cachePut(cacheKey, result)
 		}
 		return result, err
+		case "openai":
+			result, err := t.translateOpenAI(text, from, to)
+			if err == nil {
+				t.cachePut(cacheKey, result)
+			}
+			return result, err
+		case "deepl":
+			result, err := t.translateDeepL(text, from, to)
+			if err == nil {
+				t.cachePut(cacheKey, result)
+			}
+			return result, err
 	default:
 		// Auto: Microsoft first, then Google fallback
 		result, err := t.translateMicrosoft(text, from, to)
@@ -137,6 +170,14 @@ case "google":
 // In Ollama mode it uses a simple prompt with no context ring — each text
 // fragment is independent. For other engines it falls through to Translate.
 func (t *Translator) TranslateImage(text, from, to string) (string, error) {
+	if t.engine == "openai" {
+		result, err := t.translateOpenAIImage(text, from, to)
+		if err == nil {
+			cacheKey := from + "|" + to + "|" + text
+			t.cachePut(cacheKey, result)
+		}
+		return result, err
+	}
 	if t.engine == "ollama" {
 		result, err := t.translateOllamaImage(text, from, to)
 		if err == nil {
@@ -592,5 +633,193 @@ func (t *Translator) translateOllamaImage(text, from, to string) (string, error)
 	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
 	result = strings.Trim(result, "\"'")
 	return result, nil
+}
+
+// ─── OpenAI-compatible (DeepSeek, 豆包/火山, 通义千问/DashScope) ─────────
+
+func (t *Translator) translateOpenAI(text, from, to string) (string, error) {
+	if t.openaiUrl == "" {
+		return "", fmt.Errorf("OpenAI URL not configured")
+	}
+	if t.openaiKey == "" {
+		return "", fmt.Errorf("OpenAI API key not configured")
+	}
+	if t.openaiModel == "" {
+		return "", fmt.Errorf("OpenAI model not configured")
+	}
+
+	systemPrompt := buildOllamaPrompt(to)
+
+	t.ctxMu.Lock()
+	var messages []ollamaChatMessage
+	messages = append(messages, ollamaChatMessage{Role: "system", Content: systemPrompt})
+	pairs := t.ctxPairsLocked()
+	for _, p := range pairs {
+		messages = append(messages,
+			ollamaChatMessage{Role: "user", Content: p.original},
+			ollamaChatMessage{Role: "assistant", Content: p.translated},
+		)
+	}
+	t.ctxMu.Unlock()
+	messages = append(messages, ollamaChatMessage{Role: "user", Content: text})
+
+	reqBody := ollamaChatRequest{
+		Model:       t.openaiModel,
+		Messages:    messages,
+		Stream:      false,
+		Temperature: 0.1,
+	}
+
+	bodyBytes, _ := json.Marshal(reqBody)
+	endpoint := t.openaiUrl + "/v1/chat/completions"
+
+	req, _ := http.NewRequest("POST", endpoint, strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+t.openaiKey)
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("openai request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("openai HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var chatResp ollamaChatResponse
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		return "", fmt.Errorf("openai parse: %w", err)
+	}
+	if len(chatResp.Choices) == 0 {
+		return "", fmt.Errorf("openai empty response")
+	}
+
+	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	result = strings.Trim(result, "\"'")
+
+	t.ctxMu.Lock()
+	t.ctxRing[t.ctxIdx] = ctxPair{original: text, translated: result}
+	t.ctxIdx = (t.ctxIdx + 1) % len(t.ctxRing)
+	if t.ctxCount < len(t.ctxRing) {
+		t.ctxCount++
+	}
+	t.ctxMu.Unlock()
+
+	return result, nil
+}
+
+func (t *Translator) translateOpenAIImage(text, from, to string) (string, error) {
+	if t.openaiUrl == "" {
+		return "", fmt.Errorf("OpenAI URL not configured")
+	}
+	if t.openaiKey == "" {
+		return "", fmt.Errorf("OpenAI API key not configured")
+	}
+	if t.openaiModel == "" {
+		return "", fmt.Errorf("OpenAI model not configured")
+	}
+
+	systemPrompt := buildOllamaImagePrompt(to)
+
+	messages := []ollamaChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: text},
+	}
+
+	reqBody := ollamaChatRequest{
+		Model:       t.openaiModel,
+		Messages:    messages,
+		Stream:      false,
+		Temperature: 0.1,
+	}
+
+	bodyBytes, _ := json.Marshal(reqBody)
+	endpoint := t.openaiUrl + "/v1/chat/completions"
+
+	req, _ := http.NewRequest("POST", endpoint, strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+t.openaiKey)
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("openai request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("openai HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var chatResp ollamaChatResponse
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		return "", fmt.Errorf("openai parse: %w", err)
+	}
+	if len(chatResp.Choices) == 0 {
+		return "", fmt.Errorf("openai empty response")
+	}
+
+	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	result = strings.Trim(result, "\"'")
+	return result, nil
+}
+
+// ─── DeepL ────────────────────────────────────────────────────────────────
+
+func mapLangDeepL(lang string) string {
+	m := map[string]string{
+		"zh-Hans": "ZH", "zh-Hant": "ZH", "zh": "ZH",
+		"en": "EN-US", "ja": "JA", "ko": "KO", "fr": "FR", "de": "DE",
+		"es": "ES", "pt": "PT-PT", "ru": "RU", "ar": "AR", "th": "TH", "vi": "VI",
+	}
+	if v, ok := m[lang]; ok {
+		return v
+	}
+	return strings.ToUpper(lang)
+}
+
+func (t *Translator) translateDeepL(text, from, to string) (string, error) {
+	if t.deeplKey == "" {
+		return "", fmt.Errorf("DeepL API key not configured")
+	}
+
+	toLang := mapLangDeepL(to)
+	form := url.Values{}
+	form.Set("text", text)
+	form.Set("target_lang", toLang)
+	if from != "" && from != "auto" {
+		form.Set("source_lang", mapLangDeepL(from))
+	}
+
+	endpoint := t.deeplUrl + "/v2/translate"
+	req, _ := http.NewRequest("POST", endpoint, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "DeepL-Auth-Key "+t.deeplKey)
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("deepl request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("deepl HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Translations []struct {
+			Text string `json:"text"`
+		} `json:"translations"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("deepl parse: %w", err)
+	}
+	if len(result.Translations) == 0 {
+		return "", fmt.Errorf("deepl empty result")
+	}
+	return strings.TrimSpace(result.Translations[0].Text), nil
 }
 

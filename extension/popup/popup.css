@@ -535,15 +535,22 @@ input[type="range"]:focus {
 .auth-row input { flex: 1; min-width: 120px; }
 .auth-row .btn-mini { flex-shrink: 0; width: auto !important; display: inline-flex !important; }
 .btn-mini {
-  padding: 9px 12px; font-size: 11px; font-weight: 700;
-  background: rgba(243,244,246,0.7); color: #4b5563;
-  border: 1px solid rgba(0,0,0,0.05);
+  padding: 9px 14px; font-size: 11px; font-weight: 700;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  border: none;
   border-radius: 10px; cursor: pointer; white-space: nowrap;
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  box-shadow: 0 2px 8px rgba(99,102,241,0.3);
   width: auto; flex-shrink: 0; line-height: 1.2;
+  transition: all 0.25s;
+  min-width: 80px; text-align: center;
 }
-.btn-mini:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-mini:hover { background: linear-gradient(135deg, #4f46e5, #7c3aed); box-shadow: 0 4px 14px rgba(99,102,241,0.4); }
+.btn-mini:active { transform: scale(0.96); }
+.btn-mini:disabled {
+  background: rgba(243,244,246,0.7); color: #9ca3af;
+  box-shadow: none; cursor: not-allowed; transform: none;
+}
 .auth-tip { font-size: 10px; color: #9ca3af; margin-top: -2px; margin-bottom: 8px; }
 
 /* Modal close button */

@@ -37,15 +37,25 @@
   const headerUpgrade = document.getElementById('headerUpgrade');
   const engineBadge = document.getElementById('engineBadge');
 
-  // Login modal elements
-  const licModalBg = document.getElementById('licModalBg');
-  const btnLicX = document.getElementById('btnLicX');
-  const btnLicCancel = document.getElementById('btnLicCancel');
-  const btnLicOk = document.getElementById('btnLicOk');
-  const licMsg = document.getElementById('licMsg');
-  const authEmailInput = document.getElementById('authEmailInput');
-  const authCodeInput = document.getElementById('authCodeInput');
-  const btnSendCode = document.getElementById('btnSendCode');
+  // API key modal elements
+  const apiKeyModal = document.getElementById('apiKeyModal');
+  const apiKeyModalTitle = document.getElementById('apiKeyModalTitle');
+  const apiUrlGroup = document.getElementById('apiUrlGroup');
+  const apiUrlInput = document.getElementById('apiUrl');
+  const apiKeyInput = document.getElementById('apiKey');
+  const apiModelGroup = document.getElementById('apiModelGroup');
+  const apiModelInput = document.getElementById('apiModel');
+  const apiKeyCancelBtn = document.getElementById('apiKeyCancel');
+  const apiKeyConfirmBtn = document.getElementById('apiKeyConfirm');
+
+  // OpenAI-compatible provider presets
+  const OPENAI_PRESETS = {
+    deepseek: { url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+    doubao:  { url: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-pro-32k' },
+    qwen:    { url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+  };
+
+  let pendingApiEngine = null; // which engine triggered the apiKeyModal
 
   const INSTALLER_URL = 'http://localhost:14532/api/download/installer';
   const LOCAL_HEALTH = 'http://localhost:29527/health';
@@ -60,6 +70,10 @@
     engine: 'microsoft',
     ollamaUrl: 'http://localhost:11434',
     ollamaModel: 'qwen2.5:7b',
+    openaiUrl: 'https://api.deepseek.com/v1',
+    openaiKey: '',
+    openaiModel: 'deepseek-chat',
+    deeplKey: '',
     subtitleEnabled: true,
     subtitleSize: 50,
     originalVolume: 30,
@@ -67,6 +81,14 @@
     pageGlobalEnabled: true,
     pageBilingual: false,
   };
+
+  function isOpenAIEngine(engine) {
+    return engine === 'deepseek' || engine === 'doubao' || engine === 'qwen';
+  }
+
+  function getBackendEngine(engine) {
+    return isOpenAIEngine(engine) ? 'openai' : engine;
+  }
 
   async function loadSettings() {
     const result = await chrome.storage.local.get(['translationSettings', 'pageBilingual']);
@@ -81,6 +103,10 @@
     translateEngineSelect.value = settings.engine || DEFAULT_SETTINGS.engine;
     ollamaUrlInput.value = settings.ollamaUrl || DEFAULT_SETTINGS.ollamaUrl;
     ollamaModelInput.value = settings.ollamaModel || DEFAULT_SETTINGS.ollamaModel;
+    // New engine fields — restore from per-engine keys or defaults
+    apiUrlInput.value = settings.openaiUrl || DEFAULT_SETTINGS.openaiUrl;
+    apiKeyInput.value = settings.openaiKey || DEFAULT_SETTINGS.openaiKey;
+    apiModelInput.value = settings.openaiModel || DEFAULT_SETTINGS.openaiModel;
     prevEngine = settings.engine || DEFAULT_SETTINGS.engine;
     subtitleToggle.checked = settings.subtitleEnabled !== false;
     updateSubtitleSizeVisibility();
@@ -103,6 +129,10 @@
       engine: translateEngineSelect.value,
       ollamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
       ollamaModel: ollamaModelInput.value.trim() || 'qwen2.5:7b',
+      openaiUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
+      openaiKey: apiKeyInput.value.trim(),
+      openaiModel: apiModelInput.value.trim() || DEFAULT_SETTINGS.openaiModel,
+      deeplKey: apiKeyInput.value.trim(),
       subtitleEnabled: subtitleToggle.checked,
       subtitleSize: parseInt(subtitleSizeSlider.value, 10),
       originalVolume: parseInt(originalVolumeSlider.value, 10),
@@ -160,10 +190,15 @@
   });
 
   translateEngineSelect.addEventListener('change', function () {
-    if (translateEngineSelect.value === 'ollama') {
+    var engine = translateEngineSelect.value;
+    if (engine === 'ollama') {
       showOllamaModal();
+    } else if (isOpenAIEngine(engine)) {
+      showApiKeyModal(engine);
+    } else if (engine === 'deepl') {
+      showApiKeyModal(engine);
     } else {
-      prevEngine = translateEngineSelect.value;
+      prevEngine = engine;
       saveSettings();
       syncPageLangEngine();
     }
@@ -205,6 +240,52 @@
     if (e.target === ollamaModal) {
       translateEngineSelect.value = prevEngine;
       hideOllamaModal();
+    }
+  });
+
+  // ─── API Key modal (for DeepL and OpenAI-compatible engines) ────────
+
+  function showApiKeyModal(engine) {
+    pendingApiEngine = engine;
+    var isOpenAI = isOpenAIEngine(engine);
+    if (isOpenAI) {
+      apiKeyModalTitle.textContent = '🤖 ' + engine + ' API 设置';
+      var preset = OPENAI_PRESETS[engine] || { url: 'https://api.deepseek.com/v1', model: 'deepseek-chat' };
+      apiUrlInput.value = apiUrlInput.value || preset.url;
+      apiModelInput.value = apiModelInput.value || preset.model;
+      apiUrlGroup.style.display = '';
+      apiModelGroup.style.display = '';
+    } else {
+      // DeepL
+      apiKeyModalTitle.textContent = '🌐 DeepL API 设置';
+      apiUrlGroup.style.display = 'none';
+      apiModelGroup.style.display = 'none';
+    }
+    apiKeyModal.style.display = 'flex';
+  }
+
+  function hideApiKeyModal() {
+    apiKeyModal.style.display = 'none';
+    pendingApiEngine = null;
+  }
+
+  apiKeyConfirmBtn.addEventListener('click', function () {
+    if (!pendingApiEngine) return;
+    prevEngine = pendingApiEngine;
+    hideApiKeyModal();
+    saveSettings();
+    syncPageLangEngine();
+  });
+
+  apiKeyCancelBtn.addEventListener('click', function () {
+    translateEngineSelect.value = prevEngine;
+    hideApiKeyModal();
+  });
+
+  apiKeyModal.addEventListener('click', function (e) {
+    if (e.target === apiKeyModal) {
+      translateEngineSelect.value = prevEngine;
+      hideApiKeyModal();
     }
   });
 
@@ -262,20 +343,29 @@
 
   // Sync language/engine changes to page translation settings
   async function syncPageLangEngine() {
+    var engine = translateEngineSelect.value;
     chrome.storage.local.set({
       pageSourceLang: sourceLangSelect.value,
       pageTargetLang: targetLangSelect.value,
-      pageEngine: translateEngineSelect.value,
+      pageEngine: engine,
       pageOllamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
       pageOllamaModel: ollamaModelInput.value.trim() || 'qwen2.5:7b',
+      pageOpenAIUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
+      pageOpenAIKey: apiKeyInput.value.trim(),
+      pageOpenAIModel: apiModelInput.value.trim() || DEFAULT_SETTINGS.openaiModel,
+      pageDeepLKey: apiKeyInput.value.trim(),
     });
     pushPageMessage('PAGE_UPDATE_SETTINGS', {
       settings: {
         sourceLang: sourceLangSelect.value,
         targetLang: targetLangSelect.value,
-        engine: translateEngineSelect.value,
+        engine: engine,
         ollamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
         ollamaModel: ollamaModelInput.value.trim() || 'qwen2.5:7b',
+        openaiUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
+        openaiKey: apiKeyInput.value.trim(),
+        openaiModel: apiModelInput.value.trim() || DEFAULT_SETTINGS.openaiModel,
+        deeplKey: apiKeyInput.value.trim(),
       },
     });
   }
@@ -354,81 +444,29 @@
     var engine = engineBadge.value;
     translateEngineSelect.value = engine;
     prevEngine = engine;
-    saveSettings();
-    syncPageLangEngine();
-    if (engine === 'ollama') showOllamaModal();
+    if (engine === 'ollama') {
+      showOllamaModal();
+    } else if (isOpenAIEngine(engine) || engine === 'deepl') {
+      showApiKeyModal(engine);
+    } else {
+      saveSettings();
+      syncPageLangEngine();
+    }
   });
 
-  // ─── Login Modal ──────────────────────────────────────────────────
-  function showLicModal() { licModalBg.classList.add('show'); }
-  function hideLicModal() { licModalBg.classList.remove('show'); clearLicMsg(); }
-  function clearLicMsg() { licMsg.textContent = ''; licMsg.className = 'lic-msg'; }
+  // ─── Login / Account links ──────────────────────────────────────────
+  function openAppPage(hash) {
+    chrome.tabs.create({ url: chrome.runtime.getURL('app.html' + (hash ? '#' + hash : '')) });
+  }
 
-  headerLogin.addEventListener('click', showLicModal);
+  headerLogin.addEventListener('click', function () { openAppPage('login'); });
   headerUpgrade.addEventListener('click', function () {
-    chrome.tabs.create({ url: chrome.runtime.getURL('buy.html') });
+    var isPremium = headerUpgrade.textContent === '管理';
+    openAppPage(isPremium ? 'account' : 'buy');
   });
-  headerAvatar.addEventListener('click', showLicModal);
-
-  btnLicX.addEventListener('click', hideLicModal);
-  btnLicCancel.addEventListener('click', hideLicModal);
-  licModalBg.addEventListener('click', function (e) {
-    if (e.target === licModalBg) hideLicModal();
-  });
-
-  // Send verification code
-  var sendCodeCooldown = false;
-  btnSendCode.addEventListener('click', function () {
-    var email = authEmailInput.value.trim();
-    if (!email) { licMsg.textContent = '请输入邮箱'; licMsg.className = 'lic-msg'; return; }
-    if (sendCodeCooldown) return;
-    sendCodeCooldown = true;
-    btnSendCode.disabled = true;
-    licMsg.textContent = '发送中...';
-    licMsg.className = 'lic-msg';
-    fetch('http://localhost:14532/api/auth/send-code', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email }),
-    })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (data.error) { licMsg.textContent = data.error; licMsg.className = 'lic-msg'; }
-        else { licMsg.textContent = '验证码已发送，请查收邮箱'; licMsg.className = 'lic-msg ok'; }
-      })
-      .catch(function () { licMsg.textContent = '无法连接服务器'; licMsg.className = 'lic-msg'; })
-      .finally(function () {
-        sendCodeCooldown = false;
-        btnSendCode.disabled = false;
-      });
-  });
-
-  // Login
-  btnLicOk.addEventListener('click', function () {
-    var email = authEmailInput.value.trim();
-    var code = authCodeInput.value.trim();
-    if (!email || !code) { licMsg.textContent = '请填写邮箱和验证码'; licMsg.className = 'lic-msg'; return; }
-    licMsg.textContent = '登录中...';
-    licMsg.className = 'lic-msg';
-    btnLicOk.disabled = true;
-    fetch('http://localhost:14532/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email, code: code }),
-    })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (data.error) { licMsg.textContent = data.error; licMsg.className = 'lic-msg'; return; }
-        if (data.token) {
-          chrome.storage.local.set({ authToken: data.token, userPlan: data.plan || 'trial', userEmail: email }, function () {
-            updateHeaderFromToken(data.token, data.plan || 'trial');
-            licMsg.textContent = '登录成功'; licMsg.className = 'lic-msg ok';
-            setTimeout(hideLicModal, 800);
-          });
-        }
-      })
-      .catch(function () { licMsg.textContent = '无法连接服务器'; licMsg.className = 'lic-msg'; })
-      .finally(function () { btnLicOk.disabled = false; });
+  headerAvatar.addEventListener('click', function () {
+    var licText = headerLicText.textContent || '';
+    openAppPage(licText.indexOf('已登录') !== -1 ? 'account' : 'login');
   });
 
   // Update header based on login state

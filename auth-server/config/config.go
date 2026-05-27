@@ -13,15 +13,22 @@ type Config struct {
 }
 
 func Load() *Config {
-	return &Config{
-		Port:         getEnv("PORT", "14532"),
-		MySQLDSN:     getEnv("MYSQL_DSN", "root:root@tcp(127.0.0.1:3306)/auth_server?charset=utf8mb4&parseTime=true"),
-		JWTSecret:    getEnv("JWT_SECRET", "change-me-in-production-2026"),
-		SMTPHost:     "smtp.qq.com",
-		SMTPPort:     "587",
-		SMTPUser:     "329976490@qq.com",
-		SMTPPassword: os.Getenv("SMTP_PASSWORD"),
+	cfg := &Config{
+		Port:     getEnv("PORT", "14532"),
+		MySQLDSN: getEnv("MYSQL_DSN", "root:rise@mysql@tcp(127.0.0.1:3306)/auth_server?charset=utf8mb4&parseTime=true&loc=UTC"),
+		SMTPHost: "smtp.qq.com",
+		SMTPPort: "465",
+		SMTPUser: getEnv("SMTP_USER", "328876490@qq.com"),
 	}
+	cfg.JWTSecret = os.Getenv("JWT_SECRET")
+	if cfg.JWTSecret == "" {
+		panic("JWT_SECRET 环境变量未设置")
+	}
+	cfg.SMTPPassword = os.Getenv("SMTP_PASSWORD")
+	if cfg.SMTPPassword == "" {
+		panic("SMTP_PASSWORD 环境变量未设置")
+	}
+	return cfg
 }
 
 func getEnv(key, def string) string {

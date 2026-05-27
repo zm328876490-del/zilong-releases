@@ -191,6 +191,10 @@ type InMsg struct {
 	TTSVoice    string     `json:"ttsVoice,omitempty"`
 	OllamaUrl   string     `json:"ollamaUrl,omitempty"`
 	OllamaModel string     `json:"ollamaModel,omitempty"`
+	OpenAIUrl   string     `json:"openaiUrl,omitempty"`
+	OpenAIKey   string     `json:"openaiKey,omitempty"`
+	OpenAIModel string     `json:"openaiModel,omitempty"`
+	DeepLKey    string     `json:"deeplKey,omitempty"`
 	Translation string     `json:"translation,omitempty"` // translate_response result
 	Error         string     `json:"error,omitempty"`       // translate_response error
 	Rolling       bool       `json:"rolling,omitempty"`
@@ -996,6 +1000,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if msg.Engine == "ollama" {
 					client.translator.SetOllama(msg.OllamaUrl, msg.OllamaModel)
 				}
+				if msg.Engine == "openai" {
+					client.translator.SetOpenAI(msg.OpenAIUrl, msg.OpenAIKey, msg.OpenAIModel)
+				}
+				if msg.Engine == "deepl" {
+					client.translator.SetDeepL(msg.DeepLKey, "")
+				}
 				if msg.Rolling {
 					if client.rollingBuf == nil {
 						client.rollingBuf = asr.NewRollingBuffer(
@@ -1151,12 +1161,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // ─── Page Translation HTTP endpoint ─────────────────────────────────────
 
 type translatePageReq struct {
-	Texts      []string `json:"texts"`
-	From       string   `json:"from"`
-	To         string   `json:"to"`
-	Engine     string   `json:"engine"`
-	OllamaUrl  string   `json:"ollamaUrl,omitempty"`
-	OllamaModel string  `json:"ollamaModel,omitempty"`
+	Texts       []string `json:"texts"`
+	From        string   `json:"from"`
+	To          string   `json:"to"`
+	Engine      string   `json:"engine"`
+	OllamaUrl   string   `json:"ollamaUrl,omitempty"`
+	OllamaModel string   `json:"ollamaModel,omitempty"`
+	OpenAIUrl   string   `json:"openaiUrl,omitempty"`
+	OpenAIKey   string   `json:"openaiKey,omitempty"`
+	OpenAIModel string   `json:"openaiModel,omitempty"`
+	DeepLKey    string   `json:"deeplKey,omitempty"`
 }
 
 type translatePageResp struct {
@@ -1185,8 +1199,14 @@ func handleTranslatePage(w http.ResponseWriter, r *http.Request) {
 	if req.Engine == "ollama" {
 		tr.SetOllama(req.OllamaUrl, req.OllamaModel)
 	}
+	if req.Engine == "openai" {
+		tr.SetOpenAI(req.OpenAIUrl, req.OpenAIKey, req.OpenAIModel)
+	}
+	if req.Engine == "deepl" {
+		tr.SetDeepL(req.DeepLKey, "")
+	}
 
-	if req.Engine == "ollama" {
+	if req.Engine == "ollama" || req.Engine == "openai" {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, `{"error":"streaming not supported"}`, http.StatusInternalServerError)
@@ -1357,11 +1377,15 @@ func indexByte(data []byte, c byte) int {
 // and System.Drawing to render translated text back onto the image.
 
 type imageTranslateReq struct {
-	Image      string `json:"image"`
-	TargetLang string `json:"targetLang"`
-	Engine     string `json:"engine"`
-	OllamaUrl  string `json:"ollamaUrl,omitempty"`
+	Image       string `json:"image"`
+	TargetLang  string `json:"targetLang"`
+	Engine      string `json:"engine"`
+	OllamaUrl   string `json:"ollamaUrl,omitempty"`
 	OllamaModel string `json:"ollamaModel,omitempty"`
+	OpenAIUrl   string `json:"openaiUrl,omitempty"`
+	OpenAIKey   string `json:"openaiKey,omitempty"`
+	OpenAIModel string `json:"openaiModel,omitempty"`
+	DeepLKey    string `json:"deeplKey,omitempty"`
 }
 
 type ocrWord struct {
@@ -1441,11 +1465,19 @@ func handleImageTranslate(w http.ResponseWriter, r *http.Request) {
 	if ollamaModel == "" {
 		ollamaModel = "qwen2.5:7b"
 	}
+	openaiUrl := strings.TrimRight(req.OpenAIUrl, "/")
+	openaiModel := req.OpenAIModel
 
 	tr := translate.New("", "")
 	tr.SetEngine(req.Engine)
 	if req.Engine == "ollama" {
 		tr.SetOllama(ollamaUrl, ollamaModel)
+	}
+	if req.Engine == "openai" {
+		tr.SetOpenAI(openaiUrl, req.OpenAIKey, openaiModel)
+	}
+	if req.Engine == "deepl" {
+		tr.SetDeepL(req.DeepLKey, "")
 	}
 
 	var items []imageTranslateItem

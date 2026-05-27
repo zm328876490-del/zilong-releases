@@ -56,14 +56,26 @@ func (h *Handler) SendCode(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 400, map[string]string{"error": "请输入有效邮箱"})
 		return
 	}
+
+	// Rate limit: 60s cooldown per email
+	ok, err := h.db.CanSendCode(req.Email, 60*time.Second)
+	if err != nil {
+		jsonResp(w, 500, map[string]string{"error": "服务器错误"})
+		return
+	}
+	if !ok {
+		jsonResp(w, 429, map[string]string{"error": "发送太频繁，请 60 秒后再试"})
+		return
+	}
+
 	code, err := genCode()
 	if err != nil {
 		jsonResp(w, 500, map[string]string{"error": "生成验证码失败"})
 		return
 	}
 	if err := h.mail.SendCode(req.Email, code); err != nil {
-		jsonResp(w, 500, map[string]string{"error": "发送邮件失败: " + err.Error()})
-		return
+		// Dev fallback: log code to console when SMTP fails
+		fmt.Printf("[DEV] 验证码发送失败(%s), 验证码: %s\n", err.Error(), code)
 	}
 	if err := h.db.InsertCode(req.Email, code, 5*time.Minute); err != nil {
 		jsonResp(w, 500, map[string]string{"error": "保存验证码失败"})
@@ -92,12 +104,22 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 400, map[string]string{"error": "邮箱和验证码不能为空"})
 		return
 	}
+	canTry, err := h.db.CanAttemptLogin(req.Email, 5, 15*time.Minute)
+	if err != nil {
+		jsonResp(w, 500, map[string]string{"error": "服务器错误"})
+		return
+	}
+	if !canTry {
+		jsonResp(w, 429, map[string]string{"error": "登录失败次数过多，请 15 分钟后再试"})
+		return
+	}
 	ok, err := h.db.VerifyCode(req.Email, req.Code)
 	if err != nil {
 		jsonResp(w, 500, map[string]string{"error": "服务器错误"})
 		return
 	}
 	if !ok {
+		_ = h.db.RecordLoginFailure(req.Email)
 		jsonResp(w, 401, map[string]string{"error": "验证码错误或已过期"})
 		return
 	}
@@ -111,7 +133,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 500, map[string]string{"error": "生成token失败"})
 		return
 	}
-	jsonResp(w, 200, map[string]any{"token": token, "user": user})
+	jsonResp(w, 200, map[string]any{"token": token, "plan": user.Plan, "user": user})
 }
 
 // GET /api/auth/me
@@ -132,10 +154,12 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 500, map[string]string{"error": "用户不存在"})
 		return
 	}
-	jsonResp(w, 200, map[string]any{"user": user})
+	jsonResp(w, 200, map[string]any{"plan": user.Plan, "user": user})
 }
 
 // PUT /api/admin/set-plan
+// Admin (328876490@qq.com) can set any user's plan.
+// Regular users can only upgrade themselves.
 func (h *Handler) SetPlan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "PUT" {
 		jsonResp(w, 405, map[string]string{"error": "PUT required"})
@@ -152,10 +176,8 @@ func (h *Handler) SetPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	operatorEmail, _ := claims["email"].(string)
-	if operatorEmail != "329976490@qq.com" {
-		jsonResp(w, 403, map[string]string{"error": "无权限"})
-		return
-	}
+	isAdmin := operatorEmail == "328876490@qq.com"
+
 	var req struct {
 		Email string `json:"email"`
 		Plan  string `json:"plan"`
@@ -164,9 +186,21 @@ func (h *Handler) SetPlan(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 400, map[string]string{"error": "invalid json"})
 		return
 	}
-	if req.Plan != "trial" && req.Plan != "premium" {
-		jsonResp(w, 400, map[string]string{"error": "plan must be trial or premium"})
-		return
+	// Non-admin users can only upgrade themselves and only to premium
+	if !isAdmin {
+		if req.Email != operatorEmail {
+			jsonResp(w, 403, map[string]string{"error": "只能升级自己的账号"})
+			return
+		}
+		if req.Plan != "premium" {
+			jsonResp(w, 403, map[string]string{"error": "只能升级到专业版"})
+			return
+		}
+	} else {
+		if req.Plan != "trial" && req.Plan != "premium" {
+			jsonResp(w, 400, map[string]string{"error": "plan must be trial or premium"})
+			return
+		}
 	}
 	_, err = h.db.FindByEmail(req.Email)
 	if err != nil {

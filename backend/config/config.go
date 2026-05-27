@@ -14,6 +14,10 @@ type Config struct {
 	VadModelPath string // path to ggml-vad.bin (Silero VAD model for whisper)
 	OllamaUrl    string
 	OllamaModel  string
+	OpenAIUrl    string
+	OpenAIKey    string
+	OpenAIModel  string
+	DeepLKey     string
 }
 
 // WhisperPort returns the port for whisper-server (different from our WS port).
@@ -37,6 +41,18 @@ func Load() *Config {
 	}
 	if m := os.Getenv("OLLAMA_MODEL"); m != "" {
 		cfg.OllamaModel = m
+	}
+	if u := os.Getenv("OPENAI_URL"); u != "" {
+		cfg.OpenAIUrl = u
+	}
+	if k := os.Getenv("OPENAI_KEY"); k != "" {
+		cfg.OpenAIKey = k
+	}
+	if m := os.Getenv("OPENAI_MODEL"); m != "" {
+		cfg.OpenAIModel = m
+	}
+	if k := os.Getenv("DEEPL_KEY"); k != "" {
+		cfg.DeepLKey = k
 	}
 
 	exeName := "whisper-cli"

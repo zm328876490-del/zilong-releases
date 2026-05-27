@@ -28,6 +28,10 @@ func (t *Translator) TranslateBatch(texts []string, from, to string) ([]string, 
 		return t.translateMicrosoftBatch(texts, to)
 	case "google":
 		return t.translateGoogleBatch(texts, from, to)
+	case "openai":
+		return t.translateOpenAIBatchResults(texts, from, to)
+	case "deepl":
+		return t.translateDeepLBatch(texts, from, to)
 	default:
 		results, err := t.translateMicrosoftBatch(texts, to)
 		if err == nil {
@@ -46,7 +50,10 @@ func (t *Translator) TranslateBatchStream(w io.Writer, texts []string, from, to 
 	if t.engine == "ollama" {
 		return t.translateOllamaBatch(w, texts, from, to)
 	}
-	// Non-ollama engines: batch all at once, then write NDJSON
+	if t.engine == "openai" {
+		return t.translateOpenAIBatch(w, texts, from, to)
+	}
+	// Non-llm engines: batch all at once, then write NDJSON
 	results, err := t.TranslateBatch(texts, from, to)
 	if err != nil {
 		return err
@@ -374,5 +381,316 @@ func langNameForOllama(lang string) string {
 		return v
 	}
 	return lang
+}
+
+// ─── OpenAI-compatible batch ──────────────────────────────────────────────
+
+var openaiWarmupOnce sync.Once
+
+func warmupOpenAI(url, key, model string) {
+	warmBody := ollamaChatRequest{
+		Model:       model,
+		Messages:    []ollamaChatMessage{{Role: "user", Content: "hello"}},
+		Stream:      false,
+		Temperature: 0,
+	}
+	b, _ := json.Marshal(warmBody)
+	req, _ := http.NewRequest("POST", url+"/v1/chat/completions", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	go func() {
+		http.DefaultClient.Do(req)
+	}()
+}
+
+func (t *Translator) translateOpenAIBatch(w io.Writer, texts []string, from, to string) error {
+	openaiWarmupOnce.Do(func() { warmupOpenAI(t.openaiUrl, t.openaiKey, t.openaiModel) })
+
+	if t.openaiUrl == "" {
+		return fmt.Errorf("OpenAI URL not configured")
+	}
+	if t.openaiKey == "" {
+		return fmt.Errorf("OpenAI API key not configured")
+	}
+	if t.openaiModel == "" {
+		return fmt.Errorf("OpenAI model not configured")
+	}
+
+	toName := langNameForOllama(to)
+
+	indexMap := make([]int, 0, len(texts))
+	payload := make([]string, 0, len(texts))
+	for i, text := range texts {
+		txt := strings.TrimSpace(text)
+		if txt == "" {
+			continue
+		}
+		indexMap = append(indexMap, i)
+		payload = append(payload, txt)
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+
+	payloadJSON, _ := json.Marshal(payload)
+	systemPrompt := fmt.Sprintf(
+		"将以下 JSON 数组中的每一条文本翻译为%s。返回相同长度和顺序的 JSON 字符串数组。只返回 JSON 数组，不要解释、不要 markdown 代码块、不要多余文字。",
+		toName,
+	)
+
+	reqBody := ollamaChatRequest{
+		Model: t.openaiModel,
+		Messages: []ollamaChatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: string(payloadJSON)},
+		},
+		Stream:      false,
+		Temperature: 0,
+	}
+
+	var results []string
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Second)
+		}
+		bodyBytes, _ := json.Marshal(reqBody)
+		req, _ := http.NewRequest("POST", t.openaiUrl+"/v1/chat/completions", strings.NewReader(string(bodyBytes)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+t.openaiKey)
+
+		resp, err := t.client.Do(req)
+		if err != nil {
+			continue
+		}
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			continue
+		}
+
+		var chatResp struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(respBody, &chatResp); err != nil || len(chatResp.Choices) == 0 {
+			continue
+		}
+
+		content := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+		content = strings.TrimPrefix(content, "```json")
+		content = strings.TrimPrefix(content, "```")
+		content = strings.TrimSuffix(content, "```")
+		content = strings.TrimSpace(content)
+
+		if err := json.Unmarshal([]byte(content), &results); err != nil {
+			start := strings.Index(content, "[")
+			end := strings.LastIndex(content, "]")
+			if start >= 0 && end > start {
+				if err2 := json.Unmarshal([]byte(content[start:end+1]), &results); err2 != nil {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+		if len(results) > 0 {
+			break
+		}
+	}
+
+	out := make([]string, len(texts))
+	for ri, translated := range results {
+		if ri < len(indexMap) {
+			out[indexMap[ri]] = translated
+		}
+	}
+
+	for i, r := range out {
+		if r == "" {
+			continue
+		}
+		b, _ := json.Marshal(map[string]interface{}{"i": i, "t": r})
+		w.Write(append(b, '\n'))
+	}
+	return nil
+}
+
+// translateOpenAIBatchResults translates a batch and returns a slice (for HTTP endpoint).
+func (t *Translator) translateOpenAIBatchResults(texts []string, from, to string) ([]string, error) {
+	if t.openaiUrl == "" {
+		return nil, fmt.Errorf("OpenAI URL not configured")
+	}
+	if t.openaiKey == "" {
+		return nil, fmt.Errorf("OpenAI API key not configured")
+	}
+	if t.openaiModel == "" {
+		return nil, fmt.Errorf("OpenAI model not configured")
+	}
+
+	toName := langNameForOllama(to)
+
+	indexMap := make([]int, 0, len(texts))
+	payload := make([]string, 0, len(texts))
+	for i, text := range texts {
+		txt := strings.TrimSpace(text)
+		if txt == "" {
+			continue
+		}
+		indexMap = append(indexMap, i)
+		payload = append(payload, txt)
+	}
+	if len(payload) == 0 {
+		return make([]string, len(texts)), nil
+	}
+
+	payloadJSON, _ := json.Marshal(payload)
+	systemPrompt := fmt.Sprintf(
+		"将以下 JSON 数组中的每一条文本翻译为%s。返回相同长度和顺序的 JSON 字符串数组。只返回 JSON 数组，不要解释、不要 markdown 代码块、不要多余文字。",
+		toName,
+	)
+
+	reqBody := ollamaChatRequest{
+		Model: t.openaiModel,
+		Messages: []ollamaChatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: string(payloadJSON)},
+		},
+		Stream:      false,
+		Temperature: 0,
+	}
+
+	var results []string
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Second)
+		}
+		bodyBytes, _ := json.Marshal(reqBody)
+		req, _ := http.NewRequest("POST", t.openaiUrl+"/v1/chat/completions", strings.NewReader(string(bodyBytes)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+t.openaiKey)
+
+		resp, err := t.client.Do(req)
+		if err != nil {
+			continue
+		}
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			continue
+		}
+
+		var chatResp struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(respBody, &chatResp); err != nil || len(chatResp.Choices) == 0 {
+			continue
+		}
+
+		content := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+		content = strings.TrimPrefix(content, "```json")
+		content = strings.TrimPrefix(content, "```")
+		content = strings.TrimSuffix(content, "```")
+		content = strings.TrimSpace(content)
+
+		if err := json.Unmarshal([]byte(content), &results); err != nil {
+			start := strings.Index(content, "[")
+			end := strings.LastIndex(content, "]")
+			if start >= 0 && end > start {
+				if err2 := json.Unmarshal([]byte(content[start:end+1]), &results); err2 != nil {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+		if len(results) > 0 {
+			break
+		}
+	}
+
+	out := make([]string, len(texts))
+	for ri, translated := range results {
+		if ri < len(indexMap) {
+			out[indexMap[ri]] = translated
+		}
+	}
+	return out, nil
+}
+
+// ─── DeepL batch ──────────────────────────────────────────────────────────
+
+func (t *Translator) translateDeepLBatch(texts []string, from, to string) ([]string, error) {
+	if t.deeplKey == "" {
+		return nil, fmt.Errorf("DeepL API key not configured")
+	}
+
+	toLang := mapLangDeepL(to)
+	form := url.Values{}
+	for _, text := range texts {
+		form.Add("text", text)
+	}
+	form.Set("target_lang", toLang)
+	if from != "" && from != "auto" {
+		form.Set("source_lang", mapLangDeepL(from))
+	}
+
+	endpoint := t.deeplUrl + "/v2/translate"
+	var result struct {
+		Translations []struct {
+			Text string `json:"text"`
+		} `json:"translations"`
+	}
+
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(500 * time.Millisecond)
+		}
+		req, _ := http.NewRequest("POST", endpoint, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Authorization", "DeepL-Auth-Key "+t.deeplKey)
+
+		resp, err := t.client.Do(req)
+		if err != nil {
+			continue
+		}
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			if resp.StatusCode >= 500 {
+				continue
+			}
+			return nil, fmt.Errorf("deepl batch HTTP %d: %s", resp.StatusCode, string(respBody))
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			continue
+		}
+		break
+	}
+
+	out := make([]string, len(texts))
+	for i, r := range result.Translations {
+		if i < len(texts) {
+			out[i] = strings.TrimSpace(r.Text)
+		}
+	}
+	return out, nil
 }
 

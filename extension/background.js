@@ -96,9 +96,13 @@ async function handleImageTranslate(srcUrl, tabId) {
       body: JSON.stringify({
         image: base64,
         targetLang: settings.targetLang || 'zh-Hans',
-        engine: settings.engine || 'microsoft',
+        engine: (function(e) { return (e === 'deepseek' || e === 'doubao' || e === 'qwen') ? 'openai' : e; })(settings.engine || 'microsoft'),
         ollamaUrl: (settings.ollamaUrl || 'http://localhost:11434').replace(/\/$/, ''),
         ollamaModel: settings.ollamaModel || 'qwen2.5:7b',
+        openaiUrl: (settings.openaiUrl || 'https://api.deepseek.com/v1').replace(/\/$/, ''),
+        openaiKey: settings.openaiKey || '',
+        openaiModel: settings.openaiModel || 'deepseek-chat',
+        deeplKey: settings.deeplKey || '',
       }),
     });
 

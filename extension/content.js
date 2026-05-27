@@ -134,6 +134,10 @@
     engine: 'microsoft',
     ollamaUrl: 'http://localhost:11434',
     ollamaModel: 'qwen2.5:7b',
+    openaiUrl: 'https://api.deepseek.com/v1',
+    openaiKey: '',
+    openaiModel: 'deepseek-chat',
+    deeplKey: '',
     ttsVoice: 'default',
     subtitleEnabled: true,
     subtitleSize: 50,
@@ -155,6 +159,10 @@ function generateSessionId() {
     return 's_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
   }
 
+  function toBackendEngine(engine) {
+    return (engine === 'deepseek' || engine === 'doubao' || engine === 'qwen') ? 'openai' : engine;
+  }
+
   function sendWS(msg) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     msg.sessionId = currentSessionId;
@@ -169,10 +177,14 @@ function generateSessionId() {
       targetLang: settings.targetLang,
       apiKey: settings.apiKey,
       region: settings.region,
-      engine: settings.engine,
+      engine: toBackendEngine(settings.engine),
       ttsVoice: settings.ttsVoice,
       ollamaUrl: settings.ollamaUrl,
       ollamaModel: settings.ollamaModel,
+      openaiUrl: settings.openaiUrl,
+      openaiKey: settings.openaiKey,
+      openaiModel: settings.openaiModel,
+      deeplKey: settings.deeplKey,
     });
   }
   let syncRafId = null;           // requestAnimationFrame ID
@@ -1899,11 +1911,15 @@ function generateSessionId() {
         targetLang: settings.targetLang,
         apiKey: settings.apiKey,
         region: settings.region,
-        engine: settings.engine,
+        engine: toBackendEngine(settings.engine),
         ttsVoice: settings.ttsVoice,
         rolling: floatingFallback,
         ollamaUrl: settings.ollamaUrl,
         ollamaModel: settings.ollamaModel,
+        openaiUrl: settings.openaiUrl,
+        openaiKey: settings.openaiKey,
+        openaiModel: settings.openaiModel,
+        deeplKey: settings.deeplKey,
       });
 
       // Offline ASR: signal start of audio streaming
@@ -3160,10 +3176,14 @@ function generateSessionId() {
         targetLang: settings.targetLang,
         apiKey: settings.apiKey,
         region: settings.region,
-        engine: settings.engine,
+        engine: toBackendEngine(settings.engine),
         ttsVoice: settings.ttsVoice,
         ollamaUrl: settings.ollamaUrl,
         ollamaModel: settings.ollamaModel,
+        openaiUrl: settings.openaiUrl,
+        openaiKey: settings.openaiKey,
+        openaiModel: settings.openaiModel,
+        deeplKey: settings.deeplKey,
       });
     }
   }
@@ -3685,15 +3705,23 @@ function generateSessionId() {
           targetLang: settings.targetLang,
           apiKey: settings.apiKey,
           region: settings.region,
-          engine: newSettings.engine,
+          engine: toBackendEngine(newSettings.engine),
           ttsVoice: settings.ttsVoice,
           ollamaUrl: settings.ollamaUrl,
           ollamaModel: settings.ollamaModel,
+          openaiUrl: settings.openaiUrl,
+          openaiKey: settings.openaiKey,
+          openaiModel: settings.openaiModel,
+          deeplKey: settings.deeplKey,
         });
       }
     }
     if (newSettings.ollamaUrl !== undefined) settings.ollamaUrl = newSettings.ollamaUrl;
     if (newSettings.ollamaModel !== undefined) settings.ollamaModel = newSettings.ollamaModel;
+    if (newSettings.openaiUrl !== undefined) settings.openaiUrl = newSettings.openaiUrl;
+    if (newSettings.openaiKey !== undefined) settings.openaiKey = newSettings.openaiKey;
+    if (newSettings.openaiModel !== undefined) settings.openaiModel = newSettings.openaiModel;
+    if (newSettings.deeplKey !== undefined) settings.deeplKey = newSettings.deeplKey;
 
     if (newSettings.sourceLang !== undefined) settings.sourceLang = newSettings.sourceLang;
     if (newSettings.targetLang !== undefined) settings.targetLang = newSettings.targetLang;

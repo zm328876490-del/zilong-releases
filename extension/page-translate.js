@@ -58,6 +58,14 @@
   let sourceLang = 'auto';
   let ollamaUrl = 'http://localhost:11434';
   let ollamaModel = 'qwen2.5:7b';
+  let openaiUrl = 'https://api.deepseek.com/v1';
+  let openaiKey = '';
+  let openaiModel = 'deepseek-chat';
+  let deeplKey = '';
+
+  function toBackendEnginePage(eng) {
+    return (eng === 'deepseek' || eng === 'doubao' || eng === 'qwen') ? 'openai' : eng;
+  }
 
   const memCache = new Map();
   const idleCB = window.requestIdleCallback || function (cb, opts) { return setTimeout(cb, (opts && opts.timeout) || 100); };
@@ -629,7 +637,7 @@
     // PAGE TRANSLATION ONLY: Ollama is unsuitable for short-text batch translation.
     // Auto-fallback to Microsoft. This does NOT affect video/subtitle translation
     // which uses a completely separate code path (content.js → background.js).
-    var effectiveEngine = (engine === 'ollama') ? 'microsoft' : engine;
+    var effectiveEngine = (engine === 'ollama') ? 'microsoft' : toBackendEnginePage(engine);
 
     return new Promise(function (resolve) {
       chrome.runtime.sendMessage({
@@ -637,7 +645,10 @@
         url: API,
         body: {
           texts: texts, from: sourceLang, to: targetLang,
-          engine: effectiveEngine, ollamaUrl: ollamaUrl, ollamaModel: ollamaModel,
+          engine: effectiveEngine,
+          ollamaUrl: ollamaUrl, ollamaModel: ollamaModel,
+          openaiUrl: openaiUrl, openaiKey: openaiKey, openaiModel: openaiModel,
+          deeplKey: deeplKey,
         },
       }, function (resp) {
         if (chrome.runtime.lastError) {
@@ -934,6 +945,10 @@
     if (settings.sourceLang !== undefined) sourceLang = settings.sourceLang;
     if (settings.ollamaUrl !== undefined) ollamaUrl = settings.ollamaUrl;
     if (settings.ollamaModel !== undefined) ollamaModel = settings.ollamaModel;
+    if (settings.openaiUrl !== undefined) openaiUrl = settings.openaiUrl;
+    if (settings.openaiKey !== undefined) openaiKey = settings.openaiKey;
+    if (settings.openaiModel !== undefined) openaiModel = settings.openaiModel;
+    if (settings.deeplKey !== undefined) deeplKey = settings.deeplKey;
     if (langChanged && isActive) {
       stop();
       start();
@@ -1048,7 +1063,7 @@
   chrome.storage.local.get('pageGlobalEnabled', function (result) {
     if (result.pageGlobalEnabled !== false) {
       chrome.storage.local.get(
-        ['pageBilingual', 'pageTargetLang', 'pageEngine', 'pageOllamaUrl', 'pageOllamaModel', 'pageSourceLang', 'translationSettings'],
+        ['pageBilingual', 'pageTargetLang', 'pageEngine', 'pageOllamaUrl', 'pageOllamaModel', 'pageOpenAIUrl', 'pageOpenAIKey', 'pageOpenAIModel', 'pageDeepLKey', 'pageSourceLang', 'translationSettings'],
         function (r) {
           if (r.pageBilingual !== undefined) bilingualMode = r.pageBilingual;
           else if (r.translationSettings && r.translationSettings.pageBilingual !== undefined) bilingualMode = r.translationSettings.pageBilingual;
@@ -1056,6 +1071,10 @@
           if (r.pageEngine) engine = r.pageEngine;
           if (r.pageOllamaUrl) ollamaUrl = r.pageOllamaUrl;
           if (r.pageOllamaModel) ollamaModel = r.pageOllamaModel;
+          if (r.pageOpenAIUrl) openaiUrl = r.pageOpenAIUrl;
+          if (r.pageOpenAIKey) openaiKey = r.pageOpenAIKey;
+          if (r.pageOpenAIModel) openaiModel = r.pageOpenAIModel;
+          if (r.pageDeepLKey) deeplKey = r.pageDeepLKey;
           if (r.pageSourceLang) sourceLang = r.pageSourceLang;
 
           // Fire-and-forget: warm IndexedDB cache in background, start translation immediately

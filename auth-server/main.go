@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"ai-translation/auth-server/config"
 	"ai-translation/auth-server/handler"
@@ -19,6 +20,14 @@ import (
 
 func cors(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		// Allow chrome-extension:// origins and same-origin (no Origin header = curl/localhost)
+		if origin != "" {
+			if !strings.HasPrefix(origin, "chrome-extension://") {
+				http.Error(w, `{"error":"forbidden"}`, 403)
+				return
+			}
+		}
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -87,6 +96,20 @@ func main() {
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	log.Printf("auth-server 启动在 %s", addr)
+
+	// Cleanup expired verify codes every 10 minutes
+	go func() {
+		t := time.NewTicker(10 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			if err := db.CleanupExpiredCodes(); err != nil {
+				log.Printf("清理过期验证码失败: %v", err)
+			}
+			if err := db.CleanupLoginFailures(); err != nil {
+				log.Printf("清理登录失败记录失败: %v", err)
+			}
+		}
+	}()
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)

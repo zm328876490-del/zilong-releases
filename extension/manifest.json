@@ -35,7 +35,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["audio-processor.js", "buy.html", "buy.js"],
+      "resources": ["audio-processor.js", "app.html", "app.js"],
       "matches": ["<all_urls>"]
     }
   ]
