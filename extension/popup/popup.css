@@ -453,6 +453,12 @@ input[type="range"]:focus {
   margin-bottom: 14px;
 }
 
+.ollama-modal-box {
+  width: 320px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
 .modal-actions {
   display: flex;
   gap: 8px;

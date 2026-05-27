@@ -6,6 +6,9 @@ const DEFAULT_WS_URL = 'ws://localhost:29527/ws';
 // Store active translation sessions per tab
 const sessions = {};
 
+// Active Ollama model downloads (runs in SW, survives popup close)
+const _downloads = new Map();
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab?.id;
 
@@ -45,6 +48,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'PAGE_OLLAMA_TRANSLATE':
       handlePageOllamaTranslate(message, sendResponse);
       return true; // async response
+
+    // ─── Ollama model management (pull in SW, poll progress from popup) ──
+    case 'OLLAMA_PULL_START':
+      handleOllamaPullStart(message, sendResponse);
+      return true;
+    case 'OLLAMA_PULL_PROGRESS':
+      sendResponse({ downloads: Object.fromEntries(_downloads) });
+      break;
+    case 'OLLAMA_DELETE':
+      handleOllamaDelete(message, sendResponse);
+      return true;
 
   }
 });
@@ -327,4 +341,87 @@ function mapGoogleLang(lang) {
     'en': 'en', 'ja': 'ja', 'ko': 'ko', 'fr': 'fr', 'de': 'de',
     'es': 'es', 'pt': 'pt', 'ru': 'ru', 'ar': 'ar', 'th': 'th', 'vi': 'vi' };
   return m[lang] || lang;
+}
+
+// ─── Ollama model management ──────────────────────────────────────────
+
+function handleOllamaPullStart(request, sendResponse) {
+  const name = request.model;
+  if (_downloads.has(name) && _downloads.get(name).status === 'pulling') {
+    sendResponse({ ok: true, already: true });
+    return;
+  }
+  _downloads.set(name, { status: 'pulling', completed: 0, total: 1, pct: 0 });
+  sendResponse({ ok: true });
+
+  // Run pull in background — NOT awaited, survives popup close
+  _doPull(request.baseUrl, name);
+}
+
+async function _doPull(baseUrl, name) {
+  try {
+    const apiUrl = (baseUrl || 'http://localhost:11434').replace(/\/$/, '') + '/api/pull';
+    const resp = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, stream: true }),
+    });
+    if (resp.status === 403) {
+      _downloads.set(name, { status: 'error', error: 'HTTP 403 — 请设置环境变量 OLLAMA_ORIGINS=* 后重启 Ollama' });
+      return;
+    }
+    if (!resp.ok) {
+      _downloads.set(name, { status: 'error', error: 'HTTP ' + resp.status });
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let done = false;
+    while (!done) {
+      const result = await reader.read();
+      done = result.done;
+      buf += decoder.decode(result.value || new Uint8Array(), { stream: !done });
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const obj = JSON.parse(trimmed);
+          if (obj.total && obj.completed !== undefined) {
+            const pct = Math.round(obj.completed / obj.total * 100);
+            _downloads.set(name, { status: 'pulling', completed: obj.completed, total: obj.total, pct: pct });
+          }
+          if (obj.status === 'success') {
+            _downloads.set(name, { status: 'success', completed: 1, total: 1, pct: 100 });
+            return;
+          }
+          if (obj.error) {
+            _downloads.set(name, { status: 'error', error: obj.error });
+            return;
+          }
+        } catch (_) { /* skip unparseable lines */ }
+      }
+    }
+    _downloads.set(name, { status: 'error', error: '拉取未完成，请重试' });
+  } catch (e) {
+    _downloads.set(name, { status: 'error', error: e.message || '网络错误' });
+  }
+}
+
+async function handleOllamaDelete(request, sendResponse) {
+  try {
+    const resp = await fetch((request.baseUrl || 'http://localhost:11434').replace(/\/$/, '') + '/api/delete', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: request.model })
+    });
+    if (resp.status === 403) throw new Error('HTTP 403 — 请设置环境变量 OLLAMA_ORIGINS=* 后重启 Ollama');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    sendResponse({ success: true });
+  } catch (e) {
+    sendResponse({ success: false, error: e.message });
+  }
 }

@@ -1,11 +1,16 @@
 package config
 
-import "os"
+import (
+	"log"
+	"os"
+
+	"github.com/joho/godotenv"
+)
 
 type Config struct {
-	Port string
-	MySQLDSN  string
-	JWTSecret string
+	Port         string
+	MySQLDSN     string
+	JWTSecret    string
 	SMTPHost     string
 	SMTPPort     string
 	SMTPUser     string
@@ -13,6 +18,9 @@ type Config struct {
 }
 
 func Load() *Config {
+	if err := godotenv.Load(); err != nil {
+		log.Printf("未找到 .env 文件，使用系统环境变量")
+	}
 	cfg := &Config{
 		Port:     getEnv("PORT", "14532"),
 		MySQLDSN: getEnv("MYSQL_DSN", "root:rise@mysql@tcp(127.0.0.1:3306)/auth_server?charset=utf8mb4&parseTime=true&loc=UTC"),

@@ -13,6 +13,18 @@
   const ollamaModelInput = document.getElementById('ollamaModel');
   const ollamaCancelBtn = document.getElementById('ollamaCancel');
   const ollamaConfirmBtn = document.getElementById('ollamaConfirm');
+  // Ollama management elements
+  const ollamaStatusBar = document.getElementById('ollamaStatusBar');
+  const ollamaStatusDot = document.getElementById('ollamaStatusDot');
+  const ollamaStatusText = document.getElementById('ollamaStatusText');
+  const ollamaGuideLink = document.getElementById('ollamaGuideLink');
+  const ollamaGuide = document.getElementById('ollamaGuide');
+  const ollamaModelInstall = document.getElementById('ollamaModelInstall');
+  const ollamaModelCheckboxes = document.getElementById('ollamaModelCheckboxes');
+  const btnPullModels = document.getElementById('btnPullModels');
+  const pullProgress = document.getElementById('pullProgress');
+  const pullProgressBar = document.getElementById('pullProgressBar');
+  const pullProgressFill = document.getElementById('pullProgressFill');
   const subtitleToggle = document.getElementById('subtitleToggle');
   const subtitleSizeSection = document.getElementById('subtitleSizeSection');
   const subtitleSizeSlider = document.getElementById('subtitleSize');
@@ -56,6 +68,32 @@
   };
 
   let pendingApiEngine = null; // which engine triggered the apiKeyModal
+
+  // ─── Ollama recommended models ────────────────────────────────────
+  const RCMD_MODELS = [
+    { name: 'qwen2.5:0.5b',  size: '0.4GB', quality: '差',   speed: '极快', scenario: '纯实验' },
+    { name: 'qwen2.5:7b',    size: '4.7GB', quality: '良好', speed: '中等', scenario: '推荐日常使用 · 默认' },
+    { name: 'qwen2.5:14b',   size: '8.9GB', quality: '优秀', speed: '较慢', scenario: '高质量需求' },
+    { name: 'qwen2.5:32b',   size: '19GB',  quality: '极佳', speed: '慢',   scenario: '需高端显卡' },
+    { name: 'llama3.1:8b',   size: '4.9GB', quality: '良好', speed: '中等', scenario: '英文→中文不错' },
+    { name: 'gemma3:12b',    size: '8GB',   quality: '优秀', speed: '中等', scenario: '多语种翻译强' },
+    { name: 'llava:7b',      size: '4GB',   quality: '—',   speed: '—',   scenario: '右键识别图片文字' },
+  ];
+
+  let _ollamaTimer = null;
+  let _ollamaPostChecked = false;
+  let pulling = false;
+
+  function detectDeviceRAM() {
+    try { const gb = navigator.deviceMemory; return typeof gb === 'number' && gb > 0 ? gb : null; } catch (_) { return null; }
+  }
+
+  function modelLevel(m) {
+    const gb = parseFloat(m.size);
+    if (gb <= 2) return 'light';
+    if (gb <= 8) return 'mid';
+    return 'heavy';
+  }
 
   const INSTALLER_URL = 'http://localhost:14532/api/download/installer';
   const LOCAL_HEALTH = 'http://localhost:29527/health';
@@ -211,17 +249,26 @@
     }
   );
 
-  [ollamaUrlInput, ollamaModelInput].forEach(function (el) {
-    el.addEventListener('change', saveSettings);
-    el.addEventListener('input', saveSettings);
+  [ollamaUrlInput].forEach(function (el) {
+    el.addEventListener('change', function () { saveSettings(); checkOllamaStatus(); });
+    el.addEventListener('input', function () { saveSettings(); });
   });
+  ollamaModelInput.addEventListener('change', function () { saveSettings(); });
 
   function showOllamaModal() {
     ollamaModal.style.display = 'flex';
+    _ollamaPostChecked = false;
+    checkOllamaStatus();
+    // Auto-refresh models every 3 seconds
+    _ollamaTimer = setInterval(checkOllamaStatus, 3000);
+    // Check for ongoing background downloads
+    checkOngoingDownloads();
   }
 
   function hideOllamaModal() {
     ollamaModal.style.display = 'none';
+    if (_ollamaTimer) { clearInterval(_ollamaTimer); _ollamaTimer = null; }
+    // Keep pull polling running in background (SW handles the actual download)
   }
 
   ollamaConfirmBtn.addEventListener('click', function () {
@@ -241,6 +288,11 @@
       translateEngineSelect.value = prevEngine;
       hideOllamaModal();
     }
+  });
+
+  // Ollama guide link
+  ollamaGuideLink.addEventListener('click', function () {
+    ollamaGuide.style.display = ollamaGuide.style.display === 'none' ? '' : 'none';
   });
 
   // ─── API Key modal (for DeepL and OpenAI-compatible engines) ────────
@@ -509,6 +561,277 @@
       await chrome.storage.local.remove(['authToken', 'userPlan']);
     }
     updateHeaderFromToken(null, 'trial');
+  }
+
+  // ─── Ollama management ───────────────────────────────────────────
+
+  async function checkOllamaStatus() {
+    if (!ollamaStatusDot || !ollamaStatusText || !ollamaGuideLink || !ollamaGuide) return;
+    const urlInput = document.getElementById('ollamaUrl');
+    const baseUrl = (urlInput?.value || 'http://localhost:11434').replace(/\/$/, '');
+    try {
+      const resp = await fetch(baseUrl + '/api/tags', { signal: AbortSignal.timeout(3000) });
+      if (resp.ok) {
+        const data = await resp.json();
+        const allModels = (data.models || []).map(function (m) { return m.name; });
+
+        // Populate model select
+        var result = await chrome.storage.local.get('translationSettings');
+        var settings = result.translationSettings || {};
+        var savedModel = settings.ollamaModel || 'qwen2.5:7b';
+        if (allModels.length === 0) {
+          ollamaModelInput.innerHTML = '<option value="">请先拉取模型</option>';
+        } else {
+          ollamaModelInput.innerHTML = allModels.map(function (n) {
+            var clean = n.replace(/:latest$/, '');
+            var selected = (clean === savedModel || n === savedModel) ? ' selected' : '';
+            return '<option value="' + n + '"' + selected + '>' + n + '</option>';
+          }).join('');
+          // Auto-select first if saved model not found
+          if (!allModels.some(function (n) { return n.replace(/:latest$/, '') === savedModel || n === savedModel; })) {
+            ollamaModelInput.value = allModels[0];
+          }
+        }
+
+        // Refresh recommended models
+        renderModelInstallList(allModels);
+
+        // Status bar
+        var showModels = allModels.slice(0, 3);
+        ollamaStatusDot.style.background = '#10b981';
+        ollamaStatusText.textContent = showModels.length > 0
+          ? '已连接 · ' + showModels.join(', ') : '已连接 · 无本地模型';
+        if (ollamaStatusBar) ollamaStatusBar.style.background = 'rgba(209,250,229,0.6)';
+        ollamaGuideLink.style.display = 'inline';
+        ollamaGuide.style.display = 'none';
+
+        // Test POST endpoint once
+        if (!_ollamaPostChecked) {
+          _ollamaPostChecked = true;
+          testOllamaPost(baseUrl);
+        }
+        return;
+      }
+    } catch (_) {}
+    // Not connected
+    ollamaStatusDot.style.background = '#ef4444';
+    ollamaStatusText.textContent = '未检测到本地服务';
+    if (ollamaStatusBar) ollamaStatusBar.style.background = 'rgba(255,255,255,0.6)';
+    ollamaGuideLink.style.display = 'inline';
+  }
+
+  async function testOllamaPost(baseUrl) {
+    try {
+      var resp = await fetch(baseUrl + '/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: '', prompt: '', stream: false }),
+        signal: AbortSignal.timeout(3000)
+      });
+      if (resp.status === 403) {
+        ollamaStatusDot.style.background = '#f59e0b';
+        ollamaStatusText.textContent = '⚠️ POST 被拒 — 请设置 OLLAMA_ORIGINS=* 后重启 Ollama';
+        if (ollamaStatusBar) ollamaStatusBar.style.background = 'rgba(254,243,199,0.8)';
+        ollamaGuideLink.style.display = 'inline';
+      }
+    } catch (_) {}
+  }
+
+  function renderModelInstallList(installed) {
+    if (!ollamaModelInstall || !ollamaModelCheckboxes) return;
+    var installedSet = new Set((installed || []).map(function (m) { return m.replace(/:latest$/, ''); }));
+    var hasMissing = RCMD_MODELS.some(function (m) { return !installedSet.has(m.name); });
+    ollamaModelInstall.style.display = hasMissing ? 'block' : 'none';
+    if (!hasMissing) return;
+
+    var ram = detectDeviceRAM();
+    var checkedBefore = new Set();
+    ollamaModelCheckboxes.querySelectorAll('input[type=checkbox]:checked').forEach(function (cb) { checkedBefore.add(cb.value); });
+
+    ollamaModelCheckboxes.innerHTML = RCMD_MODELS.map(function (m) {
+      var ok = installedSet.has(m.name);
+      var lv = modelLevel(m);
+      var tagColor = lv === 'light' ? '#10b981' : lv === 'heavy' ? '#f59e0b' : '#6366f1';
+      var ramWarn = '';
+      if (ram && !ok) {
+        var gb = parseFloat(m.size);
+        if (gb > ram * 0.6) ramWarn = ' <span style="font-size:10px;color:#ef4444;">⚠️ 内存不足</span>';
+      }
+
+      if (ok) {
+        return '<div style="padding:4px 0;border-bottom:1px solid rgba(0,0,0,0.04);">' +
+          '<div style="display:flex;align-items:center;">' +
+          '<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:#10b9811a;color:#10b981;flex-shrink:0;margin-right:6px;">已安装</span>' +
+          '<b style="font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + m.name + '</b>' +
+          '<span style="font-size:10px;color:#9ca3af;flex-shrink:0;">' + m.size + '</span>' +
+          '</div>' +
+          '<div style="margin-top:2px;margin-left:18px;">' +
+          '<button data-delete-model="' + m.name + '" style="padding:1px 6px;border:1px solid rgba(239,68,68,0.3);border-radius:4px;background:rgba(254,226,226,0.6);color:#dc2626;font-size:10px;cursor:pointer;flex-shrink:0;line-height:1.4;">删除</button>' +
+          '</div>' +
+          '</div>';
+      }
+
+      return '<div style="padding:4px 0;border-bottom:1px solid rgba(0,0,0,0.04);">' +
+        '<label style="display:flex;align-items:center;cursor:pointer;">' +
+        '<input type="checkbox" value="' + m.name + '" style="accent-color:#6366f1;flex-shrink:0;margin-right:6px;">' +
+        '<b style="font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + m.name + '</b>' +
+        '<span style="font-size:10px;color:#9ca3af;flex-shrink:0;">' + m.size + '</span>' +
+        '</label>' +
+        '<div style="font-size:9px;margin-left:18px;margin-top:1px;">' +
+        '<span style="padding:1px 5px;border-radius:3px;background:' + tagColor + '1a;color:' + tagColor + ';white-space:nowrap;">' + m.scenario + '</span>' +
+        (ramWarn ? ramWarn : '') +
+        '</div>' +
+        '</div>';
+    }).join('');
+
+    // Wire delete buttons
+    ollamaModelCheckboxes.querySelectorAll('[data-delete-model]').forEach(function (btn) {
+      btn.onclick = function (e) {
+        e.preventDefault();
+        deleteModel(btn.dataset.deleteModel);
+      };
+    });
+
+    // Restore checked state
+    ollamaModelCheckboxes.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
+      if (checkedBefore.has(cb.value)) cb.checked = true;
+    });
+
+    // RAM info
+    if (ram) {
+      var info = document.createElement('div');
+      info.style.cssText = 'font-size:10px;color:#9ca3af;margin-top:6px;padding-top:4px;';
+      info.textContent = '⚡ 本机内存 ' + ram + 'GB，⚠️ 标注的大模型需充足显存';
+      ollamaModelCheckboxes.appendChild(info);
+    }
+
+    if (btnPullModels) btnPullModels.disabled = false;
+  }
+
+  async function deleteModel(name) {
+    if (!confirm('确认删除模型 ' + name + ' ？\n\n删除后需重新拉取才能使用。')) return;
+    var urlInput = document.getElementById('ollamaUrl');
+    var baseUrl = (urlInput?.value || 'http://localhost:11434').replace(/\/$/, '');
+    try {
+      if (pullProgressBar) pullProgressBar.style.display = 'none';
+      if (pullProgress) { pullProgress.style.display = 'block'; pullProgress.textContent = '正在删除 ' + name + ' ...'; }
+      var resp = await chrome.runtime.sendMessage({ type: 'OLLAMA_DELETE', baseUrl: baseUrl, model: name });
+      if (!resp?.success) throw new Error(resp?.error || '未知错误');
+      if (pullProgress) pullProgress.textContent = name + ' 已删除';
+      await checkOllamaStatus();
+      setTimeout(function () { if (pullProgress) pullProgress.style.display = 'none'; }, 2000);
+    } catch (e) {
+      if (pullProgress) pullProgress.textContent = '删除失败: ' + e.message;
+    }
+  }
+
+  var _pullTimer = null;
+  var _pullNames = [];
+
+  btnPullModels.addEventListener('click', pullSelectedModels);
+
+  async function pullSelectedModels() {
+    if (pulling) return;
+    var urlInput = document.getElementById('ollamaUrl');
+    var baseUrl = (urlInput?.value || 'http://localhost:11434').replace(/\/$/, '');
+    var names = [];
+    document.querySelectorAll('#ollamaModelCheckboxes input[type=checkbox]:checked:not([disabled])').forEach(function (cb) {
+      names.push(cb.value);
+    });
+    if (!names.length) return;
+    pulling = true;
+    _pullNames = names.slice();
+    if (btnPullModels) { btnPullModels.disabled = true; btnPullModels.textContent = '拉取中...'; }
+    if (pullProgress) { pullProgress.style.display = 'block'; pullProgress.textContent = '已提交 ' + names.length + ' 个下载任务到后台...'; }
+    if (pullProgressBar) { pullProgressBar.style.display = 'block'; pullProgressFill.style.width = '0%'; }
+
+    // Send all pull requests to background SW (runs even if popup closes)
+    for (var i = 0; i < names.length; i++) {
+      chrome.runtime.sendMessage({ type: 'OLLAMA_PULL_START', baseUrl: baseUrl, model: names[i] }, function () {});
+    }
+
+    // Start polling for progress
+    startPullPolling();
+  }
+
+  async function checkOngoingDownloads() {
+    try {
+      var resp = await chrome.runtime.sendMessage({ type: 'OLLAMA_PULL_PROGRESS' });
+      var downloads = resp?.downloads || {};
+      var pullingNames = Object.keys(downloads).filter(function (n) { return downloads[n].status === 'pulling'; });
+      if (pullingNames.length > 0) {
+        // Resume UI state for ongoing downloads
+        pulling = true;
+        _pullNames = pullingNames;
+        if (btnPullModels) { btnPullModels.disabled = true; btnPullModels.textContent = '拉取中...'; }
+        if (pullProgress) { pullProgress.style.display = 'block'; }
+        if (pullProgressBar) { pullProgressBar.style.display = 'block'; }
+        startPullPolling();
+      }
+    } catch (_) {}
+  }
+
+  function startPullPolling() {
+    if (_pullTimer) clearInterval(_pullTimer);
+    _pullTimer = setInterval(pollPullProgress, 500);
+  }
+
+  async function pollPullProgress() {
+    try {
+      var resp = await chrome.runtime.sendMessage({ type: 'OLLAMA_PULL_PROGRESS' });
+      var downloads = resp?.downloads || {};
+
+      // Check for ongoing downloads from _pullNames, or any downloads in progress
+      var allNames = Object.keys(downloads);
+      if (allNames.length === 0) {
+        // Check if _pullNames were cleaned up; if all models now installed, refresh
+        if (_pullNames.length > 0) {
+          stopPullPolling();
+          await checkOllamaStatus();
+        }
+        return;
+      }
+
+      // Show progress for pulling models
+      var pullingNames = allNames.filter(function (n) { return downloads[n].status === 'pulling'; });
+      var doneNames = allNames.filter(function (n) { return downloads[n].status === 'success'; });
+      var errorNames = allNames.filter(function (n) { return downloads[n].status === 'error'; });
+
+      // Find the first pulling model to show progress bar for
+      var active = pullingNames.length > 0 ? pullingNames[0] : (doneNames.length > 0 ? doneNames[doneNames.length - 1] : null);
+      if (active && downloads[active]) {
+        var d = downloads[active];
+        if (pullProgressFill) pullProgressFill.style.width = (d.pct || 0) + '%';
+        if (pullProgress) pullProgress.textContent = '下载中 ' + active + ' ' + (d.pct || 0) + '%';
+        if (pullProgressBar) pullProgressBar.style.display = 'block';
+      }
+
+      // All done?
+      if (pullingNames.length === 0) {
+        if (errorNames.length > 0 && pullProgress) {
+          var has403 = errorNames.some(function (n) { return downloads[n].error && downloads[n].error.indexOf('403') !== -1; });
+          if (has403) {
+            pullProgress.innerHTML = '<span style="color:#dc2626;">⚠️ 403 拒绝访问 — 请设置环境变量 OLLAMA_ORIGINS=* 后重启 Ollama</span>';
+          } else {
+            pullProgress.innerHTML = '<span style="color:#dc2626;">⚠️ 部分模型拉取失败：' + errorNames.join(', ') + '</span>';
+          }
+        }
+        stopPullPolling();
+        await checkOllamaStatus();
+      }
+    } catch (_) {}
+  }
+
+  function stopPullPolling() {
+    if (_pullTimer) { clearInterval(_pullTimer); _pullTimer = null; }
+    pulling = false;
+    _pullNames = [];
+    if (btnPullModels) { btnPullModels.disabled = false; btnPullModels.textContent = '拉取选中模型'; }
+    if (pullProgressBar) pullProgressBar.style.display = 'none';
+    if (pullProgress && !pulling) {
+      // Keep text visible briefly then hide
+      setTimeout(function () { if (pullProgress && !pulling) pullProgress.style.display = 'none'; }, 3000);
+    }
   }
 
   // ─── Init ─────────────────────────────────────────────────────────

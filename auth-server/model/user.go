@@ -165,3 +165,8 @@ func (db *DB) VerifyCode(email, code string) (bool, error) {
 	_, _ = db.Exec(`UPDATE verify_codes SET used=1 WHERE id=?`, id)
 	return true, nil
 }
+
+func (db *DB) InvalidateCodes(email string) error {
+	_, err := db.Exec(`UPDATE verify_codes SET used=1 WHERE email=?`, email)
+	return err
+}

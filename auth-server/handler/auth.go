@@ -74,8 +74,8 @@ func (h *Handler) SendCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.mail.SendCode(req.Email, code); err != nil {
-		// Dev fallback: log code to console when SMTP fails
-		fmt.Printf("[DEV] 验证码发送失败(%s), 验证码: %s\n", err.Error(), code)
+		jsonResp(w, 500, map[string]string{"error": "发送验证码失败"})
+		return
 	}
 	if err := h.db.InsertCode(req.Email, code, 5*time.Minute); err != nil {
 		jsonResp(w, 500, map[string]string{"error": "保存验证码失败"})
@@ -128,6 +128,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 500, map[string]string{"error": "登录失败"})
 		return
 	}
+	_ = h.db.InvalidateCodes(req.Email)
 	ver, err := h.db.IncrementTokenVersion(req.Email)
 	if err != nil {
 		jsonResp(w, 500, map[string]string{"error": "登录失败"})
