@@ -7,20 +7,31 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-    <header>
-      <h1>🎙️ AI 实时翻译</h1>
-      <div class="header-right">
-        <div id="statusIndicator" class="status-idle">
-          <span class="dot"></span>
-          <span id="statusText">就绪</span>
+    <div class="header" id="header">
+      <img class="header-avatar plan-trial" id="headerAvatar" src="icons/icon.png" alt="AI翻译" title="点击管理账号">
+      <div class="header-text">
+        <h3>AI 实时翻译</h3>
+        <div class="header-sub" id="headerSub">
+          <span class="lic-dot anonymous"></span>
+          <span id="headerLicText">体验版 · 未登录</span>
+          <span class="sep">|</span>
+          <a id="headerLogin">登录</a>
+          <a id="headerUpgrade">升级</a>
         </div>
-        <select id="translateEngine">
-          <option value="microsoft">🌐 微软翻译</option>
-          <option value="google">🌐 Google 翻译</option>
-          <option value="ollama">🖥️ 本地 Ollama</option>
+      </div>
+      <div class="header-badge-wrap">
+        <select class="header-badge" id="engineBadge">
+          <option value="microsoft">🌐 微软 </option>
+          <option value="google">🌐 Google </option>
+          <option value="ollama">🖥️ 本地 </option>
         </select>
       </div>
-    </header>
+    </div>
+    <select id="translateEngine" style="display:none">
+      <option value="microsoft">🌐 微软翻译</option>
+      <option value="google">🌐 Google 翻译</option>
+      <option value="ollama">🖥️ 本地 Ollama</option>
+    </select>
 
     <main>
       <div class="form-row lang-row">
@@ -140,6 +151,26 @@
       <div class="modal-actions">
         <button id="ollamaCancel" class="btn-cancel">✕ 取消</button>
         <button id="ollamaConfirm" class="btn-confirm">✓ 确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════ 登录弹窗 ════ -->
+  <div class="lic-modal-bg" id="licModalBg">
+    <div class="lic-modal">
+      <h4>登录 AI 实时翻译</h4>
+      <button class="modal-close" id="btnLicX">&#x2715;</button>
+      <p>新用户首次登录即注册；同一账号同时只能在 1 台设备使用。</p>
+      <div class="auth-row" style="margin-bottom:8px">
+        <input type="email" id="authEmailInput" placeholder="邮箱（Gmail / QQ / 163 等）" autocomplete="username" spellcheck="false">
+        <button class="btn-mini" id="btnSendCode">发送验证码</button>
+      </div>
+      <input type="text" id="authCodeInput" placeholder="6 位验证码" maxlength="6" autocomplete="one-time-code" inputmode="numeric">
+      <div class="auth-tip">验证码 5 分钟有效；同邮箱 60 秒内只能发 1 条。</div>
+      <div class="lic-msg" id="licMsg"></div>
+      <div class="lic-modal-actions">
+        <button class="btn-cancel" id="btnLicCancel">取消</button>
+        <button class="btn-ok" id="btnLicOk">登录</button>
       </div>
     </div>
   </div>

@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>升级 · AI 实时翻译</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",Arial,sans-serif;color:#1f2937;background:#fafbff;line-height:1.6}
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+
+  header{padding:18px 0;border-bottom:1px solid #f0f0f7}
+  header .wrap{display:flex;align-items:center;justify-content:space-between}
+  .logo{font-size:18px;font-weight:800;background:linear-gradient(135deg,#6366f1,#ec4899);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  nav a{margin-left:24px;font-size:14px;color:#6b7280}
+  nav a:hover{color:#111827}
+
+  .hero{padding:64px 0 30px;text-align:center}
+  .hero h1{font-size:40px;line-height:1.25;font-weight:800;color:#111827;margin-bottom:14px}
+  .hero h1 em{font-style:normal;background:linear-gradient(135deg,#6366f1,#ec4899);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .hero p{font-size:16px;color:#6b7280;max-width:680px;margin:0 auto 22px}
+  .badges{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:14px}
+  .badge{font-size:12px;background:#eef2ff;color:#4338ca;padding:5px 12px;border-radius:14px;font-weight:600}
+  .badge.green{background:#ecfdf5;color:#047857}
+  .badge.red{background:#fef2f2;color:#b91c1c}
+
+  .pricing{padding:30px 0 40px}
+  .pricing-row{display:grid;grid-template-columns:1fr 1.4fr;gap:24px;align-items:stretch}
+  @media(max-width:760px){.pricing-row{grid-template-columns:1fr}}
+  .card{background:white;border-radius:18px;padding:30px 28px;box-shadow:0 4px 20px rgba(99,102,241,.08);display:flex;flex-direction:column}
+  .card.featured{border:2px solid #6366f1;background:linear-gradient(180deg,#eef2ff 0%,white 50%);position:relative}
+  .featured-tag{position:absolute;top:-12px;left:50%;transform:translateX(-50%);font-size:12px;background:linear-gradient(135deg,#ef4444,#ec4899);color:white;padding:4px 14px;border-radius:14px;font-weight:700;box-shadow:0 4px 12px rgba(239,68,68,.4)}
+  .card h3{font-size:18px;color:#1f2937;margin-bottom:6px;font-weight:700}
+  .card .tag-line{font-size:13px;color:#6b7280;margin-bottom:18px}
+  .price-block{display:flex;align-items:baseline;gap:10px;margin:8px 0}
+  .price-orig{font-size:18px;color:#9ca3af;text-decoration:line-through;font-weight:500}
+  .price-now{font-size:46px;font-weight:800;color:#ef4444}
+  .price-now small{font-size:14px;color:#6b7280;font-weight:500;margin-left:4px}
+  .price-sub{font-size:13px;color:#6b7280;margin-bottom:18px}
+  .save-tip{display:inline-block;background:#fef3c7;color:#92400e;font-size:12px;padding:4px 10px;border-radius:6px;font-weight:700;margin-bottom:14px}
+  .features{list-style:none;font-size:14px;color:#374151;margin-bottom:18px;flex:1}
+  .features li{padding:8px 0;border-bottom:1px solid #f5f5f9;display:flex;align-items:flex-start;gap:8px}
+  .features li::before{content:"✓";color:#10b981;font-weight:800;flex-shrink:0;font-size:15px}
+  .features li.muted{color:#9ca3af}
+  .features li.muted::before{content:"−";color:#d1d5db}
+  .features li strong{color:#1f2937}
+  .btn{display:block;text-align:center;padding:14px 16px;border-radius:10px;font-weight:700;font-size:15px;cursor:pointer;border:none;transition:all .15s;width:100%}
+  .btn.primary{background:linear-gradient(135deg,#ef4444,#ec4899);color:white;font-size:16px}
+  .btn.primary:hover{filter:brightness(1.08);box-shadow:0 6px 18px rgba(239,68,68,.35)}
+  .btn.gray{background:#f3f4f6;color:#4b5563}
+  .btn.gray:hover{background:#e5e7eb}
+
+  .privacy{background:linear-gradient(135deg,#1f2937,#111827);color:white;padding:54px 0;margin:30px 0}
+  .privacy h2{font-size:24px;margin-bottom:16px;text-align:center}
+  .privacy-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:30px}
+  @media(max-width:760px){.privacy-grid{grid-template-columns:1fr}}
+  .privacy-item{background:rgba(255,255,255,.06);padding:20px;border-radius:12px;border:1px solid rgba(255,255,255,.08)}
+  .privacy-item .ico{font-size:24px;margin-bottom:8px}
+  .privacy-item h4{font-size:15px;margin-bottom:6px;color:#fbbf24}
+  .privacy-item p{font-size:13px;color:#d1d5db}
+
+  .faq{padding:60px 0}
+  .faq h2{font-size:24px;margin-bottom:24px;text-align:center}
+  details{background:white;border-radius:10px;padding:14px 18px;margin-bottom:10px;border:1px solid #f0f0f7;cursor:pointer}
+  details[open]{border-color:#c7d2fe;background:#fafbff}
+  summary{font-weight:700;font-size:14px;list-style:none;display:flex;justify-content:space-between;align-items:center;color:#1f2937}
+  summary::after{content:"+";font-size:20px;color:#6366f1;font-weight:400}
+  details[open] summary::after{content:"−"}
+  details p{margin-top:10px;font-size:13px;color:#4b5563;line-height:1.7}
+
+  footer{padding:30px 0;text-align:center;color:#9ca3af;font-size:12px;border-top:1px solid #f0f0f7}
+
+  /* ── 支付弹窗 ── */
+  .pay-modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99;align-items:center;justify-content:center;overflow-y:auto;padding:20px}
+  .pay-modal-bg.show{display:flex}
+  .pay-modal{background:white;border-radius:16px;padding:28px 24px;max-width:440px;width:100%;box-shadow:0 20px 50px rgba(0,0,0,.25);position:relative}
+  .pay-modal h3{font-size:18px;font-weight:800;margin-bottom:6px}
+  .pay-modal .sub{font-size:13px;color:#6b7280;margin-bottom:18px}
+  .pay-modal .btn-row{display:flex;gap:8px;align-items:center}
+  .pay-modal .btn-row input{flex:1}
+  .pay-modal .btn-row .btn{width:auto;flex-shrink:0;white-space:nowrap}
+  .pay-msg{padding:8px 12px;border-radius:8px;font-size:12px;margin-bottom:12px;display:none}
+  .pay-msg.error{background:#fef2f2;color:#b91c1c;display:block}
+  .pay-msg.ok{background:#ecfdf5;color:#047857;display:block}
+  .pay-msg.info{background:#eef2ff;color:#4338ca;display:block}
+  .pay-step{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:13px;color:#4b5563}
+  .pay-step-num{width:22px;height:22px;border-radius:50%;background:#6366f1;color:white;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0}
+  .pay-close{margin-top:12px;text-align:center;color:#9ca3af;font-size:12px;cursor:pointer}
+  .pay-close:hover{color:#6b7280}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="logo">AI 实时翻译</div>
+    <nav>
+      <a href="#pricing">价格</a>
+      <a href="#privacy">隐私承诺</a>
+      <a href="#faq">常见问题</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <h1>AI 实时翻译<br><em>一键升级专业版</em></h1>
+    <p>支持页面翻译、视频同传、图片 OCR 翻译。本地 ASR/TTS 后台，翻译内容不上传服务器。</p>
+    <div class="badges">
+      <span class="badge green">数据不出本机</span>
+      <span class="badge">本地 AI 模型</span>
+      <span class="badge red">¥168 一次性买断</span>
+    </div>
+  </div>
+</section>
+
+<section class="pricing" id="pricing">
+  <div class="wrap">
+    <div class="pricing-row">
+
+      <div class="card">
+        <h3>体验版</h3>
+        <div class="tag-line">免费使用，无需付费</div>
+        <div class="price-block">
+          <span class="price-now" style="color:#1f2937;font-size:38px">¥0<small>永久</small></span>
+        </div>
+        <div class="price-sub">基础翻译能力，足够轻度使用</div>
+        <ul class="features">
+          <li>页面翻译（微软 / Google）</li>
+          <li>双语对照（保留原文）</li>
+          <li class="muted">视频同传翻译</li>
+          <li class="muted">图片 OCR 翻译</li>
+          <li class="muted">本地 Ollama 翻译</li>
+          <li class="muted">自定义 API Key</li>
+        </ul>
+      </div>
+
+      <div class="card featured">
+        <span class="featured-tag">限时优惠 · 立省 ¥200</span>
+        <h3>专业版（一次性买断）</h3>
+        <div class="tag-line">付一次费，永久使用，所有未来版本免费更新</div>
+        <div class="price-block">
+          <span class="price-orig">¥368</span>
+          <span class="price-now">¥168<small>买断</small></span>
+        </div>
+        <div class="save-tip">立省 ¥200 · 限时优惠</div>
+        <div class="price-sub">邮箱登录激活，换设备自动切换</div>
+        <ul class="features">
+          <li>页面翻译（微软 / Google / Ollama）</li>
+          <li>双语对照（保留原文）</li>
+          <li><strong>视频同传翻译</strong></li>
+          <li><strong>图片 OCR 翻译</strong></li>
+          <li><strong>本地 Ollama 翻译</strong></li>
+          <li><strong>自定义 API Key</strong></li>
+        </ul>
+        <button class="btn primary" id="payBtnBuy">立即购买 · ¥168 永久使用</button>
+      </div>
+
+    </div>
+    <p style="text-align:center;color:#9ca3af;font-size:12px;margin-top:18px">
+      支持 7 天无理由退款 · 跨设备只需重新登录，旧设备自动下线
+    </p>
+  </div>
+</section>
+
+<section class="privacy" id="privacy">
+  <div class="wrap">
+    <h2>隐私承诺</h2>
+    <p style="text-align:center;color:#9ca3af;font-size:14px;margin-top:6px">您的数据安全是我们的底线</p>
+    <div class="privacy-grid">
+      <div class="privacy-item">
+        <div class="ico">🔒</div>
+        <h4>翻译内容不上传</h4>
+        <p>所有文本通过您本地模型或您自己的 API Key 处理，<strong>绝不经过我们的服务器</strong>。</p>
+      </div>
+      <div class="privacy-item">
+        <div class="ico">🔑</div>
+        <h4>API Key 本地加密</h4>
+        <p>您填入的 API Key 在浏览器内 AES-GCM 加密存储，<strong>无法被远程读取</strong>。</p>
+      </div>
+      <div class="privacy-item">
+        <div class="ico">👤</div>
+        <h4>账号体系最小化</h4>
+        <p>只保存邮箱和登录凭证，<strong>不收集姓名、手机号、浏览历史</strong>。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="faq" id="faq">
+  <div class="wrap">
+    <h2>常见问题</h2>
+    <details><summary>专业版 ¥168 是永久使用吗？</summary>
+      <p>是的。一次性付费 ¥168 即可永久使用，包含所有未来版本更新。</p></details>
+    <details><summary>1 台设备的限制怎么算？</summary>
+      <p>同一账号同一时间只能在 1 台设备保持登录。新设备登录后旧设备自动下线，无需手动操作。</p></details>
+    <details><summary>支持哪些翻译引擎？</summary>
+      <p>微软翻译、Google 翻译、本地 Ollama（qwen2.5、llama3 等），以及自定义 OpenAI 兼容 API。</p></details>
+    <details><summary>能退款吗？</summary>
+      <p>支持 7 天无理由退款。联系客服邮箱即可办理。</p></details>
+  </div>
+</section>
+
+<footer>
+  <p>&copy; 2026 AI 实时翻译 · v1.0.0</p>
+</footer>
+
+<!-- ═══════ 支付弹窗 ═══════ -->
+<div class="pay-modal-bg" id="payModalBg">
+  <div class="pay-modal">
+    <h3>升级专业版</h3>
+    <div class="sub">一次性买断 ¥168，永久使用全部功能</div>
+    <div class="pay-msg" id="payMsg"></div>
+    <div class="btn-row" style="margin-bottom:10px">
+      <input type="email" id="payEmail" placeholder="邮箱（Gmail / QQ / 163 等）" style="padding:10px 14px;border:1px solid rgba(0,0,0,.1);border-radius:10px;font-size:14px;outline:none">
+      <button class="btn gray" id="payBtnSend" style="width:auto;padding:10px 16px;white-space:nowrap">发送验证码</button>
+    </div>
+    <input type="text" id="payCode" placeholder="6 位验证码" maxlength="6" style="width:100%;padding:10px 14px;border:1px solid rgba(0,0,0,.1);border-radius:10px;font-size:14px;outline:none;margin-bottom:16px">
+    <button class="btn primary" id="payBtnLogin">登录并支付</button>
+    <div class="pay-close js-close-pay">关闭</div>
+  </div>
+</div>
+
+<script src="buy.js"></script>
+</body>
+</html>
