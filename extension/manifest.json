@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AI 实时翻译",
   "version": "1.0.0",
-  "description": "视频/直播实时翻译：字幕 + TTS 播报",
+  "description": "AI 实时翻译：网页翻译、视频字幕、TTS 播报、图片转文字",
   "permissions": ["activeTab", "storage", "scripting", "contextMenus", "downloads"],
   "host_permissions": ["<all_urls>"],
   "action": {
