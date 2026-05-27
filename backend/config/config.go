@@ -28,7 +28,7 @@ func (c *Config) WhisperPort() string {
 func Load() *Config {
 	cfg := &Config{
 		Port:        "29527",
-		ModelDir:    filepath.Join("..", "models"),
+		ModelDir:    filepath.Join(".", "models"),
 		OllamaUrl:   "http://localhost:11434",
 		OllamaModel: "qwen2.5:7b",
 	}

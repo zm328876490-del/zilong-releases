@@ -988,9 +988,6 @@
 
         if (isNewLine) {
           // New segment is now visible (videoTime crossed seg.start).
-          // Strict rule: cut whatever TTS is playing and start this
-          // segment's TTS. Picture / subtitle / audio all driven by the
-          // same clock (_vt) — no drift, no pause.
           if (ai._currentTtsEntry && ai._currentTtsEntry !== currentItem) {
             try { stopFloatingTTS(); } catch (_) {}
           }
@@ -998,20 +995,23 @@
           if (currentItem.words && currentItem.words.length > 0) {
             currentItem._wordIdx = -2;
           }
-          // Bind this entry as the "currently visible line". Audio for
-          // any OTHER entry that arrives later will be ignored.
           ai._visibleLine = currentItem;
 
           if (currentItem.audioBase64 && _audioReady) {
             currentItem.played = true;
             playFloatingTTS(currentItem.audioBase64, currentItem.audioMime || 'audio/mpeg', currentItem);
           }
-          // else: audio not ready yet. The audio_end handler will check
-          // ai._visibleLine + _vt < entry.end and play if still valid.
         } else if (currentItem !== _lastDisplayedItem) {
-          // SAME text, different entry object → duplicate. Mark it
-          // played so future loops don't play its audio either.
+          // SAME text, different entry object → duplicate.
           currentItem.played = true;
+        }
+        // Audio arrived mid-display for the currently visible entry.
+        // The display loop is the single playback driver — audio_end only
+        // stores audioBase64 on the entry; this check picks it up every frame.
+        if (!currentItem.played && currentItem.audioBase64 && _audioReady &&
+            !ai._currentTtsEntry && currentItem === _lastDisplayedItem) {
+          currentItem.played = true;
+          playFloatingTTS(currentItem.audioBase64, currentItem.audioMime || 'audio/mpeg', currentItem);
         }
         _lastDisplayedItem = currentItem;
         // Word-level highlighting (per-frame update, like offline sync mode)

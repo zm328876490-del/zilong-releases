@@ -1,5 +1,5 @@
 dist/
 release/
 .env
-auth-server.exe
-auth-server.exe~
+backend/*.exe
+backend/*.dll

@@ -1976,8 +1976,6 @@ function generateSessionId() {
     if (msg.translation) msg.translation = stripCCAnnouncement(msg.translation);
 
     // Skip entire audio utterance if original was completely the announcement.
-    // TTS audio is generated server-side from ASR text; the streaming path
-    // (audio_start/chunk/end) bypasses playTTSAudio(), so we must block here.
     if (msg.original !== undefined && msg.original === '') {
       var t = msg.type;
       if (t === 'audio_start' || t === 'audio_chunk' || t === 'audio_end' || t === 'audio') {
@@ -2039,7 +2037,7 @@ function generateSessionId() {
             if (!dup) {
               floatingTimeline.splice(lo, 0, entry);
               // If we inserted BEFORE the current cursor, shift cursor.
-              if (lo < ai.floatingTimelineCursor) ai.floatingTimelineCursor++;
+              if (lo < window.__ai__.floatingTimelineCursor) window.__ai__.floatingTimelineCursor++;
             } else {
               // Remember dropped utteranceId so its incoming audio_start/
               // chunk/end can be ignored instead of falling through to the
@@ -2112,7 +2110,6 @@ function generateSessionId() {
         if (floatingFallback) {
           var uid2 = msg.utteranceId || '';
           if (window.__ai__._droppedUids && window.__ai__._droppedUids[uid2]) {
-            // Cleanup old dropped uids (keep map small)
             var nowTs = Date.now();
             for (var dk in window.__ai__._droppedUids) {
               if (nowTs - window.__ai__._droppedUids[dk] > 60000) {
@@ -2126,40 +2123,21 @@ function generateSessionId() {
             if (floatingTimeline[k].utteranceId === uid2) {
               var chunks2 = floatingTimeline[k].audioChunks;
               var entryRef = floatingTimeline[k];
+              // If chunks went to fallback path (audio_start arrived before result),
+              // merge them into the entry so audio isn't lost.
+              if (chunks2.length === 0 && window.__ai__ && window.__ai__.floatingTtsFallbackChunks && window.__ai__.floatingTtsFallbackChunks.length > 0) {
+                chunks2 = window.__ai__.floatingTtsFallbackChunks;
+                window.__ai__.floatingTtsFallbackChunks = [];
+              }
               if (chunks2.length > 0) {
                 var blob2 = new Blob(chunks2, { type: 'audio/mpeg' });
                 var reader2 = new FileReader();
                 reader2.onload = function () {
                   entryRef.audioBase64 = reader2.result.split(',')[1];
-                  // If this entry is what the user is CURRENTLY seeing
-                  // on the subtitle, play its audio immediately — the
-                  // subtitle has been waiting for it. If a different
-                  // line is now showing, do NOT play — that would be
-                  // the "TTS reads something different from subtitle"
-                  // bug the user reported.
-                  try {
-                    var ai = window.__ai__;
-                    // Late-arriving TTS audio. Rules:
-                    //   1. This entry must still be the currently-visible line.
-                    //   2. _vt must not have crossed entry.end yet (don't
-                    //      backfill audio for a subtitle that's already gone).
-                    //   3. There must not be another TTS playing right now
-                    //      (no conflict). _currentTtsEntry===null means free.
-                    var vt = ai && ai.getFloatingVt ? ai.getFloatingVt() : null;
-                    var stillVisible = ai && ai._visibleLine === entryRef;
-                    var inWindow = vt === null || vt < entryRef.end;
-                    var noConflict = !ai || !ai._currentTtsEntry;
-                    if (stillVisible && inWindow && noConflict && !entryRef.played) {
-                      entryRef.played = true;
-                      if (ai.playFloatingTTSDirect) {
-                        ai.playFloatingTTSDirect(entryRef.audioBase64, entryRef.audioMime || 'audio/mpeg', entryRef);
-                      }
-                    }
-                  } catch (_) {}
                 };
                 reader2.readAsDataURL(blob2);
               }
-              entryRef.audioChunks = [];
+              floatingTimeline[k].audioChunks = [];
               found = true;
               break;
             }
