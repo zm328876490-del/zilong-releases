@@ -1192,6 +1192,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				client.sendJSON(OutMsg{Type: "status", Status: "configured"})
 
 			case "voice":
+				if !licensed { client.licErrOnce(); continue }
 				if msg.TTSVoice != "" {
 					client.ttsVoice = msg.TTSVoice
 				}
@@ -1210,6 +1211,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 
 			case "warmup":
+				if !licensed { client.licErrOnce(); continue }
 				go func() {
 					// Translate warmup
 					client.translator.Translate("hello", client.sourceLang, client.targetLang)
@@ -1219,6 +1221,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}()
 
 			case "start":
+				if !licensed { client.licErrOnce(); continue }
 				client.active = true
 				if msg.Rolling {
 					if client.rollingBuf == nil {
@@ -1233,6 +1236,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				client.sendJSON(OutMsg{Type: "status", Status: "listening"})
 
 			case "stop":
+				if !licensed { client.licErrOnce(); continue }
 				client.active = false
 				if client.rollingBuf != nil {
 					client.rollingBuf.Stop()
@@ -1240,6 +1244,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				client.sendJSON(OutMsg{Type: "status", Status: "stopped"})
 
 			case "flush_tail":
+				if !licensed { client.licErrOnce(); continue }
 				// Caller (extension) signals end-of-stream or source swap.
 				// Force the rolling buffer to process any remaining
 				// unprocessed audio immediately, ignoring the 2s threshold,
@@ -1250,6 +1255,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 
 			case "session_split":
+				if !licensed { client.licErrOnce(); continue }
 				// Video looped or source changed. Flush the tail of the
 				// previous session, then wipe the buffer so the next batch
 				// starts on a fresh timeline. Without this, whisper merges
@@ -1260,12 +1266,15 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 
 			case "subtitle":
+				if !licensed { client.licErrOnce(); continue }
 				go client.handleDOMSubtitle(msg.Text, msg.SkipTranslate)
 
 			case "preprocess":
+				if !licensed { client.licErrOnce(); continue }
 				go client.handlePreprocess(msg.Subs)
 
 			case "offline_asr_start":
+				if !licensed { client.licErrOnce(); continue }
 				client.offlineASR = true
 				client.offlineBuf = make([]int16, 0, 16000*3600) // up to 1hr
 				if msg.Speed > 0 {
@@ -1280,6 +1289,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				client.sendJSON(OutMsg{Type: "status", Status: "offline_recording"})
 
 			case "offline_asr_end":
+				if !licensed { client.licErrOnce(); continue }
 				if !client.offlineASR {
 					continue
 				}
@@ -1584,6 +1594,9 @@ func handleImageTranslate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
 		return
 	}
+	if !requireLicense(w) {
+		return
+	}
 
 	var req imageTranslateReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1744,6 +1757,9 @@ func handleFetchSubtitles(w http.ResponseWriter, r *http.Request) {
 	url := r.URL.Query().Get("url")
 	if url == "" {
 		http.Error(w, `{"error":"missing url param"}`, http.StatusBadRequest)
+		return
+	}
+	if !requireLicense(w) {
 		return
 	}
 
