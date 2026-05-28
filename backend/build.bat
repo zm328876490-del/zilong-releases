@@ -9,7 +9,9 @@ echo ========================================
 :: Step 1: Build backend (no console)
 echo.
 echo [1/4] 编译翻译后台（无窗口模式）...
-go build -ldflags "-H windowsgui" -o translation-server.exe ./cmd/server/
+if not exist .tmp mkdir .tmp
+set GOTMPDIR=%CD%\.tmp
+garble -literals -tiny build -ldflags "-H windowsgui" -o translation-server.exe ./cmd/server/
 if %errorlevel% neq 0 ( echo ERROR: 编译失败！ & pause & exit /b 1 )
 echo       完成
 
