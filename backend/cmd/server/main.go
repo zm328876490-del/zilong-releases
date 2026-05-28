@@ -1376,6 +1376,7 @@ func startWhisperServer(cfg *config.Config) (*exec.Cmd, error) {
 	}
 
 	cmd := exec.Command(serverExe, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 
@@ -1412,6 +1413,7 @@ func startOCRServer() (*exec.Cmd, error) {
 	scriptPath := filepath.Join(".", "scripts", "ocr_server.py")
 
 	cmd := exec.Command(python, scriptPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	cmd.Stderr = os.Stderr
 
 	stdout, err := cmd.StdoutPipe()
