@@ -73,6 +73,7 @@ func main() {
 	// Step 4: Launch service
 	fmt.Print("正在启动服务...")
 	cmd := exec.Command(filepath.Join(targetDir, serviceExe))
+	cmd.Dir = targetDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: 0x08000000,
 		HideWindow:    true,

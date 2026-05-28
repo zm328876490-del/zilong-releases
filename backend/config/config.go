@@ -62,6 +62,7 @@ func Load() *Config {
 
 	// Look for whisper-cli in common locations
 	candidates := []string{
+		filepath.Join(".", "whisper-server.exe"),
 		filepath.Join(".", exeName),
 		filepath.Join("..", "whisper.cpp", "build", "bin", "Release", exeName),
 		filepath.Join("..", "whisper.cpp", "build", "bin", exeName),

@@ -591,16 +591,23 @@
       serviceStatus.textContent = '本地服务: 运行中 ✅' + (ver ? ' v' + ver : '');
       serviceStatus.className = 'service-status running';
       sendTokenToLocalService();
-      // Sync localVersion from real health response
+      // Sync version + license from real health response
       try {
         var hResp = await fetch(LOCAL_HEALTH);
         if (hResp.ok) {
           var hData = await hResp.json();
           var runningVer = hData.version || '';
+          var lic = hData.licensed;
+          var plan = hData.plan || '';
           if (runningVer && runningVer !== storage.localVersion) {
             await chrome.storage.local.set({ localVersion: runningVer });
-            serviceStatus.textContent = '本地服务: 运行中 ✅ v' + runningVer;
             ver = runningVer;
+          }
+          if (!lic) {
+            serviceStatus.textContent = '本地服务: 运行中 ⚠️ 未激活' + (ver ? ' v' + ver : '');
+            serviceStatus.className = 'service-status unlicensed';
+          } else {
+            serviceStatus.textContent = '本地服务: 运行中 ✅ 已激活' + (ver ? ' v' + ver : '');
           }
         }
       } catch (_) {}

@@ -1726,6 +1726,7 @@ func main() {
 	// Start whisper-server (keeps model warm)
 	whisperCmd, err := startWhisperServer(cfg)
 	if err != nil {
+		fmt.Println("[main] whisper-server:", err)
 	} else {
 		defer whisperCmd.Process.Kill()
 	}
