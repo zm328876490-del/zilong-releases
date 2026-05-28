@@ -593,7 +593,7 @@
       var ver = storage.localVersion || '';
       serviceStatus.textContent = '本地服务: 运行中 ✅' + (ver ? ' v' + ver : '');
       serviceStatus.className = 'service-status running';
-      sendTokenToLocalService();
+      await sendTokenToLocalService();
       // Sync version + license from real health response
       try {
         var hResp = await fetch(LOCAL_HEALTH);
