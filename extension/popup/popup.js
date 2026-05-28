@@ -579,7 +579,6 @@
   async function checkLocalService() {
     serviceStatus.textContent = '检测中...';
     serviceStatus.className = 'service-status checking';
-    installBtn.style.display = 'none';
     var localOk = false;
     try {
       var resp = await fetch(LOCAL_HEALTH);
@@ -592,6 +591,20 @@
       serviceStatus.textContent = '本地服务: 运行中 ✅' + (ver ? ' v' + ver : '');
       serviceStatus.className = 'service-status running';
       sendTokenToLocalService();
+      // Sync localVersion from real health response
+      try {
+        var hResp = await fetch(LOCAL_HEALTH);
+        if (hResp.ok) {
+          var hData = await hResp.json();
+          var runningVer = hData.version || '';
+          if (runningVer && runningVer !== storage.localVersion) {
+            await chrome.storage.local.set({ localVersion: runningVer });
+            serviceStatus.textContent = '本地服务: 运行中 ✅ v' + runningVer;
+            ver = runningVer;
+          }
+        }
+      } catch (_) {}
+      installBtn.style.display = 'none';
     } else {
       serviceStatus.textContent = '本地服务: 未安装';
       serviceStatus.className = 'service-status stopped';
@@ -604,15 +617,25 @@
       if (verResp.ok) {
         var verData = await verResp.json();
         latestVersion = verData.version || '';
-        latestHash = verData.installHash || verData.distHash || '';
         var storage = await chrome.storage.local.get(['localVersion']);
-        if (latestVersion && storage.localVersion !== latestVersion) {
+        var localVer = storage.localVersion || '0.0.0';
+        if (latestVersion && cmpVersion(latestVersion, localVer) > 0) {
           installBtn.style.display = '';
-          installBtn.textContent = localOk ? '更新版本 ' + latestVersion : '下载安装 (' + latestVersion + ')';
+          installBtn.textContent = localOk ? '更新 v' + latestVersion : '下载安装 (v' + latestVersion + ')';
           if (localOk) versionBadge.style.display = '';
         }
       }
     } catch (_) {}
+  }
+
+  function cmpVersion(a, b) {
+    var pa = (a || '0.0.0').split('.').map(Number);
+    var pb = (b || '0.0.0').split('.').map(Number);
+    for (var i = 0; i < 3; i++) {
+      if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+      if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+    }
+    return 0;
   }
 
   async function sendTokenToLocalService() {
@@ -678,7 +701,7 @@
     try {
       activeDownloadId = await chrome.downloads.download({
         url: INSTALLER_URL,
-        filename: 'AI-Translation-Installer.exe',
+        filename: 'AI-Translation-Installer-v' + (latestVersion || 'latest') + '.exe',
         saveAs: false,
       });
       pollProgress();

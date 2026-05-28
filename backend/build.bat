@@ -11,7 +11,8 @@ echo.
 echo [1/5] 编译翻译后台（无窗口模式）...
 if not exist .tmp mkdir .tmp
 set GOTMPDIR=%CD%\.tmp
-garble -literals -tiny build -ldflags "-H windowsgui" -o translation-server.exe ./cmd/server/
+for /f "usebackq delims=" %%v in ("..\auth-server\VERSION") do set VER=%%v
+go build -ldflags="-s -w -H windowsgui -X main.version=%VER%" -o translation-server.exe ./cmd/server/
 if %errorlevel% neq 0 ( echo ERROR: 编译失败！ & pause & exit /b 1 )
 echo       完成
 

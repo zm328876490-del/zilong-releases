@@ -32,44 +32,107 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var version = "dev"
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 const authAPI = "http://101.96.227.131/auth-server"
 
-func requireLicense(w http.ResponseWriter) bool {
-	if licState.isActive() {
-		return true
-	}
-	msg := "需要专业版才能使用本地翻译服务"
-	if !licState.isTrialActive() && licState.InstallTime > 0 {
-		msg = "试用已到期，请升级专业版"
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(402)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
-	return false
+var (
+	licensed    bool
+	licenseJWT  string
+	licensePlan string
+)
+
+var (
+	licErrClients = make(map[*Client]bool)
+	licErrMu     sync.Mutex
+)
+
+func licPath() string {
+	return filepath.Join(filepath.Dir(os.Args[0]), "license.json")
 }
 
-func handleActivate(w http.ResponseWriter, r *http.Request) {
+func loadLicense() {
+	data, err := os.ReadFile(licPath())
+	if err != nil {
+		return
+	}
+	var lic struct {
+		JWT string `json:"jwt"`
+	}
+	if json.Unmarshal(data, &lic) != nil || lic.JWT == "" {
+		return
+	}
+	validateJWT(lic.JWT)
+}
+
+func validateJWT(token string) bool {
+	req, _ := http.NewRequest("GET", authAPI+"/api/auth/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return false
+	}
+	var data struct {
+		Plan string `json:"plan"`
+	}
+	json.NewDecoder(resp.Body).Decode(&data)
+	if data.Plan != "premium" {
+		return false
+	}
+	licenseJWT = token
+	licensePlan = data.Plan
+	licensed = true
+	return true
+}
+
+func handleSetToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
 		return
 	}
 	var req struct {
-		License string `json:"license"`
+		Token string `json:"token"`
 	}
-	if json.NewDecoder(r.Body).Decode(&req) != nil || req.License == "" {
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Token == "" {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
 	}
-	if err := licActivate(req.License); err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusForbidden)
+	if !validateJWT(req.Token) {
+		http.Error(w, `{"error":"需要专业版账号"}`, http.StatusForbidden)
 		return
 	}
+	data, _ := json.Marshal(map[string]string{"jwt": req.Token})
+	os.WriteFile(licPath(), data, 0644)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"ok": "activated"})
+	json.NewEncoder(w).Encode(map[string]string{"ok": "licensed", "plan": licensePlan})
+}
+
+func requireLicense(w http.ResponseWriter) bool {
+	if licensed {
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(402)
+	json.NewEncoder(w).Encode(map[string]string{"error": "需要专业版才能使用翻译功能，请在插件中登录专业版账号"})
+	return false
+}
+func (c *Client) licErrOnce() {
+	licErrMu.Lock()
+	if licErrClients[c] {
+		licErrMu.Unlock()
+		return
+	}
+	licErrClients[c] = true
+	licErrMu.Unlock()
+	c.sendJSON(OutMsg{Type: "error", Message: "需要专业版才能使用翻译功能，请在插件中登录专业版账号"})
 }
 
 // Client represents a connected browser extension.
@@ -273,9 +336,6 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 		return
 	}
 
-	if !licState.isActive() {
-		return
-	}
 
 	translated, err := c.translator.Translate(text, c.sourceLang, c.targetLang)
 	if err != nil {
@@ -674,10 +734,6 @@ func (c *Client) handleDOMSubtitle(text string, skipTranslate bool) {
 	if c.translator == nil || c.targetLang == "" {
 		return
 	}
-	if !licState.isActive() {
-		c.sendJSON(OutMsg{Type: "error", Message: "需要专业版才能使用翻译功能"})
-		return
-	}
 	var translated string
 	var err error
 	if skipTranslate {
@@ -706,10 +762,6 @@ func (c *Client) handleDOMSubtitle(text string, skipTranslate bool) {
 func (c *Client) handlePreprocess(subs []Subtitle) {
 	if c.translator == nil {
 		c.sendJSON(OutMsg{Type: "preprocess_error", Message: "Not configured — send config first"})
-		return
-	}
-	if !licState.isActive() {
-		c.sendJSON(OutMsg{Type: "preprocess_error", Message: "需要专业版才能使用翻译功能"})
 		return
 	}
 
@@ -1230,9 +1282,6 @@ func handleTranslatePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireLicense(w) {
-		return
-	}
 
 	var req translatePageReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1467,9 +1516,6 @@ func handleImageTranslate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
 		return
 	}
-	if !requireLicense(w) {
-		return
-	}
 
 	var req imageTranslateReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1675,7 +1721,7 @@ func parseTimedTextXML(raw string) []Subtitle {
 func main() {
 	cfg := config.Load()
 
-	licInit()
+	loadLicense()
 
 	// Start whisper-server (keeps model warm)
 	whisperCmd, err := startWhisperServer(cfg)
@@ -1693,20 +1739,21 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/set-token", handleSetToken)
 	mux.HandleFunc("/ws", handleWebSocket)
 	mux.HandleFunc("/translate/page", handleTranslatePage)
 	mux.HandleFunc("/api/image-translate", handleImageTranslate)
 	mux.HandleFunc("/fetch-subtitles", handleFetchSubtitles)
-	mux.HandleFunc("/activate", handleActivate)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := map[string]interface{}{
-			"status":        "ok",
-			"machineId":     licState.MachineID,
-			"plan":          licState.planLabel(),
-			"licensed":      licState.isLicensed(),
-			"trialActive":   licState.isTrialActive(),
-			"trialDaysLeft": licState.daysLeft(),
+			"status":   "ok",
+			"version":  version,
+			"licensed": licensed,
+			"plan":     licensePlan,
+			"whisperExe": cfg.WhisperExe,
+			"modelPath":  cfg.ModelPath,
+			"asrServer":  whisperServerURL,
 		}
 		json.NewEncoder(w).Encode(status)
 	})
