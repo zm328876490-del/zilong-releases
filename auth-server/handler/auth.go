@@ -266,21 +266,13 @@ func (h *Handler) SetPlan(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 400, map[string]string{"error": "invalid json"})
 		return
 	}
-	// Non-admin users can only upgrade themselves and only to premium
 	if !isAdmin {
-		if req.Email != operatorEmail {
-			jsonResp(w, 403, map[string]string{"error": "只能升级自己的账号"})
-			return
-		}
-		if req.Plan != "premium" {
-			jsonResp(w, 403, map[string]string{"error": "只能升级到专业版"})
-			return
-		}
-	} else {
-		if req.Plan != "trial" && req.Plan != "premium" {
-			jsonResp(w, 400, map[string]string{"error": "plan must be trial or premium"})
-			return
-		}
+		jsonResp(w, 403, map[string]string{"error": "暂无权限，功能开发中"})
+		return
+	}
+	if req.Plan != "trial" && req.Plan != "premium" {
+		jsonResp(w, 400, map[string]string{"error": "plan must be trial or premium"})
+		return
 	}
 	_, err = h.db.FindByEmail(req.Email)
 	if err != nil {

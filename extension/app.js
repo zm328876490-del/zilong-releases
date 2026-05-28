@@ -169,40 +169,8 @@ function saveAuth(token, plan, email) {
   var _payLoggedIn = false;
   var _payToken = '';
 
-  function openPay() {
-    modalBg.classList.add('show');
-    showMsg('payMsg', '', '');
-    // Check if already logged in
-    chrome.storage.local.get(['authToken', 'userEmail'], function (result) {
-      _payToken = result.authToken || '';
-      _payLoggedIn = !!_payToken;
-      if (_payLoggedIn && result.userEmail) {
-        var emailEl = $('payEmail');
-        emailEl.value = result.userEmail;
-        emailEl.readOnly = true;
-        emailEl.style.opacity = '0.6';
-        btnSend.style.display = 'none';
-        $('payCode').style.display = 'none';
-        // Hide the tip line too
-        var tipEl = document.querySelector('#payModalBg .tip');
-        if (tipEl) tipEl.style.display = 'none';
-        var codeEl = $('payCode');
-        codeEl.style.display = 'none';
-        btnLogin.textContent = '确认升级 · ¥168';
-      } else {
-        var emailEl = $('payEmail');
-        emailEl.value = '';
-        emailEl.readOnly = false;
-        emailEl.style.opacity = '';
-        btnSend.style.display = '';
-        $('payCode').style.display = '';
-        var tipEl = document.querySelector('#payModalBg .tip');
-        if (tipEl) tipEl.style.display = '';
-        btnLogin.textContent = '登录并支付';
-      }
-    });
-  }
-  function closePay() { modalBg.classList.remove('show'); }
+  function openPay() { alert('支付功能正在开发中，敬请期待'); }
+  function closePay() {}
 
   if (btnBuy) btnBuy.addEventListener('click', openPay);
 
