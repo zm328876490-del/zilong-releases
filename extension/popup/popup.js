@@ -707,9 +707,15 @@
           updateHeaderFromToken(token, data.plan || plan);
           return;
         }
+        // Only clear on explicit 401 (token rejected by server)
+        if (resp.status === 401) {
+          await chrome.storage.local.remove(['authToken', 'userPlan']);
+          updateHeaderFromToken(null, 'trial');
+          return;
+        }
       } catch (_) {}
-      // Token invalid, clear it
-      await chrome.storage.local.remove(['authToken', 'userPlan']);
+      // Network error or server issue — keep existing login state
+      updateHeaderFromToken(token, plan);
     }
     updateHeaderFromToken(null, 'trial');
   }
