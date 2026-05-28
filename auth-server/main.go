@@ -96,8 +96,9 @@ func main() {
 			http.Error(w, `{"error":"未登录或token无效"}`, 401)
 			return
 		}
-		plan, _ := claims["plan"].(string)
-		if plan != "premium" {
+		email, _ := claims["email"].(string)
+		user, _ := db.FindByEmail(email)
+		if user == nil || user.Plan != "premium" {
 			http.Error(w, `{"error":"需要高级版"}`, 403)
 			return
 		}
