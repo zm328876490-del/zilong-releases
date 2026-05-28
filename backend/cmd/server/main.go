@@ -33,6 +33,7 @@ import (
 )
 
 var version = "dev"
+var updateMu sync.Mutex
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -113,6 +114,71 @@ func handleSetToken(w http.ResponseWriter, r *http.Request) {
 	os.WriteFile(licPath(), data, 0644)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"ok": "licensed", "plan": licensePlan})
+}
+
+func handleUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	if !updateMu.TryLock() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "更新已在进行中"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "updating",
+		"message": "下载并安装更新中...",
+	})
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+	go func() {
+		defer updateMu.Unlock()
+		installerURL := "https://github.com/zm328876490-del/zilong-releases/releases/latest/download/installer.exe"
+		tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("ai-translation-update-%d.exe", time.Now().UnixNano()))
+		if err := downloadFile(installerURL, tmpFile); err != nil {
+			fmt.Printf("[update] download failed: %v\n", err)
+			return
+		}
+		cmd := exec.Command(tmpFile)
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			HideWindow:    true,
+			CreationFlags: 0x00000200 | 0x00000008, // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+		}
+		if err := cmd.Start(); err != nil {
+			fmt.Printf("[update] launch installer failed: %v\n", err)
+			return
+		}
+		fmt.Printf("[update] installer launched (PID %d), waiting for restart...\n", cmd.Process.Pid)
+		cmd.Process.Release()
+	}()
+}
+
+func downloadFile(url, dest string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	defer f.Close()
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		os.Remove(dest)
+		return fmt.Errorf("download: %w", err)
+	}
+	return nil
 }
 
 func requireLicense(w http.ResponseWriter) bool {
@@ -1747,6 +1813,7 @@ func main() {
 	mux.HandleFunc("/translate/page", handleTranslatePage)
 	mux.HandleFunc("/api/image-translate", handleImageTranslate)
 	mux.HandleFunc("/fetch-subtitles", handleFetchSubtitles)
+	mux.HandleFunc("/update", handleUpdate)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := map[string]interface{}{
