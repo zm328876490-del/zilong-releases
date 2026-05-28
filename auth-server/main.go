@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"net/http"
@@ -39,6 +40,31 @@ func cors(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func validateToken(r *http.Request, cfg *config.Config, db *model.DB) (string, jwt.MapClaims, bool) {
+	tokenStr := r.Header.Get("Authorization")
+	if tokenStr == "" {
+		return "", nil, false
+	}
+	tokenStr = strings.TrimPrefix(tokenStr, "Bearer ")
+	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+		return []byte(cfg.JWTSecret), nil
+	})
+	if err != nil || !token.Valid {
+		return "", nil, false
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", nil, false
+	}
+	email, _ := claims["email"].(string)
+	tokenVer, _ := claims["ver"].(float64)
+	user, _ := db.FindByEmail(email)
+	if user == nil || int(tokenVer) != user.TokenVersion {
+		return "", nil, false
+	}
+	return tokenStr, claims, true
+}
+
 func main() {
 	cfg := config.Load()
 
@@ -62,39 +88,47 @@ func main() {
 	mux.HandleFunc("/api/auth/me", cors(h.Me))
 	mux.HandleFunc("/api/admin/set-plan", cors(h.SetPlan))
 	mux.HandleFunc("/api/download/installer", func(w http.ResponseWriter, r *http.Request) {
-		// Validate premium token
-		tokenStr := r.Header.Get("Authorization")
-		if tokenStr == "" {
-			http.Error(w, `{"error":"未登录"}`, 401)
+		tokenStr, claims, ok := validateToken(r, cfg, db)
+		if !ok {
+			http.Error(w, `{"error":"未登录或token无效"}`, 401)
 			return
 		}
-		tokenStr = strings.TrimPrefix(tokenStr, "Bearer ")
-		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
-			return []byte(cfg.JWTSecret), nil
-		})
-		if err != nil || !token.Valid {
-			http.Error(w, `{"error":"token无效"}`, 401)
-			return
-		}
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok || claims["plan"] != "premium" {
+		plan, _ := claims["plan"].(string)
+		if plan != "premium" {
 			http.Error(w, `{"error":"需要高级版"}`, 403)
 			return
 		}
-		email, _ := claims["email"].(string)
-		tokenVer, _ := claims["ver"].(float64)
-		user, _ := db.FindByEmail(email)
-		if user == nil || int(tokenVer) != user.TokenVersion {
-			http.Error(w, `{"error":"已在其他设备登录"}`, 401)
+		// Read installer.exe and embed the user's JWT
+		exeData, err := os.ReadFile("installer.exe")
+		if err != nil {
+			http.Error(w, `{"error":"installer not found"}`, 500)
 			return
 		}
-		// Serve dist.zip for the installer bootstrapper
-		zipPath := os.Getenv("DIST_ZIP_PATH")
-		if zipPath == "" {
-			zipPath = "dist.zip"
+		placeholder := make([]byte, 512)
+		copy(placeholder, "JWT:")
+		for i := 4; i < 512; i++ {
+			placeholder[i] = '_'
+		}
+		jwtPart := "JWT:" + tokenStr
+		padded := make([]byte, 512)
+		copy(padded, jwtPart)
+		for i := len(jwtPart); i < 512; i++ {
+			padded[i] = '_'
+		}
+		exeData = bytes.Replace(exeData, placeholder, padded, 1)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", "attachment; filename=installer.exe")
+		w.Write(exeData)
+	})
+	mux.HandleFunc("/api/download/dist", func(w http.ResponseWriter, r *http.Request) {
+		_, _, ok := validateToken(r, cfg, db)
+		if !ok {
+			http.Error(w, `{"error":"未登录或token无效"}`, 401)
+			return
 		}
 		w.Header().Set("Content-Type", "application/zip")
-		http.ServeFile(w, r, zipPath)
+		w.Header().Set("Content-Disposition", "attachment; filename=dist.zip")
+		http.ServeFile(w, r, "dist.zip")
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

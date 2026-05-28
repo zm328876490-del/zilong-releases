@@ -9,14 +9,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows/registry"
 )
 
-// Override at build time: go build -ldflags "-X main.downloadURL=..."
-var downloadURL = "http://localhost:14532/api/download/installer"
+// Override at build time: go build -ldflags "-X main.downloadURL=http://YOUR_IP/api/download/dist"
+var downloadURL = "http://127.0.0.1/api/download/dist"
+
+// Embedded by auth-server at download time. 512-char placeholder, do not change length.
+var authToken = "JWT:________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________"
 
 const serviceExe = "translation-server.exe"
 
@@ -25,6 +29,9 @@ func main() {
 	fmt.Println("  AI Translation - 一键安装")
 	fmt.Println("========================================")
 	fmt.Println()
+
+	// Trim padding from embedded token
+	token := strings.TrimRight(authToken[4:], "_")
 
 	localAppData := os.Getenv("LOCALAPPDATA")
 	if localAppData == "" {
@@ -38,7 +45,9 @@ func main() {
 
 	// Step 2: Download
 	fmt.Print("正在下载后端服务...")
-	resp, err := http.Get(downloadURL)
+	req, _ := http.NewRequest("GET", downloadURL, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Println(" 失败!")
 		fmt.Println("无法连接服务器:", err)

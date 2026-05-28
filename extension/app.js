@@ -1,5 +1,5 @@
 // app.js - AI 实时翻译 统一页面
-var AUTH_API = 'http://localhost:14532';
+var AUTH_API = 'http://101.96.227.131/auth-server';
 
 function $(id) { return document.getElementById(id); }
 

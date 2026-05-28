@@ -23,28 +23,32 @@ mkdir release
 powershell -Command "Compress-Archive -Path 'translation-server.exe','whisper-server.exe','whisper.dll','SDL2.dll','ggml.dll','ggml-base.dll','ggml-cpu.dll','scripts','models\ggml-tiny.bin','models\ggml-vad.bin' -DestinationPath 'release\dist.zip' -Force"
 echo       完成
 
+:: Server URL (first argument or default)
+set SERVER_URL=%1
+if "%SERVER_URL%"=="" set SERVER_URL=http://127.0.0.1
+
 :: Step 3: Build installer bootstrapper
 echo.
-echo [3/4] 编译安装程序...
+echo [3/4] 编译安装程序（下载地址: %SERVER_URL%/api/download/dist）...
 cd installer
-go build -o installer.exe .
+go build -ldflags "-X main.downloadURL=%SERVER_URL%/api/download/dist" -o installer.exe .
 if %errorlevel% neq 0 ( echo ERROR: 安装程序编译失败！ & cd .. & pause & exit /b 1 )
 cd ..
 move installer\installer.exe release\installer.exe >nul
 echo       完成
 
-:: Step 4: Done
+:: Step 4: Copy to auth-server
+echo.
+echo [4/4] 复制产物到 auth-server/ ...
+copy /y release\dist.zip ..\auth-server\dist.zip >nul
+copy /y release\installer.exe ..\auth-server\installer.exe >nul
+echo       完成
+
+:: Done
 echo.
 echo ========================================
-echo   发布文件: release\
-echo ========================================
-dir /s release
-echo.
-echo       installer.exe  (~7MB)   - 给用户（引导下载）
-echo       dist.zip       (~87MB)  - 放服务器供下载
-echo.
-echo   部署:
-echo       1. 把 dist.zip 放到 auth-server 同目录
-echo       2. 把 installer.exe 放到网站上供用户下载
+echo   服务器部署:
+echo       上传 auth-server\ 整个目录到 /home/project/auth-server/
+echo       参考 auth-server\linux\deploy.txt
 echo ========================================
 pause

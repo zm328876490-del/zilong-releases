@@ -208,7 +208,8 @@
     return 'heavy';
   }
 
-  const INSTALLER_URL = 'http://localhost:14532/api/download/installer';
+  const AUTH_API = 'http://101.96.227.131/auth-server';
+  const INSTALLER_URL = AUTH_API + '/api/download/installer';
   const LOCAL_HEALTH = 'http://localhost:29527/health';
 
   let isRunning = false;
@@ -603,8 +604,38 @@
     installBtn.style.display = '';
   }
 
-  installBtn.addEventListener('click', function () {
-    chrome.downloads.download({ url: INSTALLER_URL, filename: 'AI-Translation-Installer.exe', saveAs: true });
+  installBtn.addEventListener('click', async function () {
+    // Check if user is logged in
+    const storage = await chrome.storage.local.get(['authToken']);
+    const token = storage.authToken;
+    if (!token) {
+      chrome.tabs.create({ url: chrome.runtime.getURL('app.html#login') });
+      return;
+    }
+    installBtn.textContent = '下载中...';
+    installBtn.disabled = true;
+    try {
+      const resp = await fetch(INSTALLER_URL, {
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        alert(err.error || '下载失败，请重新登录');
+        installBtn.textContent = '下载安装程序';
+        installBtn.disabled = false;
+        return;
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      await chrome.downloads.download({ url: url, filename: 'AI-Translation-Installer.exe', saveAs: true });
+      URL.revokeObjectURL(url);
+      installBtn.textContent = '下载安装程序';
+      installBtn.disabled = false;
+    } catch (e) {
+      alert('下载失败: ' + (e.message || '网络错误'));
+      installBtn.textContent = '下载安装程序';
+      installBtn.disabled = false;
+    }
   });
 
   // ─── Engine badge (custom dropdown, replaces old <select>) ──────────
@@ -651,7 +682,7 @@
     if (token) {
       // Validate token with server
       try {
-        var resp = await fetch('http://localhost:14532/api/auth/me', {
+        var resp = await fetch(AUTH_API + '/api/auth/me', {
           headers: { 'Authorization': 'Bearer ' + token },
         });
         if (resp.ok) {
