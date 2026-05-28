@@ -23,13 +23,31 @@ navLinks.forEach(function (a) {
   });
 });
 
+// ─── Auth state ───────────────────────────────────────────────────
+var _isLoggedIn = false;
+
+function updateNav() {
+  chrome.storage.local.get(['authToken'], function (result) {
+    _isLoggedIn = !!result.authToken;
+    $('navLogin').style.display = _isLoggedIn ? 'none' : '';
+    $('navAccount').style.display = _isLoggedIn ? '' : 'none';
+  });
+}
+
 // Hash routing
 function routeFromHash() {
-  var hash = window.location.hash.replace('#', '') || 'login';
+  var hash = window.location.hash.replace('#', '') || '';
+  // Redirect unauthenticated users away from account tab
+  if (!_isLoggedIn && hash === 'account') { hash = 'login'; }
+  if (_isLoggedIn && hash === 'login') { hash = 'account'; }
+  if (!hash) hash = _isLoggedIn ? 'buy' : 'login';
   var map = { login: 'login', buy: 'buy', account: 'account' };
   switchTab(map[hash] || 'login');
 }
-window.addEventListener('hashchange', routeFromHash);
+window.addEventListener('hashchange', function () {
+  updateNav();
+  routeFromHash();
+});
 
 // ─── Shared helpers ──────────────────────────────────────────────────
 function showMsg(elId, text, type) {
@@ -125,6 +143,8 @@ function saveAuth(token, plan, email) {
         }
         showMsg('loginMsg', '登录成功', 'ok');
         saveAuth(d.token, d.plan || 'trial', email);
+        _isLoggedIn = true;
+        updateNav();
         setTimeout(function () { window.close(); }, 600);
       })
       .catch(function () {
@@ -252,6 +272,8 @@ $('btnLogout').addEventListener('click', function () {
   btn.textContent = '退出中...';
   try {
     chrome.storage.local.remove(['authToken', 'userPlan', 'userEmail'], function () {
+      _isLoggedIn = false;
+      updateNav();
       showMsg('acctMsg', '已退出登录', 'ok');
       btn.textContent = '已退出';
       setTimeout(function () { window.close(); }, 1000);
@@ -273,4 +295,5 @@ function formatDate(isoStr) {
 function pad(n) { return n < 10 ? '0' + n : '' + n; }
 
 // ─── Init ────────────────────────────────────────────────────────────
-routeFromHash();
+updateNav();
+setTimeout(function () { routeFromHash(); }, 50);

@@ -652,7 +652,14 @@
 
   // ─── Login / Account links ──────────────────────────────────────────
   function openAppPage(hash) {
-    chrome.tabs.create({ url: chrome.runtime.getURL('app.html' + (hash ? '#' + hash : '')) });
+    var url = chrome.runtime.getURL('app.html' + (hash ? '#' + hash : ''));
+    chrome.tabs.query({ url: chrome.runtime.getURL('app.html*') }, function (tabs) {
+      if (tabs.length > 0) {
+        chrome.tabs.update(tabs[0].id, { active: true, url: url });
+      } else {
+        chrome.tabs.create({ url: url });
+      }
+    });
   }
 
   headerLogin.addEventListener('click', function () { openAppPage('login'); });
