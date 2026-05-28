@@ -5,6 +5,7 @@
 (function () {
   'use strict';
 
+  if (location.href.indexOf('chrome-extension://') === 0) return;
   if (window.__ai_page_translate_loaded__) return;
   window.__ai_page_translate_loaded__ = true;
 

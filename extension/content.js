@@ -5,10 +5,10 @@
 (function () {
   'use strict';
 
+  // Skip extension-owned pages (app.html, popup, etc.)
+  if (location.href.indexOf('chrome-extension://') === 0) return;
   // Prevent double injection
   if (window.__ai_translation_loaded__) return;
-  // Skip extension pages (app.html, popup, etc.)
-  if (location.protocol === 'chrome-extension:') return;
   window.__ai_translation_loaded__ = true;
 
   // ─── Shared state bridge for floating-window.js ────────────────────

@@ -3,6 +3,8 @@
 (function () {
   'use strict';
 
+  if (location.href.indexOf('chrome-extension://') === 0) return;
+
   // ── 1. 精确句子映射（跨境电商高频整句）────────────────────────────────────────
   const exactMap = new Map(Object.entries({
     // 葡萄牙语 (Mercado Livre / 巴西)
