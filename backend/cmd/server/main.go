@@ -34,6 +34,7 @@ import (
 
 var version = "dev"
 var updateMu sync.Mutex
+var updateStatus = "idle" // "idle" | "downloading" | "installing" | "failed"
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -124,7 +125,7 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if !updateMu.TryLock() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]string{"error": "更新已在进行中"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "更新已在进行中", "status": updateStatus})
 		return
 	}
 
@@ -140,19 +141,24 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		defer updateMu.Unlock()
+		defer func() { updateStatus = "idle" }()
+		updateStatus = "downloading"
 		installerURL := "https://github.com/zm328876490-del/zilong-releases/releases/latest/download/installer.exe"
 		tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("ai-translation-update-%d.exe", time.Now().UnixNano()))
 		if err := downloadFile(installerURL, tmpFile); err != nil {
 			fmt.Printf("[update] download failed: %v\n", err)
+			updateStatus = "failed"
 			return
 		}
+		updateStatus = "installing"
 		cmd := exec.Command(tmpFile)
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			HideWindow:    true,
-			CreationFlags: 0x00000200 | 0x00000008, // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+			CreationFlags: 0x00000200 | 0x00000008,
 		}
 		if err := cmd.Start(); err != nil {
 			fmt.Printf("[update] launch installer failed: %v\n", err)
+			updateStatus = "failed"
 			return
 		}
 		fmt.Printf("[update] installer launched (PID %d), waiting for restart...\n", cmd.Process.Pid)
@@ -160,8 +166,14 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+func handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": updateStatus})
+}
+
 func downloadFile(url, dest string) error {
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", url, err)
 	}
@@ -1830,6 +1842,7 @@ func main() {
 	mux.HandleFunc("/api/image-translate", handleImageTranslate)
 	mux.HandleFunc("/fetch-subtitles", handleFetchSubtitles)
 	mux.HandleFunc("/update", handleUpdate)
+	mux.HandleFunc("/update/status", handleUpdateStatus)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := map[string]interface{}{

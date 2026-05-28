@@ -576,18 +576,8 @@
   let latestVersion = '';
   let latestHash = '';
   let serviceWasRunning = false;
-  let updateState = 'idle'; // 'idle' | 'updating' | 'waiting-restart' | 'success' | 'failed'
-  let updateTargetVersion = '';
-  let updatePollTimer = null;
-  let updateTimeoutTimer = null;
 
   async function checkLocalService() {
-    // If in the middle of an update, resume polling in case popup was reopened.
-    if (updateState === 'waiting-restart' || updateState === 'updating') {
-      if (updateState === 'waiting-restart') startUpdatePolling();
-      return;
-    }
-
     serviceStatus.textContent = '检测中...';
     serviceStatus.className = 'service-status checking';
     var localOk = false;
@@ -672,63 +662,6 @@
     } catch (_) {}
   }
 
-  function startUpdatePolling() {
-    stopUpdatePolling();
-    updatePollTimer = setInterval(pollForNewVersion, 2000);
-    updateTimeoutTimer = setTimeout(function () {
-      stopUpdatePolling();
-      updateState = 'failed';
-      serviceStatus.textContent = '本地服务: 更新超时，请手动安装';
-      serviceStatus.className = 'service-status stopped';
-      installBtn.textContent = '下载安装程序';
-      installBtn.disabled = false;
-      installBtn.style.display = '';
-      serviceWasRunning = false;
-      updateTargetVersion = '';
-    }, 60000);
-    pollForNewVersion();
-  }
-
-  function stopUpdatePolling() {
-    if (updatePollTimer) { clearInterval(updatePollTimer); updatePollTimer = null; }
-    if (updateTimeoutTimer) { clearTimeout(updateTimeoutTimer); updateTimeoutTimer = null; }
-  }
-
-  async function pollForNewVersion() {
-    try {
-      var resp = await fetch(LOCAL_HEALTH);
-      if (!resp.ok) return;
-      var data = await resp.json();
-      var runningVer = data.version || '';
-      if (updateTargetVersion && cmpVersion(runningVer, updateTargetVersion) >= 0) {
-        stopUpdatePolling();
-        updateState = 'success';
-        await chrome.storage.local.set({ localVersion: runningVer });
-        serviceStatus.textContent = '本地服务: 运行中 ✅ 已激活 v' + runningVer;
-        serviceStatus.className = 'service-status running';
-        installBtn.style.display = 'none';
-        versionBadge.style.display = 'none';
-        serviceWasRunning = true;
-        sendTokenToLocalService();
-        setTimeout(function () { updateState = 'idle'; updateTargetVersion = ''; }, 5000);
-      }
-    } catch (_) {}
-  }
-
-  function resetUpdateButton() {
-    updateState = 'idle';
-    updateTargetVersion = '';
-    if (serviceWasRunning) {
-      installBtn.textContent = '更新 v' + latestVersion;
-      installBtn.style.display = '';
-      versionBadge.style.display = '';
-    } else {
-      installBtn.textContent = '下载安装程序 (v' + latestVersion + ')';
-      installBtn.style.display = '';
-    }
-    installBtn.disabled = false;
-  }
-
   let activeDownloadId = null;
   let progressTimer = null;
 
@@ -777,78 +710,21 @@
   }
 
   installBtn.addEventListener('click', async function () {
-    // Fresh install: no local service running, use browser download (unchanged).
-    if (!serviceWasRunning) {
-      installBtn.textContent = '开始下载...';
-      installBtn.disabled = true;
-      try {
-        activeDownloadId = await chrome.downloads.download({
-          url: INSTALLER_URL,
-          filename: 'AI-Translation-Installer-v' + (latestVersion || 'latest') + '.exe',
-          saveAs: false,
-        });
-        pollProgress();
-        progressTimer = setInterval(pollProgress, 500);
-      } catch (e) {
-        alert('下载失败: ' + (e.message || '网络错误'));
-        installBtn.textContent = '下载安装程序';
-        installBtn.disabled = false;
-        activeDownloadId = null;
-      }
-      return;
-    }
-
-    // Self-update flow: POST /update to local service.
-    updateState = 'updating';
-    updateTargetVersion = latestVersion;
-    installBtn.textContent = '正在更新...';
+    installBtn.textContent = '开始下载...';
     installBtn.disabled = true;
-    serviceStatus.textContent = '本地服务: 更新中...';
-    serviceStatus.className = 'service-status checking';
-    versionBadge.style.display = 'none';
-
     try {
-      var resp = await fetch(LOCAL_BASE + '/update', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
+      activeDownloadId = await chrome.downloads.download({
+        url: INSTALLER_URL,
+        filename: 'AI-Translation-Installer-v' + (latestVersion || 'latest') + '.exe',
+        saveAs: false,
       });
-      if (resp.ok) {
-        updateState = 'waiting-restart';
-        installBtn.textContent = '更新中... (等待重启)';
-        serviceStatus.textContent = '本地服务: 重启中...';
-        startUpdatePolling();
-        return;
-      }
-      // Old server without /update endpoint: fall back to browser download.
-      if (resp.status === 404) {
-        updateState = 'idle';
-        updateTargetVersion = '';
-        installBtn.textContent = '开始下载...';
-        activeDownloadId = await chrome.downloads.download({
-          url: INSTALLER_URL,
-          filename: 'AI-Translation-Installer-v' + (latestVersion || 'latest') + '.exe',
-          saveAs: false,
-        });
-        pollProgress();
-        progressTimer = setInterval(pollProgress, 500);
-        return;
-      }
-      var errData;
-      try { errData = await resp.json(); } catch (_) { errData = {}; }
-      alert(errData.error || '更新请求失败');
-      resetUpdateButton();
+      pollProgress();
+      progressTimer = setInterval(pollProgress, 500);
     } catch (e) {
-      // fetch failed: server was killed by installer → update IS happening.
-      if (e.name === 'TypeError' || (e.message && e.message.indexOf('Failed to fetch') !== -1)) {
-        updateState = 'waiting-restart';
-        installBtn.textContent = '更新中... (等待重启)';
-        serviceStatus.textContent = '本地服务: 重启中...';
-        startUpdatePolling();
-      } else {
-        alert('更新失败: ' + (e.message || '网络错误'));
-        resetUpdateButton();
-      }
+      alert('下载失败: ' + (e.message || '网络错误'));
+      installBtn.textContent = serviceWasRunning ? '更新 v' + latestVersion : '下载安装程序 (v' + latestVersion + ')';
+      installBtn.disabled = false;
+      activeDownloadId = null;
     }
   });
 

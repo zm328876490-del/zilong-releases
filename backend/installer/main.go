@@ -42,14 +42,32 @@ func main() {
 	}
 	targetDir := filepath.Join(localAppData, "AI-Translation")
 
-	// Step 1: Kill existing process
+	// Step 1: Kill all related processes and wait for them to exit
 	exec.Command("taskkill", "/f", "/im", serviceExe).Run()
-	time.Sleep(300 * time.Millisecond)
+	exec.Command("taskkill", "/f", "/im", "whisper-server.exe").Run()
+	time.Sleep(500 * time.Millisecond)
+
+	// Poll until translation-server.exe is truly gone (max 10s)
+	for i := 0; i < 50; i++ {
+		out, _ := exec.Command("tasklist", "/fi", "imagename eq "+serviceExe, "/fo", "csv").Output()
+		if !strings.Contains(string(out), serviceExe) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 
 	// Step 2: Extract embedded files
 	fmt.Print("正在解压...")
 	os.MkdirAll(targetDir, 0755)
-	if err := extractEmbedded(targetDir); err != nil {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		err = extractEmbedded(targetDir)
+		if err == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if err != nil {
 		fmt.Println(" 失败!")
 		fmt.Println("解压错误:", err)
 		fmt.Scanln()
