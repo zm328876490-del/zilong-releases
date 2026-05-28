@@ -166,8 +166,42 @@ function saveAuth(token, plan, email) {
   var modalBg = $('payModalBg');
   var btnSend = $('payBtnSend');
   var btnLogin = $('payBtnLogin');
+  var _payLoggedIn = false;
+  var _payToken = '';
 
-  function openPay() { modalBg.classList.add('show'); showMsg('payMsg', '', ''); }
+  function openPay() {
+    modalBg.classList.add('show');
+    showMsg('payMsg', '', '');
+    // Check if already logged in
+    chrome.storage.local.get(['authToken', 'userEmail'], function (result) {
+      _payToken = result.authToken || '';
+      _payLoggedIn = !!_payToken;
+      if (_payLoggedIn && result.userEmail) {
+        var emailEl = $('payEmail');
+        emailEl.value = result.userEmail;
+        emailEl.readOnly = true;
+        emailEl.style.opacity = '0.6';
+        btnSend.style.display = 'none';
+        $('payCode').style.display = 'none';
+        // Hide the tip line too
+        var tipEl = document.querySelector('#payModalBg .tip');
+        if (tipEl) tipEl.style.display = 'none';
+        var codeEl = $('payCode');
+        codeEl.style.display = 'none';
+        btnLogin.textContent = '确认升级 · ¥168';
+      } else {
+        var emailEl = $('payEmail');
+        emailEl.value = '';
+        emailEl.readOnly = false;
+        emailEl.style.opacity = '';
+        btnSend.style.display = '';
+        $('payCode').style.display = '';
+        var tipEl = document.querySelector('#payModalBg .tip');
+        if (tipEl) tipEl.style.display = '';
+        btnLogin.textContent = '登录并支付';
+      }
+    });
+  }
   function closePay() { modalBg.classList.remove('show'); }
 
   if (btnBuy) btnBuy.addEventListener('click', openPay);
@@ -190,6 +224,40 @@ function saveAuth(token, plan, email) {
 
   btnLogin.addEventListener('click', function () {
     var email = ($('payEmail').value || '').trim();
+
+    // Already logged in — directly upgrade plan.
+    if (_payLoggedIn) {
+      btnLogin.disabled = true;
+      btnLogin.textContent = '处理中...';
+      showMsg('payMsg', '处理中...', 'info');
+
+      fetch(AUTH_API + '/api/admin/set-plan', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _payToken },
+        body: JSON.stringify({ email: email, plan: 'premium' }),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.error) {
+            showMsg('payMsg', d.error, 'error');
+            btnLogin.disabled = false;
+            btnLogin.textContent = '确认升级 · ¥168';
+            return;
+          }
+          showMsg('payMsg', '支付成功！已升级为专业版', 'ok');
+          btnLogin.textContent = '已完成';
+          saveAuth(_payToken, 'premium', email);
+          setTimeout(closePay, 2000);
+        })
+        .catch(function () {
+          showMsg('payMsg', '操作失败，请重试', 'error');
+          btnLogin.disabled = false;
+          btnLogin.textContent = '确认升级 · ¥168';
+        });
+      return;
+    }
+
+    // Not logged in — login first, then upgrade.
     var code = ($('payCode').value || '').trim();
     if (!email || !/^\d{6}$/.test(code)) { showMsg('payMsg', '请填写邮箱和 6 位验证码', 'error'); return; }
     btnLogin.disabled = true;
