@@ -744,8 +744,13 @@
         if (latestVersion) chrome.storage.local.set({ localVersion: latestVersion });
         versionBadge.style.display = 'none';
         activeDownloadId = null;
-        installBtn.textContent = '下载安装程序';
-        installBtn.disabled = false;
+        if (serviceWasRunning) {
+          installBtn.style.display = 'none';
+          serviceStatus.textContent = '本地服务: 安装程序已启动，等待重启...';
+        } else {
+          installBtn.textContent = '下载安装程序';
+          installBtn.disabled = false;
+        }
       } else if (item.state === 'interrupted') {
         clearInterval(progressTimer);
         progressTimer = null;
