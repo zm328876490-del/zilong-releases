@@ -675,7 +675,7 @@
   // Update header based on login state
   function updateHeaderFromToken(token, plan) {
     if (token) {
-      headerLicText.textContent = (plan === 'premium' ? '高级版' : '体验版') + ' · 已登录';
+      headerLicText.textContent = (plan === 'premium' ? '专业版' : '体验版') + ' · 已登录';
       licDot.className = 'lic-dot active';
       headerAvatar.classList.remove('plan-trial');
       headerAvatar.classList.add(plan === 'premium' ? 'plan-pro' : 'plan-trial');
