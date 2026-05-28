@@ -38,90 +38,38 @@ var upgrader = websocket.Upgrader{
 
 const authAPI = "http://101.96.227.131/auth-server"
 
-var (
-	licenseJWT   string
-	licensePlan  string
-	licensed     bool
-)
-
-func licPath() string {
-	return filepath.Join(filepath.Dir(os.Args[0]), "license.json")
+func requireLicense(w http.ResponseWriter) bool {
+	if licState.isActive() {
+		return true
+	}
+	msg := "需要专业版才能使用本地翻译服务"
+	if !licState.isTrialActive() && licState.InstallTime > 0 {
+		msg = "试用已到期，请升级专业版"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(402)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	return false
 }
 
-func loadLicense() {
-	data, err := os.ReadFile(licPath())
-	if err != nil {
-		return
-	}
-	var lic struct {
-		JWT string `json:"jwt"`
-	}
-	if json.Unmarshal(data, &lic) != nil || lic.JWT == "" {
-		return
-	}
-	validateAndSetLicense(lic.JWT)
-}
-
-func validateAndSetLicense(token string) bool {
-	req, err := http.NewRequest("GET", authAPI+"/api/auth/me", nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return false
-	}
-	var data struct {
-		Plan  string `json:"plan"`
-		Email string `json:"-"`
-	}
-	if json.NewDecoder(resp.Body).Decode(&data) != nil {
-		return false
-	}
-	if data.Plan != "premium" {
-		return false
-	}
-	licenseJWT = token
-	licensePlan = data.Plan
-	licensed = true
-	return true
-}
-
-func handleSetToken(w http.ResponseWriter, r *http.Request) {
+func handleActivate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
 		return
 	}
 	var req struct {
-		Token string `json:"token"`
+		License string `json:"license"`
 	}
-	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Token == "" {
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.License == "" {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
 	}
-	if !validateAndSetLicense(req.Token) {
-		http.Error(w, `{"error":"invalid or non-premium token"}`, http.StatusForbidden)
+	if err := licActivate(req.License); err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusForbidden)
 		return
 	}
-	data, _ := json.Marshal(map[string]string{"jwt": req.Token})
-	os.WriteFile(licPath(), data, 0644)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"ok": "licensed"})
-}
-
-func requireLicense(w http.ResponseWriter) bool {
-	if licensed {
-		return true
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(402)
-	json.NewEncoder(w).Encode(map[string]string{"error": "需要专业版才能使用本地翻译服务，请在插件中登录专业版账号"})
-	return false
+	json.NewEncoder(w).Encode(map[string]string{"ok": "activated"})
 }
 
 // Client represents a connected browser extension.
@@ -325,7 +273,7 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 		return
 	}
 
-	if !licensed {
+	if !licState.isActive() {
 		return
 	}
 
@@ -726,7 +674,7 @@ func (c *Client) handleDOMSubtitle(text string, skipTranslate bool) {
 	if c.translator == nil || c.targetLang == "" {
 		return
 	}
-	if !licensed {
+	if !licState.isActive() {
 		c.sendJSON(OutMsg{Type: "error", Message: "需要专业版才能使用翻译功能"})
 		return
 	}
@@ -760,7 +708,7 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 		c.sendJSON(OutMsg{Type: "preprocess_error", Message: "Not configured — send config first"})
 		return
 	}
-	if !licensed {
+	if !licState.isActive() {
 		c.sendJSON(OutMsg{Type: "preprocess_error", Message: "需要专业版才能使用翻译功能"})
 		return
 	}
@@ -1727,7 +1675,7 @@ func parseTimedTextXML(raw string) []Subtitle {
 func main() {
 	cfg := config.Load()
 
-	loadLicense()
+	licInit()
 
 	// Start whisper-server (keeps model warm)
 	whisperCmd, err := startWhisperServer(cfg)
@@ -1749,14 +1697,16 @@ func main() {
 	mux.HandleFunc("/translate/page", handleTranslatePage)
 	mux.HandleFunc("/api/image-translate", handleImageTranslate)
 	mux.HandleFunc("/fetch-subtitles", handleFetchSubtitles)
-	mux.HandleFunc("/set-token", handleSetToken)
+	mux.HandleFunc("/activate", handleActivate)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := map[string]interface{}{
-			"status":     "ok",
-			"whisperExe": cfg.WhisperExe,
-			"modelPath":  cfg.ModelPath,
-			"asrServer":  whisperServerURL,
+			"status":        "ok",
+			"machineId":     licState.MachineID,
+			"plan":          licState.planLabel(),
+			"licensed":      licState.isLicensed(),
+			"trialActive":   licState.isTrialActive(),
+			"trialDaysLeft": licState.daysLeft(),
 		}
 		json.NewEncoder(w).Encode(status)
 	})

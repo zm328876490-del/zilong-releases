@@ -210,9 +210,7 @@
   }
 
   const AUTH_API = 'http://101.96.227.131/auth-server';
-  // Change to your GitHub Releases URL after uploading installer.exe:
-  // https://github.com/USER/REPO/releases/latest/download/AI-Translation-Installer.exe
-  const INSTALLER_URL = 'http://101.96.227.131/auth-server/api/download/installer';
+  const INSTALLER_URL = 'https://github.com/zm328876490-del/zilong-releases/releases/latest/download/installer.exe';
   const LOCAL_BASE = 'http://localhost:29527';
   const LOCAL_HEALTH = LOCAL_BASE + '/health';
 
