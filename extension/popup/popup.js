@@ -784,7 +784,12 @@
         });
         if (resp.ok) {
           var data = await resp.json();
-          updateHeaderFromToken(token, data.plan || plan);
+          var serverPlan = data.plan || plan;
+          updateHeaderFromToken(token, serverPlan);
+          // Sync storage so content.js reads up-to-date plan
+          if (serverPlan !== plan) {
+            await chrome.storage.local.set({ userPlan: serverPlan });
+          }
           return;
         }
         // Only clear on explicit 401 (token rejected by server)

@@ -60,6 +60,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       handleOllamaDelete(message, sendResponse);
       return true;
 
+    case 'openAppPage':
+      openExtensionPage(message.hash || '');
+      break;
+
   }
 });
 
@@ -122,7 +126,11 @@ async function handleImageTranslate(srcUrl, tabId) {
 
     if (!apiResp.ok) {
       var errText = ''; try { errText = await apiResp.text(); } catch (_) {}
-      notifyContent(tabId, { type: 'SHOW_IMAGE_STATUS', srcUrl: srcUrl, text: '图片翻译失败: HTTP ' + apiResp.status + (errText ? ' ' + errText.slice(0, 100) : '') });
+      if (apiResp.status === 402) {
+        notifyContent(tabId, { type: 'SHOW_IMAGE_STATUS', srcUrl: srcUrl, text: 'LICENSE_REQUIRED' });
+      } else {
+        notifyContent(tabId, { type: 'SHOW_IMAGE_STATUS', srcUrl: srcUrl, text: '图片翻译失败: HTTP ' + apiResp.status + (errText ? ' ' + errText.slice(0, 100) : '') });
+      }
       return;
     }
 
@@ -142,6 +150,17 @@ async function handleImageTranslate(srcUrl, tabId) {
 
 function notifyContent(tabId, message) {
   chrome.tabs.sendMessage(tabId, message).catch(() => {});
+}
+
+function openExtensionPage(hash) {
+  var url = chrome.runtime.getURL('app.html' + (hash ? '#' + hash : ''));
+  chrome.tabs.query({ url: chrome.runtime.getURL('app.html*') }, function (tabs) {
+    if (tabs.length > 0) {
+      chrome.tabs.update(tabs[0].id, { active: true, url: url });
+    } else {
+      chrome.tabs.create({ url: url });
+    }
+  });
 }
 
 function blobToBase64(blob) {

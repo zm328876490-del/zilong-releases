@@ -489,6 +489,35 @@ function generateSessionId() {
   });
 
   // ─── Toast notification ─────────────────────────────────────────────
+  function showUpgradeToast() {
+    var toast = document.createElement('div');
+    toast.innerHTML = '<div style="display:flex;align-items:center;gap:12px">' +
+      '<span style="font-size:28px;line-height:1">✨</span>' +
+      '<div><div style="font-size:15px;font-weight:700;color:#fff;margin-bottom:4px">升级专业版</div>' +
+      '<div style="font-size:13px;color:rgba(255,255,255,0.7)">视频翻译 · 图片OCR · TTS播报 需专业版</div></div></div>';
+    toast.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;' +
+      'background:linear-gradient(135deg,#1e1b2e,#2d2947);color:#fff;padding:20px 28px;border-radius:16px;' +
+      'font-family:-apple-system,"Microsoft YaHei","PingFang SC",sans-serif;' +
+      'box-shadow:0 20px 60px rgba(0,0,0,0.5),0 0 0 1px rgba(99,102,241,0.3);pointer-events:auto;' +
+      'animation:__upgradeIn 0.35s ease-out;';
+    var style = document.createElement('style');
+    style.textContent = '@keyframes __upgradeIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.9)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}';
+    document.head.appendChild(style);
+    // Clickable: opens extension app buy page
+    toast.style.cursor = 'pointer';
+    toast.title = '点击打开升级页面';
+    toast.addEventListener('click', function() {
+      chrome.runtime.sendMessage({type: 'openAppPage', hash: 'buy'}).catch(function(){});
+      if (toast.parentNode) toast.remove();
+    });
+    document.body.appendChild(toast);
+    setTimeout(function() {
+      toast.style.opacity = '0';
+      toast.style.transition = 'opacity 0.3s';
+      setTimeout(function() { if (toast.parentNode) toast.remove(); style.remove(); }, 300);
+    }, 5000);
+  }
+
   function showFabToast(msg) {
     var toast = document.createElement('div');
     toast.textContent = msg;
@@ -2260,6 +2289,9 @@ function generateSessionId() {
 
       case 'error':
         sendStatus('error', msg.message);
+        if (msg.message && msg.message.indexOf('专业版') !== -1) {
+          showUpgradeToast();
+        }
         if (offlineMode) {
           cleanupOffline();
         } else {
@@ -3063,6 +3095,15 @@ function generateSessionId() {
     _audioFlowing = false;
     if (_noAudioTimer) { clearTimeout(_noAudioTimer); _noAudioTimer = null; }
     isRunning = true;
+
+    // Check license before starting
+    var storage = await chrome.storage.local.get(['userPlan']);
+    if (storage.userPlan !== 'premium') {
+      showUpgradeToast();
+      isRunning = false;
+      return;
+    }
+
     notifyPageTranslate(true);
     fab.classList.add('running');
     warmupDone = false;
@@ -3329,7 +3370,10 @@ function generateSessionId() {
         break;
 
       case 'SHOW_IMAGE_STATUS':
-        if (message.text && message.text.indexOf('失败') !== -1) {
+        if (message.text === 'LICENSE_REQUIRED') {
+          hideImageSpinner(message.srcUrl);
+          showUpgradeToast();
+        } else if (message.text && message.text.indexOf('失败') !== -1) {
           hideImageSpinner(message.srcUrl);
           showImageToast(message.text);
         } else if (message.srcUrl) {
