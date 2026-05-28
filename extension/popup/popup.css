@@ -301,6 +301,17 @@ select {
   flex-shrink: 0;
 }
 
+.version-badge {
+  font-size: 10px;
+  background: #fef3c7;
+  color: #92400e;
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* ─── Button ─────────────────────────────── */
 button {
   width: 100%;

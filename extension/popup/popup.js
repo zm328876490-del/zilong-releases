@@ -40,6 +40,7 @@
   const errorMsg = document.getElementById('errorMsg');
   const serviceStatus = document.getElementById('serviceStatus');
   const installBtn = document.getElementById('installBtn');
+  const versionBadge = document.getElementById('versionBadge');
 
   // Header elements
   const headerAvatar = document.getElementById('headerAvatar');
@@ -570,40 +571,47 @@
     if (originalVolumeNote) originalVolumeNote.style.display = disabled ? 'block' : 'none';
   }
 
-  // ─── Listen for status updates from content script ────────────────
-  chrome.runtime.onMessage.addListener((message) => {
-    switch (message.type) {
-      case 'statusUpdate':
-        setStatus(message.status, message.message);
-        if (message.status === 'error') {
-          showError(message.message);
-        }
-        break;
-      case 'floatingModeChanged':
-        setSubtitleSizeDisabled(!!message.floating);
-        setOriginalVolumeDisabled(!!message.floating);
-        break;
-    }
-  });
-
   // ─── Local Service ──────────────────────────────────────────────
+  let latestVersion = '';
+  let latestHash = '';
+
   async function checkLocalService() {
     serviceStatus.textContent = '检测中...';
     serviceStatus.className = 'service-status checking';
     installBtn.style.display = 'none';
+    var localOk = false;
     try {
       var resp = await fetch(LOCAL_HEALTH);
-      if (resp.ok) {
-        serviceStatus.textContent = '本地服务: 运行中 ✅';
-        serviceStatus.className = 'service-status running';
-        return;
+      if (resp.ok) localOk = true;
+    } catch (_) {}
+
+    var storage = await chrome.storage.local.get(['localVersion']);
+    if (localOk) {
+      var ver = storage.localVersion || '';
+      serviceStatus.textContent = '本地服务: 运行中 ✅' + (ver ? ' v' + ver : '');
+      serviceStatus.className = 'service-status running';
+    } else {
+      serviceStatus.textContent = '本地服务: 未安装';
+      serviceStatus.className = 'service-status stopped';
+      installBtn.style.display = '';
+    }
+
+    // Version check
+    try {
+      var verResp = await fetch(AUTH_API + '/api/version');
+      if (verResp.ok) {
+        var verData = await verResp.json();
+        latestVersion = verData.version || '';
+        latestHash = verData.distHash || '';
+        var storage = await chrome.storage.local.get(['localVersion']);
+        if (latestVersion && storage.localVersion !== latestVersion) {
+          installBtn.style.display = '';
+          installBtn.textContent = localOk ? '更新版本 ' + latestVersion : '下载安装 (' + latestVersion + ')';
+          if (localOk) versionBadge.style.display = '';
+        }
       }
     } catch (_) {}
-    serviceStatus.textContent = '本地服务: 未安装';
-    serviceStatus.className = 'service-status stopped';
-    installBtn.style.display = '';
   }
-
   installBtn.addEventListener('click', async function () {
     // Check if user is logged in
     const storage = await chrome.storage.local.get(['authToken']);
@@ -628,6 +636,8 @@
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
       await chrome.downloads.download({ url: url, filename: 'AI-Translation-Installer.exe', saveAs: true });
+      if (latestVersion) await chrome.storage.local.set({ localVersion: latestVersion });
+      versionBadge.style.display = 'none';
       URL.revokeObjectURL(url);
       installBtn.textContent = '下载安装程序';
       installBtn.disabled = false;

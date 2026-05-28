@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -129,6 +132,25 @@ func main() {
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", "attachment; filename=dist.zip")
 		http.ServeFile(w, r, "dist.zip")
+	})
+	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
+		ver := strings.TrimSpace(string(func() []byte {
+			d, _ := os.ReadFile("VERSION")
+			return d
+		}()))
+		if ver == "" {
+			ver = "1.0.0"
+		}
+		var hashStr string
+		if data, err := os.ReadFile("dist.zip"); err == nil {
+			h := sha256.Sum256(data)
+			hashStr = hex.EncodeToString(h[:])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"version":  ver,
+			"distHash": hashStr,
+		})
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
