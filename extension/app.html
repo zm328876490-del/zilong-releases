@@ -131,6 +131,23 @@
   /* ── Footer ── */
   footer{padding:30px 0;text-align:center;color:#9ca3af;font-size:12px;border-top:1px solid #f0f0f7}
 
+  /* ── Home ── */
+  .home-hero{padding:64px 0 40px;text-align:center}
+  .home-hero h1{font-size:40px;line-height:1.25;font-weight:800;color:#111827;margin-bottom:14px}
+  .home-hero h1 em{font-style:normal;background:linear-gradient(135deg,#6366f1,#ec4899);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .home-hero p{font-size:16px;color:#6b7280;max-width:680px;margin:0 auto 26px}
+  .home-features{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;max-width:900px;margin:0 auto;padding:0 24px 50px}
+  .home-feat{background:white;border-radius:14px;padding:22px 18px;text-align:center;box-shadow:0 2px 12px rgba(99,102,241,.06);transition:transform .15s}
+  .home-feat:hover{transform:translateY(-2px)}
+  .home-feat .feat-ico{font-size:32px;margin-bottom:10px}
+  .home-feat h4{font-size:14px;font-weight:700;color:#1f2937;margin-bottom:6px}
+  .home-feat p{font-size:12px;color:#9ca3af;line-height:1.5}
+  .home-cta{max-width:520px;margin:0 auto;padding:0 24px 60px}
+  .home-card{background:white;border-radius:16px;padding:24px 28px;box-shadow:0 4px 20px rgba(99,102,241,.08);text-align:center}
+  .home-card .user-line{font-size:14px;color:#6b7280;margin-bottom:16px}
+  .home-card .user-line strong{color:#1f2937}
+  .home-card .cta-btns{display:flex;gap:10px;justify-content:center}  .home-card .cta-btns .btn{width:auto;padding:10px 24px;font-size:14px}
+
   /* ── Loading ── */
   .loading{text-align:center;color:#9ca3af;padding:60px 0;font-size:14px}
 
@@ -144,6 +161,8 @@
     header .wrap{flex-direction:column;gap:10px}
     nav{width:100%;justify-content:center}
     nav a{font-size:12px;padding:5px 12px}
+    .home-features{grid-template-columns:repeat(2,1fr)}
+    .home-hero h1{font-size:28px}
   }
   @media(max-width:480px){
     .wrap{padding:0 16px}
@@ -151,6 +170,8 @@
     .card,.form-card{padding:20px 18px}
     .price-now{font-size:36px}
     .hero h1{font-size:24px}
+    .home-hero h1{font-size:22px}
+    .home-features{grid-template-columns:1fr}
   }
 </style>
 </head>
@@ -160,12 +181,44 @@
   <div class="wrap">
     <div class="logo">AI 实时翻译</div>
     <nav id="mainNav">
+      <a data-tab="home" id="navHome">首页</a>
       <a data-tab="login" id="navLogin">登录</a>
       <a data-tab="buy" id="navBuy">升级</a>
       <a data-tab="account" id="navAccount">账号</a>
     </nav>
   </div>
 </header>
+
+<!-- ═══════ 首页 tab ═══════ -->
+<section class="tab-panel" id="tab-home">
+  <div class="home-hero">
+    <h1>AI 实时翻译<br><em>本地智能，数据无忧</em></h1>
+    <p>页面翻译 · 视频同传 · 图片 OCR · TTS 播报<br>翻译内容不经过服务器，守护您的数据隐私</p>
+  </div>
+  <div class="home-features">
+    <div class="home-feat">
+      <div class="feat-ico">🎬</div>
+      <h4>视频同传翻译</h4>
+      <p>实时字幕 + TTS 语音播报，支持 YouTube 等平台</p>
+    </div>
+    <div class="home-feat">
+      <div class="feat-ico">🌐</div>
+      <h4>全页翻译</h4>
+      <p>一键翻译整个网页，支持 Google / 微软 / Ollama</p>
+    </div>
+    <div class="home-feat">
+      <div class="feat-ico">📷</div>
+      <h4>图片 OCR 翻译</h4>
+      <p>右键图片即可识别图中文字并翻译</p>
+    </div>
+    <div class="home-feat">
+      <div class="feat-ico">🔒</div>
+      <h4>数据不出本机</h4>
+      <p>本地 ASR/TTS 后台，翻译内容绝不经过服务器</p>
+    </div>
+  </div>
+  <div class="home-cta" id="homeCta"></div>
+</section>
 
 <!-- ═══════ 登录 tab ═══════ -->
 <section class="tab-panel" id="tab-login">

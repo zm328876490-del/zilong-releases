@@ -37,12 +37,13 @@ function updateNav() {
 // Hash routing
 function routeFromHash() {
   var hash = window.location.hash.replace('#', '') || '';
-  // Redirect unauthenticated users away from account tab
   if (!_isLoggedIn && hash === 'account') { hash = 'login'; }
   if (_isLoggedIn && hash === 'login') { hash = 'account'; }
-  if (!hash) hash = _isLoggedIn ? 'buy' : 'login';
-  var map = { login: 'login', buy: 'buy', account: 'account' };
-  switchTab(map[hash] || 'login');
+  if (!hash) hash = 'home';
+  var map = { home: 'home', login: 'login', buy: 'buy', account: 'account' };
+  var tab = map[hash] || 'home';
+  switchTab(tab);
+  if (tab === 'home') renderHomeCta();
 }
 window.addEventListener('hashchange', function () {
   updateNav();
@@ -293,6 +294,36 @@ function formatDate(isoStr) {
   } catch (_) { return isoStr; }
 }
 function pad(n) { return n < 10 ? '0' + n : '' + n; }
+
+// ─── Home CTA ─────────────────────────────────────────────────────────
+function renderHomeCta() {
+  var cta = $('homeCta');
+  if (!cta) return;
+  chrome.storage.local.get(['authToken', 'userPlan', 'userEmail'], function (result) {
+    var token = result.authToken;
+    var plan = result.userPlan || 'trial';
+    var email = result.userEmail || '';
+    if (token) {
+      var planText = plan === 'premium' ? '专业版' : '体验版';
+      cta.innerHTML =
+        '<div class="home-card">' +
+        '<div class="user-line">当前方案：<strong>' + planText + '</strong> · ' + escapeHtml(email) + '</div>' +
+        '<div class="cta-btns">' +
+        '<button class="btn primary" onclick="location.hash=\'buy\'">升级方案</button>' +
+        '<button class="btn gray" onclick="location.hash=\'account\'">账号管理</button>' +
+        '</div></div>';
+    } else {
+      cta.innerHTML =
+        '<div class="home-card">' +
+        '<div class="user-line">登录后解锁全部功能，<strong>¥168 一次性买断</strong></div>' +
+        '<div class="cta-btns">' +
+        '<button class="btn primary" onclick="location.hash=\'login\'">立即登录</button>' +
+        '<button class="btn gray" onclick="location.hash=\'buy\'">了解方案</button>' +
+        '</div></div>';
+    }
+  });
+}
+function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 // ─── Init ────────────────────────────────────────────────────────────
 updateNav();
