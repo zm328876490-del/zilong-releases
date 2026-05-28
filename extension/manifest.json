@@ -3,7 +3,7 @@
   "name": "AI 实时翻译",
   "version": "1.0.0",
   "description": "AI 实时翻译：网页翻译、视频字幕、TTS 播报、图片转文字",
-  "permissions": ["activeTab", "storage", "scripting", "contextMenus", "downloads"],
+  "permissions": ["activeTab", "storage", "scripting", "contextMenus", "downloads", "downloads.open"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup/popup.html",

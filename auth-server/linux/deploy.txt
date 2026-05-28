@@ -1,6 +1,6 @@
 === 文件上传 ===
 
-auth-server/ (整个目录，含 .env / installer.exe / dist.zip)  → /home/project/auth-server/
+auth-server/ (整个目录，含 .env / installer.exe)  → /home/project/auth-server/
 
 Nginx: 将 linux/nginx.conf 的内容追加到 /data/nginx/conf.d/ 已有 server {} 块内
 

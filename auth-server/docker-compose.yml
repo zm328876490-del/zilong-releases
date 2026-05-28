@@ -14,7 +14,6 @@ services:
       PORT: "14532"
     volumes:
       - ./installer.exe:/app/installer.exe:ro
-      - ./dist.zip:/app/dist.zip:ro
     networks:
       - app-net
 

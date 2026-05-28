@@ -28,6 +28,9 @@ func NewDB(dsn string) (*DB, error) {
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(5 * time.Minute)
 	return &DB{db}, nil
 }
 
@@ -65,6 +68,7 @@ func (db *DB) Migrate() error {
 	}
 	// Safe migration: add token_version to existing table
 	db.Exec(`ALTER TABLE users ADD COLUMN token_version INT NOT NULL DEFAULT 1`)
+	db.Exec(`CREATE INDEX idx_vc_email_code_used ON verify_codes (email, code, used, expires_at)`)
 	return nil
 }
 
@@ -92,13 +96,21 @@ func (db *DB) FindByEmail(email string) (*User, error) {
 }
 
 func (db *DB) IncrementTokenVersion(email string) (int, error) {
-	_, err := db.Exec(`UPDATE users SET token_version = token_version + 1 WHERE email=?`, email)
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`UPDATE users SET token_version = token_version + 1 WHERE email=?`, email)
 	if err != nil {
 		return 0, err
 	}
 	var v int
-	err = db.QueryRow(`SELECT token_version FROM users WHERE email=?`, email).Scan(&v)
-	return v, err
+	err = tx.QueryRow(`SELECT token_version FROM users WHERE email=?`, email).Scan(&v)
+	if err != nil {
+		return 0, err
+	}
+	return v, tx.Commit()
 }
 
 func (db *DB) CanSendCode(email string, cooldown time.Duration) (bool, error) {
@@ -149,21 +161,17 @@ func (db *DB) CleanupLoginFailures() error {
 }
 
 func (db *DB) VerifyCode(email, code string) (bool, error) {
-	var id int64
-	err := db.QueryRow(
-		`SELECT id FROM verify_codes
+	res, err := db.Exec(
+		`UPDATE verify_codes SET used=1
 		 WHERE email=? AND code=? AND expires_at > UTC_TIMESTAMP() AND used=0
 		 ORDER BY id DESC LIMIT 1`,
 		email, code,
-	).Scan(&id)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
+	)
 	if err != nil {
 		return false, err
 	}
-	_, _ = db.Exec(`UPDATE verify_codes SET used=1 WHERE id=?`, id)
-	return true, nil
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 func (db *DB) InvalidateCodes(email string) error {

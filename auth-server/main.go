@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,10 +22,16 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+const (
+	readTimeout  = 15 * time.Second
+	writeTimeout = 30 * time.Second
+	idleTimeout  = 60 * time.Second
+	maxBodySize  = 1 << 20 // 1 MB
+)
+
 func cors(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		// Allow chrome-extension:// origins and same-origin (no Origin header = curl/localhost)
 		if origin != "" {
 			if !strings.HasPrefix(origin, "chrome-extension://") {
 				http.Error(w, `{"error":"forbidden"}`, 403)
@@ -39,6 +45,7 @@ func cors(next http.HandlerFunc) http.HandlerFunc {
 			w.WriteHeader(200)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 		next(w, r)
 	}
 }
@@ -68,6 +75,12 @@ func validateToken(r *http.Request, cfg *config.Config, db *model.DB) (string, j
 	return tokenStr, claims, true
 }
 
+// Computed at startup, served from memory on every /api/version call.
+type versionCache struct {
+	Version     string `json:"version"`
+	InstallHash string `json:"installHash"`
+}
+
 func main() {
 	cfg := config.Load()
 
@@ -82,6 +95,21 @@ func main() {
 	}
 	log.Println("数据库就绪")
 
+	// Cache version + hash once at startup
+	ver := strings.TrimSpace(string(func() []byte {
+		d, _ := os.ReadFile("VERSION")
+		return d
+	}()))
+	if ver == "" {
+		ver = "1.0.0"
+	}
+	vc := versionCache{Version: ver}
+	if data, err := os.ReadFile("installer.exe"); err == nil {
+		h := sha256.Sum256(data)
+		vc.InstallHash = hex.EncodeToString(h[:])
+	}
+	log.Printf("version cache: %s sha256=%s", vc.Version, vc.InstallHash[:16]+"...")
+
 	mailer := mail.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword)
 	h := handler.New(cfg, db, mailer)
 
@@ -91,68 +119,20 @@ func main() {
 	mux.HandleFunc("/api/auth/me", cors(h.Me))
 	mux.HandleFunc("/api/admin/set-plan", cors(h.SetPlan))
 	mux.HandleFunc("/api/download/installer", func(w http.ResponseWriter, r *http.Request) {
-		tokenStr, claims, ok := validateToken(r, cfg, db)
-		if !ok {
-			http.Error(w, `{"error":"未登录或token无效"}`, 401)
-			return
-		}
-		email, _ := claims["email"].(string)
-		user, _ := db.FindByEmail(email)
-		if user == nil || user.Plan != "premium" {
-			http.Error(w, `{"error":"需要高级版"}`, 403)
-			return
-		}
-		// Read installer.exe and embed the user's JWT
-		exeData, err := os.ReadFile("installer.exe")
-		if err != nil {
-			http.Error(w, `{"error":"installer not found"}`, 500)
-			return
-		}
-		placeholder := make([]byte, 512)
-		copy(placeholder, "JWT:")
-		for i := 4; i < 512; i++ {
-			placeholder[i] = '_'
-		}
-		jwtPart := "JWT:" + tokenStr
-		padded := make([]byte, 512)
-		copy(padded, jwtPart)
-		for i := len(jwtPart); i < 512; i++ {
-			padded[i] = '_'
-		}
-		exeData = bytes.Replace(exeData, placeholder, padded, 1)
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", "attachment; filename=installer.exe")
-		w.Write(exeData)
-	})
-	mux.HandleFunc("/api/download/dist", func(w http.ResponseWriter, r *http.Request) {
 		_, _, ok := validateToken(r, cfg, db)
 		if !ok {
 			http.Error(w, `{"error":"未登录或token无效"}`, 401)
 			return
 		}
-		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", "attachment; filename=dist.zip")
-		http.ServeFile(w, r, "dist.zip")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", "attachment; filename=AI-Translation-Installer.exe")
+		http.ServeFile(w, r, "installer.exe")
 	})
-	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
-		ver := strings.TrimSpace(string(func() []byte {
-			d, _ := os.ReadFile("VERSION")
-			return d
-		}()))
-		if ver == "" {
-			ver = "1.0.0"
-		}
-		var hashStr string
-		if data, err := os.ReadFile("dist.zip"); err == nil {
-			h := sha256.Sum256(data)
-			hashStr = hex.EncodeToString(h[:])
-		}
+	mux.HandleFunc("/api/version", cors(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"version":  ver,
-			"distHash": hashStr,
-		})
-	})
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		json.NewEncoder(w).Encode(vc)
+	}))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"status":"ok"}`)
@@ -161,7 +141,7 @@ func main() {
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	log.Printf("auth-server 启动在 %s", addr)
 
-	// Cleanup expired verify codes every 10 minutes
+	// Cleanup expired codes / login failures every 10 minutes
 	go func() {
 		t := time.NewTicker(10 * time.Minute)
 		defer t.Stop()
@@ -175,16 +155,30 @@ func main() {
 		}
 	}()
 
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
+		IdleTimeout:  idleTimeout,
+	}
+
+	// Graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("收到退出信号，关闭服务...")
+		log.Println("收到退出信号，正在优雅关闭...")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("强制关闭: %v", err)
+		}
 		db.Close()
-		os.Exit(0)
+		log.Println("服务已关闭")
 	}()
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("服务启动失败: %v", err)
 	}
 }

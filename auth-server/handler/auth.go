@@ -99,10 +99,13 @@ func (h *Handler) SendCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// IP rate limit: 15 per hour
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	// IP rate limit: 15 per hour. Read real client IP from X-Forwarded-For (set by Nginx).
+	ip := r.Header.Get("X-Forwarded-For")
 	if ip == "" {
-		ip = r.RemoteAddr
+		ip, _, _ = net.SplitHostPort(r.RemoteAddr)
+		if ip == "" {
+			ip = r.RemoteAddr
+		}
 	}
 	if !h.allowIP(ip) {
 		log.Printf("IP rate limit hit: %s", ip)
@@ -126,15 +129,17 @@ func (h *Handler) SendCode(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, 500, map[string]string{"error": "生成验证码失败"})
 		return
 	}
-	if err := h.mail.SendCode(req.Email, code); err != nil {
-		jsonResp(w, 500, map[string]string{"error": "发送验证码失败"})
-		return
-	}
+	// Insert code first, respond immediately, send email in background
 	if err := h.db.InsertCode(req.Email, code, 5*time.Minute); err != nil {
 		jsonResp(w, 500, map[string]string{"error": "保存验证码失败"})
 		return
 	}
 	jsonResp(w, 200, map[string]string{"ok": "验证码已发送"})
+	go func() {
+		if err := h.mail.SendCode(req.Email, code); err != nil {
+			log.Printf("SMTP send failed for %s: %v", req.Email, err)
+		}
+	}()
 }
 
 // POST /api/auth/login

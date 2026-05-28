@@ -210,8 +210,11 @@
   }
 
   const AUTH_API = 'http://101.96.227.131/auth-server';
-  const INSTALLER_URL = AUTH_API + '/api/download/installer';
-  const LOCAL_HEALTH = 'http://localhost:29527/health';
+  // Change to your GitHub Releases URL after uploading installer.exe:
+  // https://github.com/USER/REPO/releases/latest/download/AI-Translation-Installer.exe
+  const INSTALLER_URL = 'http://101.96.227.131/auth-server/api/download/installer';
+  const LOCAL_BASE = 'http://localhost:29527';
+  const LOCAL_HEALTH = LOCAL_BASE + '/health';
 
   let isRunning = false;
 
@@ -590,6 +593,7 @@
       var ver = storage.localVersion || '';
       serviceStatus.textContent = '本地服务: 运行中 ✅' + (ver ? ' v' + ver : '');
       serviceStatus.className = 'service-status running';
+      sendTokenToLocalService();
     } else {
       serviceStatus.textContent = '本地服务: 未安装';
       serviceStatus.className = 'service-status stopped';
@@ -602,7 +606,7 @@
       if (verResp.ok) {
         var verData = await verResp.json();
         latestVersion = verData.version || '';
-        latestHash = verData.distHash || '';
+        latestHash = verData.installHash || verData.distHash || '';
         var storage = await chrome.storage.local.get(['localVersion']);
         if (latestVersion && storage.localVersion !== latestVersion) {
           installBtn.style.display = '';
@@ -612,39 +616,80 @@
       }
     } catch (_) {}
   }
-  installBtn.addEventListener('click', async function () {
-    // Check if user is logged in
-    const storage = await chrome.storage.local.get(['authToken']);
-    const token = storage.authToken;
-    if (!token) {
-      chrome.tabs.create({ url: chrome.runtime.getURL('app.html#login') });
-      return;
-    }
-    installBtn.textContent = '下载中...';
-    installBtn.disabled = true;
+
+  async function sendTokenToLocalService() {
+    var storage = await chrome.storage.local.get(['authToken', 'userPlan']);
+    var token = storage.authToken;
+    if (!token) return;
+    if (storage.userPlan !== 'premium') return;
     try {
-      const resp = await fetch(INSTALLER_URL, {
-        headers: { 'Authorization': 'Bearer ' + token }
+      await fetch(LOCAL_BASE + '/set-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: token }),
       });
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        alert(err.error || '下载失败，请重新登录');
+    } catch (_) {}
+  }
+
+  let activeDownloadId = null;
+  let progressTimer = null;
+
+  function pollProgress() {
+    if (activeDownloadId == null) { clearInterval(progressTimer); return; }
+    chrome.downloads.search({ id: activeDownloadId }, function (results) {
+      if (results.length === 0) return;
+      var item = results[0];
+      if (item.state === 'complete') {
+        clearInterval(progressTimer);
+        progressTimer = null;
+        chrome.downloads.open(activeDownloadId);
+        if (latestVersion) chrome.storage.local.set({ localVersion: latestVersion });
+        versionBadge.style.display = 'none';
+        activeDownloadId = null;
         installBtn.textContent = '下载安装程序';
         installBtn.disabled = false;
-        return;
+      } else if (item.state === 'interrupted') {
+        clearInterval(progressTimer);
+        progressTimer = null;
+        activeDownloadId = null;
+        installBtn.textContent = '下载安装程序';
+        installBtn.disabled = false;
+      } else if (item.totalBytes > 0) {
+        var pct = Math.round(item.bytesReceived / item.totalBytes * 100);
+        installBtn.textContent = '下载中 ' + pct + '%';
       }
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      await chrome.downloads.download({ url: url, filename: 'AI-Translation-Installer.exe', saveAs: true });
-      if (latestVersion) await chrome.storage.local.set({ localVersion: latestVersion });
-      versionBadge.style.display = 'none';
-      URL.revokeObjectURL(url);
-      installBtn.textContent = '下载安装程序';
-      installBtn.disabled = false;
+    });
+  }
+
+  function restoreDownloadState() {
+    chrome.downloads.search({ state: 'in_progress', filenameRegex: 'AI-Translation-Installer' }, function (results) {
+      if (results.length > 0) {
+        activeDownloadId = results[0].id;
+        pollProgress();
+        progressTimer = setInterval(pollProgress, 500);
+        installBtn.disabled = true;
+        installBtn.style.display = '';
+      }
+    });
+  }
+
+  installBtn.addEventListener('click', async function () {
+    installBtn.textContent = '开始下载...';
+    installBtn.disabled = true;
+
+    try {
+      activeDownloadId = await chrome.downloads.download({
+        url: INSTALLER_URL,
+        filename: 'AI-Translation-Installer.exe',
+        saveAs: false,
+      });
+      pollProgress();
+      progressTimer = setInterval(pollProgress, 500);
     } catch (e) {
       alert('下载失败: ' + (e.message || '网络错误'));
       installBtn.textContent = '下载安装程序';
       installBtn.disabled = false;
+      activeDownloadId = null;
     }
   });
 
@@ -996,6 +1041,7 @@
     await loadSettings();
     renderEngineDropdown(translateEngineSelect.value);
     checkLocalService();
+    restoreDownloadState();
     checkLoginState();
 
     // Sync separate keys for page-translate.js (which reads them individually)
