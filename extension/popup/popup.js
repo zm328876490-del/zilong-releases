@@ -830,7 +830,9 @@
         renderModelInstallList(modelNames);
 
         // Status bar
-        var showModels = modelNames.slice(0, 3);
+        var showModels = modelNames.slice(0, 3).map(function (n) {
+          return (RCMD_MODELS.find(function(m){return m.name===n;}) || {}).display || n;
+        });
         ollamaStatusDot.style.background = '#10b981';
         ollamaStatusText.textContent = showModels.length > 0
           ? '已连接 · ' + showModels.join(', ') : '已连接 · 无本地模型';
