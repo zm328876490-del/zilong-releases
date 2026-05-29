@@ -1534,6 +1534,9 @@ func startLlamaServer(cfg *config.Config) (*exec.Cmd, error) {
 		"--port", llamaPort,
 		"--host", "127.0.0.1",
 		"-c", "4096",
+		"-ngl", "99",
+		"-b", "512",
+		"-t", "4",
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	cmd.Stderr = os.Stderr
