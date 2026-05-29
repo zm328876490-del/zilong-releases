@@ -8,7 +8,7 @@ echo ========================================
 
 :: Step 1: Build backend (no console)
 echo.
-echo [1/5] 编译翻译后台（无窗口模式）...
+echo [1/4] 编译翻译后台（无窗口模式）...
 if not exist .tmp mkdir .tmp
 set GOTMPDIR=%CD%\.tmp
 for /f "usebackq delims=" %%v in ("..\auth-server\VERSION") do set VER=%%v
@@ -16,22 +16,15 @@ go build -ldflags="-s -w -H windowsgui -X main.version=%VER%" -o translation-ser
 if %errorlevel% neq 0 ( echo ERROR: 编译失败！ & pause & exit /b 1 )
 echo       完成
 
-:: Step 2: AES encrypt the garble'd binary (evade Defender)
+:: Step 2: Prepare embedded files for installer
 echo.
-echo [2/5] AES 加密（规避杀软误报）...
-go run cmd/crypt/main.go < translation-server.exe > translation-server.exe.enc
-if %errorlevel% neq 0 ( echo ERROR: 加密失败！ & pause & exit /b 1 )
-echo       完成
-
-:: Step 3: Prepare embedded files for installer
-echo.
-echo [3/5] 准备安装器嵌入文件...
+echo [2/4] 准备安装器嵌入文件...
 if exist installer\embedded rmdir /s /q installer\embedded
 mkdir installer\embedded
 mkdir installer\embedded\models
 mkdir installer\embedded\scripts
 
-copy /y translation-server.exe.enc installer\embedded\translation-server.exe.enc >nul
+copy /y translation-server.exe installer\embedded\translation-server.exe >nul
 :: whisper.cpp
 copy /y whisper-server.exe installer\embedded\whisper-server.exe >nul
 copy /y whisper.dll installer\embedded\whisper.dll >nul
@@ -54,9 +47,9 @@ copy /y models\ggml-vad.bin installer\embedded\models\ggml-vad.bin >nul
 xcopy /y /e scripts\* installer\embedded\scripts\ >nul 2>&1
 echo       完成
 
-:: Step 4: Build installer (no obfuscation)
+:: Step 3: Build installer
 echo.
-echo [4/5] 编译安装程序...
+echo [3/4] 编译安装程序...
 cd installer
 go build -ldflags="-s -w" -o installer.exe .
 if %errorlevel% neq 0 ( echo ERROR: 安装程序编译失败！ & cd .. & pause & exit /b 1 )
@@ -64,15 +57,15 @@ cd ..
 move installer\installer.exe installer.exe >nul
 echo       完成
 
-:: Step 5: Copy to auth-server
+:: Step 4: Copy to auth-server
 echo.
-echo [5/5] 复制产物到 auth-server/ ...
+echo [4/4] 复制产物到 auth-server/ ...
 copy /y installer.exe ..\auth-server\installer.exe >nul
 echo       完成
 
-:: Step 6: Package extension as zip
+:: Step 5: Package extension as zip
 echo.
-echo [6/6] 打包浏览器扩展...
+echo [5/5] 打包浏览器扩展...
 powershell -Command "Compress-Archive -Path '%CD%\..\extension\*' -DestinationPath '%CD%\..\auth-server\extension.zip' -Force"
 if %errorlevel% neq 0 ( echo ERROR: 打包扩展失败！ & pause & exit /b 1 )
 echo       完成
@@ -80,7 +73,6 @@ echo       完成
 :: Cleanup
 rmdir /s /q installer\embedded
 del installer.exe
-del translation-server.exe.enc
 
 :: Done
 echo.
