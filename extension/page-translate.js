@@ -585,6 +585,31 @@
     if (!needModel.length) return;
 
     // ── L3: translation API ───────────────────────────────────────────
+    // Ollama: process one-by-one so each translation appears on screen immediately.
+    // Local models process sequentially anyway — batching just delays the first result.
+    if (engine === 'ollama') {
+      var toSave = [];
+      for (var mi = 0; mi < needModel.length; mi++) {
+        var mg = needModel[mi];
+        if (!mg.parent.isConnected) { pendingCount--; continue; }
+        var src = needTexts[mi];
+        var translation = await translateSingleOllama(src);
+        if (!translation) { requeueOrGiveUp(mg); continue; }
+        var sk = src.toLowerCase();
+        cacheSet(sk, translation);
+        pageTranslationMap.set(sk, translation);
+        toSave.push({ src: src, dst: translation });
+        translatedPairs.push({ src: src, dst: translation });
+        applyGroupTranslation(mg, translation);
+      }
+      if (toSave.length > 0) {
+        dbSave(host, toSave).catch(function () {});
+        snapshotDirty = true;
+        if (Math.random() < 0.02) dbPrune();
+      }
+      return;
+    }
+
     var results;
     try {
       results = await fetchTranslationBatch(needTexts);
@@ -635,10 +660,9 @@
       });
     }
 
-    // PAGE TRANSLATION ONLY: Ollama is unsuitable for short-text batch translation.
-    // Auto-fallback to Microsoft. This does NOT affect video/subtitle translation
-    // which uses a completely separate code path (content.js → background.js).
-    var effectiveEngine = (engine === 'ollama') ? 'microsoft' : toBackendEnginePage(engine);
+    // Non-Ollama engines route through Go backend or Google via background.
+    // Ollama is handled by translateSingleOllama in translateBatch L3 above.
+    var effectiveEngine = toBackendEnginePage(engine);
 
     return new Promise(function (resolve) {
       chrome.runtime.sendMessage({
@@ -661,6 +685,24 @@
           return;
         }
         resolve(resp.results || new Array(texts.length).fill(''));
+      });
+    });
+  }
+
+  async function translateSingleOllama(text) {
+    return new Promise(function (resolve) {
+      chrome.runtime.sendMessage({
+        type: 'PAGE_OLLAMA_TRANSLATE_ONE',
+        text: text,
+        to: targetLang,
+        ollamaUrl: ollamaUrl,
+        ollamaModel: ollamaModel,
+      }, function (resp) {
+        if (chrome.runtime.lastError || !resp || !resp.ok) {
+          resolve('');
+          return;
+        }
+        resolve(resp.translation || '');
       });
     });
   }

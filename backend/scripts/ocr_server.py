@@ -185,17 +185,28 @@ class OCRHandler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     import easyocr
 
-    # Auto-detect GPU
-    try:
-        import torch
-        use_gpu = torch.cuda.is_available()
-    except Exception:
-        use_gpu = False
+    # Force CPU — GPU mode causes silent crash on some hardware
+    use_gpu = False
 
     print(json.dumps({"event": "loading", "gpu": use_gpu, "message": "EasyOCR model loading..."}))
     sys.stdout.flush()
 
-    reader = easyocr.Reader(["ch_sim", "en"], gpu=use_gpu)
+    # Load model, clearing stale GPU cache if needed
+    try:
+        reader = easyocr.Reader(["ch_sim", "en"], gpu=use_gpu)
+    except RuntimeError as e:
+        if "cuda" in str(e).lower() or "deserialize" in str(e).lower():
+            # Cached model was saved with GPU tensors — incompatible with CPU.
+            # Delete cache and re-download.
+            import shutil
+            cache_dir = os.path.join(os.path.expanduser("~"), ".EasyOCR")
+            print(json.dumps({"event": "loading", "message": "clearing GPU model cache..."}))
+            sys.stdout.flush()
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            reader = easyocr.Reader(["ch_sim", "en"], gpu=use_gpu)
+        else:
+            raise
+
     print(json.dumps({"event": "ready", "port": PORT, "gpu": use_gpu}))
     sys.stdout.flush()
 

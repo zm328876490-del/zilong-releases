@@ -1127,8 +1127,8 @@ func isSentenceEndPunct(r rune) bool {
 // whisperServerURL is set at startup after whisper-server is ready.
 var whisperServerURL string
 
-// ocrServerURL is set at startup after the EasyOCR HTTP server is ready.
-var ocrServerURL string
+// ocrServerURL is kept for backward-compat; not used when calling ocr.py directly.
+var ocrServerURL = "http://127.0.0.1:29529"
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -1707,35 +1707,27 @@ func writeImageError(w http.ResponseWriter, msg string) {
 	json.NewEncoder(w).Encode(imageTranslateResp{Error: msg})
 }
 
-// runOCR calls the persistent EasyOCR HTTP server.
+// runOCR calls Python ocr.py as a one-shot subprocess.
+// Model is cached on disk; first call is slow (~10s), subsequent calls ~2s.
 func runOCR(imagePath string) ([]ocrWord, error) {
-	body, _ := json.Marshal(map[string]string{"image": imagePath})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	python := findPython()
+	scriptPath := filepath.Join(".", "scripts", "ocr.py")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", ocrServerURL+"/ocr", strings.NewReader(string(body)))
+	cmd := exec.CommandContext(ctx, python, scriptPath, imagePath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("OCR server request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		var svrErr struct{ Error string `json:"error"` }
-		body, _ := io.ReadAll(resp.Body)
-		if json.Unmarshal(body, &svrErr) == nil && svrErr.Error != "" {
-			return nil, fmt.Errorf("OCR server: %s", svrErr.Error)
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("OCR 超时，请重试")
 		}
-		return nil, fmt.Errorf("OCR server returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("OCR 执行失败: %w", err)
 	}
 
 	var words []ocrWord
-	if err := json.NewDecoder(resp.Body).Decode(&words); err != nil {
+	if err := json.Unmarshal(out, &words); err != nil {
 		return nil, fmt.Errorf("parse OCR JSON: %w", err)
 	}
 	return words, nil
@@ -1827,14 +1819,6 @@ func main() {
 		defer whisperCmd.Process.Kill()
 	}
 
-	// Start EasyOCR persistent server (avoids reloading model each request)
-	ocrCmd, err := startOCRServer()
-	if err != nil {
-		fmt.Println("[main] OCR server:", err)
-	} else {
-		defer ocrCmd.Process.Kill()
-	}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/set-token", handleSetToken)
 	mux.HandleFunc("/ws", handleWebSocket)
@@ -1866,9 +1850,6 @@ func main() {
 		<-sigCh
 		if whisperCmd != nil {
 			whisperCmd.Process.Kill()
-		}
-		if ocrCmd != nil {
-			ocrCmd.Process.Kill()
 		}
 		os.Exit(0)
 	}()

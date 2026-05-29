@@ -49,6 +49,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       handlePageOllamaTranslate(message, sendResponse);
       return true; // async response
 
+    // ─── Ollama single-text translate (page translation, one by one) ──────
+    case 'PAGE_OLLAMA_TRANSLATE_ONE':
+      handlePageOllamaTranslateOne(message, sendResponse);
+      return true;
+
     // ─── Ollama model management (pull in SW, poll progress from popup) ──
     case 'OLLAMA_PULL_START':
       handleOllamaPullStart(message, sendResponse);
@@ -291,6 +296,51 @@ async function handlePageOllamaTranslate(message, sendResponse) {
     sendResponse({ ok: true, results: results });
   } catch (e) {
     sendResponse({ ok: false, status: 0, results: null, error: e.message });
+  }
+}
+
+// ─── Ollama single-text translate (page translation, one-by-one) ──────────
+// Uses /api/generate (native Ollama API) which is faster for single short texts
+// than the /v1/chat/completions OpenAI-compatible endpoint.
+async function handlePageOllamaTranslateOne(message, sendResponse) {
+  try {
+    const text = (message.text || '').trim();
+    if (!text) { sendResponse({ ok: true, translation: '' }); return; }
+
+    const url = (message.ollamaUrl || 'http://localhost:11434').replace(/\/$/, '');
+    const model = message.ollamaModel || 'qwen2.5:7b';
+    const toName = ollamaLangName(message.to || 'zh-Hans');
+
+    const prompt =
+      'Translate the following text to ' + toName +
+      '. Return ONLY the translation, no explanations, no markdown, no quotes.\n\n' + text;
+
+    const resp = await fetch(url + '/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: model,
+        prompt: prompt,
+        stream: false,
+        options: { temperature: 0, num_predict: 256 },
+      }),
+    });
+
+    if (!resp.ok) {
+      sendResponse({ ok: false, translation: '' });
+      return;
+    }
+
+    const data = await resp.json();
+    const translation = (data.response || '').trim();
+    // Strip common artifacts: quotes, bullet points, leading numbers
+    const cleaned = translation
+      .replace(/^["'「『]\s*|\s*["'」』]$/g, '')
+      .replace(/^\d+[\.\)、]\s*/, '')
+      .trim();
+    sendResponse({ ok: true, translation: cleaned });
+  } catch (e) {
+    sendResponse({ ok: false, translation: '' });
   }
 }
 

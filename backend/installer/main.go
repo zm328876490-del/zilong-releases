@@ -46,6 +46,7 @@ func main() {
 	// Step 1: Kill all related processes and wait for them to exit
 	exec.Command("taskkill", "/f", "/im", serviceExe).Run()
 	exec.Command("taskkill", "/f", "/im", "whisper-server.exe").Run()
+	exec.Command("taskkill", "/f", "/im", "python.exe").Run()
 	time.Sleep(500 * time.Millisecond)
 
 	// Poll until translation-server.exe is truly gone (max 10s)
@@ -56,6 +57,7 @@ func main() {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+
 
 	// Step 2: Extract embedded files
 	fmt.Print("正在解压...")
