@@ -59,6 +59,13 @@ echo [5/5] 复制产物到 auth-server/ ...
 copy /y installer.exe ..\auth-server\installer.exe >nul
 echo       完成
 
+:: Step 6: Package extension as zip
+echo.
+echo [6/6] 打包浏览器扩展...
+powershell -Command "Compress-Archive -Path '%CD%\..\extension\*' -DestinationPath '%CD%\..\auth-server\extension.zip' -Force"
+if %errorlevel% neq 0 ( echo ERROR: 打包扩展失败！ & pause & exit /b 1 )
+echo       完成
+
 :: Cleanup
 rmdir /s /q installer\embedded
 del installer.exe
@@ -68,7 +75,8 @@ del translation-server.exe.enc
 echo.
 echo ========================================
 echo   产物: auth-server\installer.exe
-echo   上传 auth-server\ 到服务器
+echo   产物: auth-server\extension.zip
+echo   上传 auth-server\ 整个目录到服务器
 echo   参考 auth-server\linux\deploy.txt
 echo ========================================
 pause

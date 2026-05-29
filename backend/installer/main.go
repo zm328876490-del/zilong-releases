@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows/registry"
 )
@@ -75,7 +76,23 @@ func main() {
 	}
 	fmt.Println(" 完成!")
 
-	// Step 3: Register auto-start
+	// Step 3: Set OLLAMA_ORIGINS so browser extension can call Ollama
+	fmt.Print("正在配置 Ollama 跨域...")
+	ek, err := registry.OpenKey(registry.CURRENT_USER,
+		`Environment`,
+		registry.SET_VALUE)
+	if err == nil {
+		ek.SetStringValue("OLLAMA_ORIGINS", "*")
+		ek.Close()
+		fmt.Println(" 完成!")
+		// Broadcast env change so running processes pick it up
+		syscall.NewLazyDLL("user32.dll").NewProc("SendMessageTimeoutW").Call(
+			0xFFFF, 0x001A, 0, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("Environment"))), 2, 5000, 0)
+	} else {
+		fmt.Println(" 跳过")
+	}
+
+	// Step 4: Register auto-start
 	fmt.Print("正在注册开机自启...")
 	k, err := registry.OpenKey(registry.CURRENT_USER,
 		`Software\Microsoft\Windows\CurrentVersion\Run`,
@@ -88,7 +105,7 @@ func main() {
 		fmt.Println(" 跳过")
 	}
 
-	// Step 4: Launch service
+	// Step 5: Launch service
 	fmt.Print("正在启动服务...")
 	cmd := exec.Command(filepath.Join(targetDir, serviceExe))
 	cmd.Dir = targetDir

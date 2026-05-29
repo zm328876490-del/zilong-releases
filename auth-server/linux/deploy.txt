@@ -1,6 +1,6 @@
 === 文件上传 ===
 
-auth-server/ (整个目录，含 .env / installer.exe)  → /home/project/auth-server/
+auth-server/ (整个目录，含 .env / installer.exe / extension.zip / web/)  → /home/project/auth-server/
 
 Nginx: 将 linux/nginx.conf 的内容追加到 /data/nginx/conf.d/ 已有 server {} 块内
 
@@ -18,7 +18,9 @@ docker exec nginx nginx -s reload
 
 === 验证 ===
 
-curl http://101.96.227.131/auth-server/health           → {"status":"ok"}
+curl http://101.96.227.131/                        → 产品主页
+curl http://101.96.227.131/extension.zip           → 扩展下载（200）
+curl http://101.96.227.131/auth-server/health      → {"status":"ok"}
 
 === 更新代码 ===
 
@@ -28,4 +30,4 @@ cd /home/project/auth-server && docker compose up -d --build
 === auth-server .env ===
 
 JWT_SECRET=69RFwhES5vVIsAI8lVmyN/BJMxgcRmdm8hY55D7gTRc=
-SMTP_PASSWORD=volimhxawotqbhje
+SMTP_PASSWORD=volimhaxwotqbhje

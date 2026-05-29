@@ -28,9 +28,6 @@ def bbox_to_rect(bbox):
 
 def preprocess(image_path):
     """Enhance image for better OCR accuracy.
-    - Upscale if too small
-    - CLAHE contrast enhancement
-    - Mild sharpening
     Returns (preprocessed_path_or_None, scale_factor).
     """
     img = cv2.imread(image_path)
@@ -38,6 +35,8 @@ def preprocess(image_path):
         return None, 1.0
 
     h, w = img.shape[:2]
+    if h < 8 or w < 8:
+        return None, 1.0
     scale = 1.0
 
     # Upscale small images so text features are clearer
@@ -49,21 +48,21 @@ def preprocess(image_path):
         scale = 1200.0 / max(min_dim, 1)
         img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
-    # CLAHE on L channel of LAB for contrast without color distortion
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-    lab = cv2.merge([l, a, b])
-    img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    # CLAHE on L channel of LAB for contrast (only for 3-channel color images)
+    if len(img.shape) == 3 and img.shape[2] == 3:
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        lab = cv2.merge([l, a, b])
+        img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
-    # Mild sharpening — emphasize edges without amplifying noise
+    # Mild sharpening
     kernel = np.array([[-0.5, -1, -0.5],
                        [-1, 7.5, -1],
                        [-0.5, -1, -0.5]], dtype=np.float32)
     img = cv2.filter2D(img, -1, kernel)
 
-    # Save to temp path
     out_path = image_path + ".enhanced.png"
     cv2.imwrite(out_path, img)
     return out_path, scale
@@ -121,11 +120,18 @@ class OCRHandler(BaseHTTPRequestHandler):
         enhanced_path = None
         scale = 1.0
 
-        if do_preprocess:
-            enhanced_path, scale = preprocess(image_path)
-            ocr_input = enhanced_path or image_path
-        else:
+        try:
+            if do_preprocess:
+                enhanced_path, scale = preprocess(image_path)
+                ocr_input = enhanced_path or image_path
+            else:
+                ocr_input = image_path
+        except Exception as e:
+            # OpenCV preprocessing can segfault on malformed images;
+            # fall back to the raw image instead of crashing
+            print(json.dumps({"event": "ocr", "warning": "preprocess failed, using raw image: " + str(e)}))
             ocr_input = image_path
+            scale = 1.0
 
         try:
             results = reader.readtext(

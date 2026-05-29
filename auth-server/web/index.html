@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI 实时翻译 — 本地智能，数据无忧</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",Arial,sans-serif;color:#1f2937;background:#fafbff;line-height:1.6}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+.btn{display:inline-block;text-align:center;padding:12px 24px;border-radius:10px;font-weight:700;font-size:15px;cursor:pointer;border:none;transition:all .15s;font-family:inherit;min-width:140px}
+.btn.primary{background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;box-shadow:0 4px 16px rgba(99,102,241,0.3)}
+.btn.primary:hover{filter:brightness(1.08);box-shadow:0 6px 22px rgba(99,102,241,0.4)}
+.btn.primary:disabled{background:rgba(243,244,246,0.9);color:#9ca3af;box-shadow:none;cursor:not-allowed}
+.btn.gray{background:#f3f4f6;color:#4b5563}
+.btn.gray:hover{background:#e5e7eb}
+.btn.gray:disabled{color:#9ca3af;cursor:not-allowed}
+.btn.red{background:linear-gradient(135deg,#ef4444,#ec4899);color:#fff}
+.btn.red:hover{filter:brightness(1.08)}
+.btn.small{padding:8px 16px;font-size:13px;min-width:auto}
+
+/* Header */
+header{position:sticky;top:0;z-index:50;padding:14px 0;border-bottom:1px solid #f0f0f7;background:rgba(255,255,255,.85);backdrop-filter:blur(12px)}
+header .wrap{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.logo{font-size:20px;font-weight:800;background:linear-gradient(135deg,#6366f1,#ec4899);-webkit-background-clip:text;-webkit-text-fill-color:transparent;flex-shrink:0}
+.header-right{display:flex;align-items:center;gap:12px;font-size:13px}
+.plan-badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700}
+.plan-badge.trial{background:#f3f4f6;color:#6b7280}
+.plan-badge.premium{background:linear-gradient(135deg,#fef3c7,#fde68a);color:#92400e}
+
+/* Sections */
+section{padding:60px 0}
+.hero{text-align:center;padding:80px 0 40px}
+.hero h1{font-size:44px;line-height:1.2;font-weight:800;color:#111827;margin-bottom:14px}
+.hero h1 em{font-style:normal;background:linear-gradient(135deg,#6366f1,#ec4899);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero p{font-size:16px;color:#6b7280;max-width:680px;margin:0 auto 28px}
+.hero .dl-btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.hero .version{font-size:12px;color:#9ca3af;margin-top:10px}
+
+.features{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;max-width:900px;margin:0 auto}
+.feat-card{background:#fff;border-radius:14px;padding:24px 18px;text-align:center;box-shadow:0 2px 12px rgba(99,102,241,.06)}
+.feat-card .ico{font-size:32px;margin-bottom:10px}
+.feat-card h4{font-size:14px;font-weight:700;color:#1f2937;margin-bottom:6px}
+.feat-card p{font-size:12px;color:#9ca3af;line-height:1.5}
+
+/* Cards */
+.card{background:#fff;border-radius:18px;padding:30px 28px;box-shadow:0 4px 20px rgba(99,102,241,.08);max-width:480px;margin:0 auto}
+.card h2{font-size:18px;font-weight:800;color:#111827;margin-bottom:6px;text-align:center}
+.card .sub{font-size:13px;color:#6b7280;margin-bottom:20px;text-align:center}
+
+/* Form */
+input[type="email"],input[type="text"]{
+  padding:10px 14px;border:1px solid rgba(0,0,0,.1);border-radius:10px;
+  font-size:14px;outline:none;font-family:inherit;width:100%;
+  transition:border-color 0.2s,box-shadow 0.2s;
+}
+input:focus{border-color:#8b5cf6;box-shadow:0 0 0 3px rgba(139,92,246,0.08)}
+.field-row{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+.field-row input{flex:1;min-width:0}
+.tip{font-size:11px;color:#9ca3af;margin-top:-6px;margin-bottom:14px}
+
+/* Msg */
+.msg{padding:8px 12px;border-radius:8px;font-size:12px;margin-bottom:12px;display:none}
+.msg.error{background:#fef2f2;color:#b91c1c;display:block}
+.msg.ok{background:#ecfdf5;color:#047857;display:block}
+.msg.info{background:#eef2ff;color:#4338ca;display:block}
+
+/* Install guide */
+.steps{max-width:600px;margin:0 auto;list-style:none;counter-reset:step}
+.steps li{counter-increment:step;display:flex;gap:16px;align-items:flex-start;padding:16px 0;border-bottom:1px solid #f0f0f7}
+.steps li::before{content:counter(step);flex-shrink:0;width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center}
+.steps h4{font-size:14px;font-weight:700;margin-bottom:4px;color:#1f2937}
+.steps p,.steps code{font-size:13px;color:#6b7280}
+.steps code{background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:12px}
+
+/* Info rows */
+.info-row{display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid #f3f4f6}
+.info-row:last-child{border-bottom:none}
+.info-label{font-size:14px;color:#6b7280}
+.info-value{font-size:14px;font-weight:600;color:#1f2937}
+
+/* Tabs */
+.tab-btn{padding:6px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;background:transparent;color:#6b7280;font-family:inherit;transition:all .15s}
+.tab-btn:hover{color:#111827;background:rgba(0,0,0,.04)}
+.tab-btn.active{background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+
+footer{padding:30px 0;text-align:center;color:#9ca3af;font-size:12px;border-top:1px solid #f0f0f7;margin-top:40px}
+
+@media(max-width:768px){
+  .hero h1{font-size:28px}
+  .features{grid-template-columns:repeat(2,1fr)}
+  header .wrap{flex-direction:column}
+}
+@media(max-width:480px){
+  .features{grid-template-columns:1fr}
+  .hero h1{font-size:22px}
+  .hero .dl-btns{flex-direction:column;align-items:center}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="logo">AI 实时翻译</div>
+    <div class="header-right" id="headerRight">
+      <span id="headerPlan" class="plan-badge trial">未登录</span>
+      <button class="tab-btn active" data-tab="home">首页</button>
+      <button class="tab-btn" data-tab="login" id="tabLoginBtn">登录</button>
+      <button class="tab-btn" data-tab="account" id="tabAccountBtn" style="display:none">账号</button>
+    </div>
+  </div>
+</header>
+
+<!-- Home -->
+<section class="tab-panel active" id="tab-home">
+  <div class="hero">
+    <h1>AI 实时翻译<br><em>本地智能，数据无忧</em></h1>
+    <p>页面翻译 · 视频同传 · 图片 OCR · TTS 播报<br>翻译内容不经过服务器，守护您的数据隐私</p>
+    <div class="dl-btns">
+      <button class="btn red" id="btnDlInstaller" style="font-size:17px;padding:14px 36px">下载 Windows 安装程序</button>
+      <button class="btn gray" id="btnDlExtension" style="font-size:17px;padding:14px 36px">下载浏览器扩展</button>
+    </div>
+    <div class="version" id="dlVersion">最新版本: 加载中...</div>
+  </div>
+
+  <div class="wrap">
+    <div class="features">
+      <div class="feat-card"><div class="ico">🎬</div><h4>视频同传翻译</h4><p>实时字幕 + TTS 语音播报，支持 YouTube 等平台</p></div>
+      <div class="feat-card"><div class="ico">🌐</div><h4>全页翻译</h4><p>一键翻译整个网页，支持 Google / 微软 / Ollama</p></div>
+      <div class="feat-card"><div class="ico">📷</div><h4>图片 OCR 翻译</h4><p>右键图片即可识别图中文字并翻译</p></div>
+      <div class="feat-card"><div class="ico">🔒</div><h4>数据不出本机</h4><p>本地 ASR/TTS 后台，翻译内容绝不经过服务器</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- Install Guide -->
+<section class="tab-panel" id="tab-guide">
+  <div class="wrap">
+    <div class="card" style="max-width:640px">
+      <h2>安装指南</h2>
+      <p class="sub">2 步完成安装</p>
+      <ol class="steps">
+        <li>
+          <div>
+            <h4>第一步：安装 Windows 后台服务</h4>
+            <p>下载并运行 <strong>installer.exe</strong>，一键安装本地翻译引擎。安装后系统托盘中不会有图标，服务在后台静默运行。</p>
+            <p style="margin-top:6px;font-size:11px;color:#9ca3af">需要 Windows 10 或更高版本。首次运行可能弹出 SmartScreen 提示，点击"更多信息"→"仍要运行"即可。</p>
+          </div>
+        </li>
+        <li>
+          <div>
+            <h4>第二步：加载浏览器扩展</h4>
+            <p>下载 <strong>extension.zip</strong> 并解压到一个文件夹。</p>
+            <p style="margin-top:4px">打开 Chrome 浏览器，在地址栏输入 <code>chrome://extensions</code>，打开右上角<strong>"开发者模式"</strong>开关，点击<strong>"加载已解压的扩展程序"</strong>，选择刚才解压的文件夹。</p>
+          </div>
+        </li>
+      </ol>
+      <p style="text-align:center;margin-top:20px">
+        <button class="btn primary" onclick="switchTab('home')">返回首页下载</button>
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Login -->
+<section class="tab-panel" id="tab-login">
+  <div class="wrap">
+    <div class="card">
+      <h2>登录</h2>
+      <p class="sub">新用户首次登录即注册</p>
+      <div class="msg" id="loginMsg"></div>
+      <div class="field-row">
+        <input type="email" id="loginEmail" placeholder="邮箱（Gmail / QQ / 163 等）" autocomplete="username" spellcheck="false">
+        <button class="btn gray small" id="loginBtnSend">发送验证码</button>
+      </div>
+      <input type="text" id="loginCode" placeholder="6 位验证码" maxlength="6" autocomplete="one-time-code" inputmode="numeric" style="margin-bottom:14px">
+      <div class="tip">验证码 5 分钟有效；同邮箱 60 秒内只能发 1 条</div>
+      <button class="btn primary" id="loginBtnGo" style="width:100%">登录</button>
+    </div>
+  </div>
+</section>
+
+<!-- Account -->
+<section class="tab-panel" id="tab-account">
+  <div class="wrap">
+    <div class="card">
+      <h2>账号信息</h2>
+      <div class="msg" id="acctMsg"></div>
+      <div class="info-row">
+        <span class="info-label">邮箱</span>
+        <span class="info-value" id="acctEmail">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">当前方案</span>
+        <span id="acctPlan">-</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">最近活动</span>
+        <span class="info-value" id="acctLogin">-</span>
+      </div>
+      <div style="text-align:center;margin-top:24px">
+        <button class="btn gray" id="btnLogout">退出登录</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>&copy; 2026 AI 实时翻译</p>
+</footer>
+
+<script>
+var AUTH_API = 'http://101.96.227.131/auth-server';
+var _token = '';
+var _plan = 'trial';
+var _email = '';
+
+function $(id){ return document.getElementById(id); }
+
+// ─── Tab switching ──────────────────────────────────────────────────
+var tabBtns = document.querySelectorAll('.tab-btn');
+var tabPanels = document.querySelectorAll('.tab-panel');
+
+function switchTab(name){
+  tabBtns.forEach(function(b){ b.classList.toggle('active', b.dataset.tab === name); });
+  tabPanels.forEach(function(p){ p.classList.toggle('active', p.id === 'tab-' + name); });
+  if (name === 'account') loadAccount();
+}
+tabBtns.forEach(function(b){ b.addEventListener('click', function(){ switchTab(b.dataset.tab); }); });
+
+// ─── Auth helpers ───────────────────────────────────────────────────
+function saveAuth(token, plan, email){
+  _token = token; _plan = plan; _email = email;
+  try { localStorage.setItem('authToken', token); } catch(_){}
+  try { localStorage.setItem('userPlan', plan); } catch(_){}
+  try { localStorage.setItem('userEmail', email); } catch(_){}
+  updateHeader();
+}
+
+function clearAuth(){
+  _token = ''; _plan = 'trial'; _email = '';
+  try { localStorage.removeItem('authToken'); } catch(_){}
+  try { localStorage.removeItem('userPlan'); } catch(_){}
+  try { localStorage.removeItem('userEmail'); } catch(_){}
+  updateHeader();
+}
+
+function loadAuth(){
+  _token = localStorage.getItem('authToken') || '';
+  _plan = localStorage.getItem('userPlan') || 'trial';
+  _email = localStorage.getItem('userEmail') || '';
+  updateHeader();
+}
+
+function updateHeader(){
+  if (_token) {
+    $('headerPlan').textContent = (_plan === 'premium' ? '专业版' : '体验版') + ' · ' + _email;
+    $('headerPlan').className = 'plan-badge ' + (_plan === 'premium' ? 'premium' : 'trial');
+    $('tabLoginBtn').style.display = 'none';
+    $('tabAccountBtn').style.display = '';
+  } else {
+    $('headerPlan').textContent = '未登录';
+    $('headerPlan').className = 'plan-badge trial';
+    $('tabLoginBtn').style.display = '';
+    $('tabAccountBtn').style.display = 'none';
+  }
+}
+
+// ─── Show msg ───────────────────────────────────────────────────────
+function showMsg(elId, text, type){
+  var el = $(elId);
+  el.textContent = text;
+  el.className = 'msg ' + (type || 'info');
+}
+
+// ─── Countdown ──────────────────────────────────────────────────────
+function startCountdown(btnEl){
+  var left = 60;
+  btnEl.textContent = '重新发送 (' + left + 's)';
+  btnEl.disabled = true;
+  var timer = setInterval(function(){
+    left--;
+    if (left <= 0) {
+      clearInterval(timer);
+      btnEl.textContent = '发送验证码';
+      btnEl.disabled = false;
+    } else {
+      btnEl.textContent = '重新发送 (' + left + 's)';
+    }
+  }, 1000);
+}
+
+// ─── Login ──────────────────────────────────────────────────────────
+$('loginBtnSend').addEventListener('click', function(){
+  var email = $('loginEmail').value.trim();
+  if (!email || !/@/.test(email)) { showMsg('loginMsg', '请输入有效邮箱', 'error'); return; }
+  this.disabled = true;
+  this.textContent = '发送中...';
+  fetch(AUTH_API + '/api/auth/send-code', {
+    method: 'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email: email})
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if (d.error) { showMsg('loginMsg', d.error, 'error'); $('loginBtnSend').disabled = false; $('loginBtnSend').textContent = '发送验证码'; return; }
+    showMsg('loginMsg', '验证码已发送，请查收邮箱', 'ok');
+    startCountdown($('loginBtnSend'));
+  }).catch(function(){
+    showMsg('loginMsg', '无法连接服务器', 'error');
+    $('loginBtnSend').disabled = false; $('loginBtnSend').textContent = '发送验证码';
+  });
+});
+
+$('loginBtnGo').addEventListener('click', function(){
+  var email = $('loginEmail').value.trim();
+  var code = $('loginCode').value.trim();
+  if (!email || !code) { showMsg('loginMsg', '请填写邮箱和验证码', 'error'); return; }
+  this.disabled = true; this.textContent = '登录中...';
+  fetch(AUTH_API + '/api/auth/login', {
+    method: 'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email: email, code: code})
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if (d.error) { showMsg('loginMsg', d.error, 'error'); $('loginBtnGo').disabled = false; $('loginBtnGo').textContent = '登录'; return; }
+    showMsg('loginMsg', '登录成功', 'ok');
+    saveAuth(d.token, d.plan || 'trial', email);
+    setTimeout(function(){ switchTab('home'); }, 1000);
+  }).catch(function(){
+    showMsg('loginMsg', '无法连接服务器', 'error');
+    $('loginBtnGo').disabled = false; $('loginBtnGo').textContent = '登录';
+  });
+});
+
+$('loginCode').addEventListener('keydown', function(e){ if(e.key==='Enter') $('loginBtnGo').click(); });
+
+// ─── Account ────────────────────────────────────────────────────────
+function loadAccount(){
+  if (!_token) { $('acctEmail').textContent = '-'; $('acctPlan').innerHTML = '-'; return; }
+  fetch(AUTH_API + '/api/auth/me', { headers:{'Authorization':'Bearer '+_token} })
+    .then(function(r){ return r.json(); }).then(function(d){
+      if (d.error) { showMsg('acctMsg', d.error, 'error'); return; }
+      $('acctEmail').textContent = d.user.email || _email || '-';
+      if (d.plan === 'premium') {
+        $('acctPlan').innerHTML = '<span class="plan-badge premium">专业版</span>';
+      } else {
+        $('acctPlan').innerHTML = '<span class="plan-badge trial">体验版</span>';
+      }
+      $('acctLogin').textContent = formatDate(d.user.updatedAt || d.user.createdAt);
+    }).catch(function(){ showMsg('acctMsg', '无法连接服务器', 'error'); });
+}
+
+$('btnLogout').addEventListener('click', function(){
+  clearAuth();
+  showMsg('acctMsg', '已退出登录', 'ok');
+  setTimeout(function(){ switchTab('home'); }, 800);
+});
+
+function formatDate(isoStr){
+  if (!isoStr) return '-';
+  var d = new Date(isoStr);
+  return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+' '+pad(d.getHours())+':'+pad(d.getMinutes());
+}
+function pad(n){ return n<10?'0'+n:''+n; }
+
+// ─── Download ───────────────────────────────────────────────────────
+$('btnDlInstaller').addEventListener('click', function(){
+  window.open('https://github.com/zm328876490-del/zilong-releases/releases/latest/download/installer.exe', '_blank');
+  $('btnDlInstaller').textContent = '已开始下载 ✓';
+  setTimeout(function(){ $('btnDlInstaller').textContent = '下载 Windows 安装程序'; }, 3000);
+});
+
+$('btnDlExtension').addEventListener('click', function(){
+  window.open('/extension.zip', '_blank');
+  $('btnDlExtension').textContent = '已开始下载 ✓';
+  setTimeout(function(){ $('btnDlExtension').textContent = '下载浏览器扩展'; }, 3000);
+  // Show install guide after clicking download
+  setTimeout(function(){ switchTab('guide'); }, 1500);
+});
+
+// Version badge
+fetch(AUTH_API + '/api/version')
+  .then(function(r){ return r.json(); })
+  .then(function(d){ if (d.version) $('dlVersion').textContent = '最新版本: v' + d.version; })
+  .catch(function(){});
+
+// ─── Init ───────────────────────────────────────────────────────────
+loadAuth();
+// Add install guide nav
+var guideBtn = document.createElement('button');
+guideBtn.className = 'tab-btn';
+guideBtn.dataset.tab = 'guide';
+guideBtn.textContent = '安装指南';
+$('headerRight').insertBefore(guideBtn, $('tabLoginBtn'));
+guideBtn.addEventListener('click', function(){ switchTab('guide'); });
+</script>
+</body>
+</html>
