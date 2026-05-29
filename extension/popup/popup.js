@@ -185,11 +185,11 @@
 
   // ─── Recommended GGUF models (downloaded via hf-mirror.com) ──────
   const RCMD_MODELS = [
-    { name: 'qwen2.5-0.5b-instruct-q4_k_m',  size: '0.4GB', quality: '差',   speed: '极快', scenario: '纯实验', url: 'https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf' },
-    { name: 'qwen2.5-7b-instruct-q4_k_m',    size: '4.7GB', quality: '良好', speed: '中等', scenario: '推荐日常使用 · 默认', url: 'https://hf-mirror.com/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf' },
-    { name: 'qwen2.5-14b-instruct-q4_k_m',   size: '8.9GB', quality: '优秀', speed: '较慢', scenario: '高质量需求', url: 'https://hf-mirror.com/Qwen/Qwen2.5-14B-Instruct-GGUF/resolve/main/qwen2.5-14b-instruct-q4_k_m.gguf' },
-    { name: 'Llama-3.1-8B-Instruct-Q4_K_M',   size: '4.9GB', quality: '良好', speed: '中等', scenario: '英文→中文不错', url: 'https://hf-mirror.com/bartowski/Llama-3.1-8B-Instruct-GGUF/resolve/main/Llama-3.1-8B-Instruct-Q4_K_M.gguf' },
-    { name: 'gemma-3-12b-it-Q4_K_M',    size: '8GB',   quality: '优秀', speed: '中等', scenario: '多语种翻译强', url: 'https://hf-mirror.com/bartowski/gemma-3-12b-it-GGUF/resolve/main/gemma-3-12b-it-Q4_K_M.gguf' },
+    { name: 'qwen2.5-0.5b-instruct-q4_k_m',  display: 'Qwen 2.5 0.5B (阿里)',   size: '0.4GB', quality: '差',   speed: '极快', scenario: '纯实验', url: 'https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf' },
+    { name: 'Qwen3-1.7B.Q4_K_M',             display: 'Qwen 3 1.7B (阿里)',     size: '1.2GB', quality: '一般', speed: '快',   scenario: '最新小模型', url: 'https://hf-mirror.com/QuantFactory/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B.Q4_K_M.gguf' },
+    { name: 'qwen2.5-1.5b-instruct-q4_k_m',  display: 'Qwen 2.5 1.5B (阿里)',   size: '1.1GB', quality: '一般', speed: '快',   scenario: '低配设备', url: 'https://hf-mirror.com/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf' },
+    { name: 'qwen2.5-7b-instruct-q4_k_m',    display: 'Qwen 2.5 7B (阿里)',     size: '4.7GB', quality: '良好', speed: '中等', scenario: '推荐日常使用', url: 'https://hf-mirror.com/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf' },
+    { name: 'gemma-3-4b-it-Q4_K_M',          display: 'Gemma 3 4B (Google)',   size: '2.6GB', quality: '良好', speed: '中等', scenario: '多语种翻译强', url: 'https://hf-mirror.com/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf' },
   ];
 
   let _ollamaTimer = null;
@@ -871,7 +871,7 @@
         return '<div style="padding:4px 0;border-bottom:1px solid rgba(0,0,0,0.04);">' +
           '<div style="display:flex;align-items:center;">' +
           '<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:#10b9811a;color:#10b981;flex-shrink:0;margin-right:6px;">已安装</span>' +
-          '<b style="font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + m.name + '</b>' +
+          '<b style="font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (m.display || m.name) + '</b>' +
           '<span style="font-size:10px;color:#9ca3af;flex-shrink:0;">' + m.size + '</span>' +
           '</div>' +
           '<div style="margin-top:2px;margin-left:18px;">' +
@@ -883,7 +883,7 @@
       return '<div style="padding:4px 0;border-bottom:1px solid rgba(0,0,0,0.04);">' +
         '<label style="display:flex;align-items:center;cursor:pointer;">' +
         '<input type="checkbox" value="' + m.name + '" style="accent-color:#6366f1;flex-shrink:0;margin-right:6px;">' +
-        '<b style="font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + m.name + '</b>' +
+        '<b style="font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (m.display || m.name) + '</b>' +
         '<span style="font-size:10px;color:#9ca3af;flex-shrink:0;">' + m.size + '</span>' +
         '</label>' +
         '<div style="font-size:9px;margin-left:18px;margin-top:1px;">' +
@@ -907,11 +907,14 @@
     });
 
     // RAM info
+    var existingInfo = document.getElementById('ramInfo');
+    if (existingInfo) existingInfo.remove();
     if (ram) {
       var info = document.createElement('div');
-      info.style.cssText = 'font-size:10px;color:#9ca3af;margin-top:6px;padding-top:4px;';
+      info.id = 'ramInfo';
+      info.style.cssText = 'font-size:10px;color:#9ca3af;margin-bottom:4px;';
       info.textContent = '⚡ 本机内存 ' + ram + 'GB，⚠️ 标注的大模型需充足显存';
-      ollamaModelCheckboxes.appendChild(info);
+      ollamaModelCheckboxes.parentNode.insertBefore(info, ollamaModelCheckboxes);
     }
 
     if (btnPullModels) btnPullModels.disabled = false;
@@ -1016,7 +1019,8 @@
       if (active && downloads[active]) {
         var d = downloads[active];
         if (pullProgressFill) pullProgressFill.style.width = (d.pct || 0) + '%';
-        if (pullProgress) pullProgress.textContent = '下载中 ' + active + ' ' + (d.pct || 0) + '%';
+        var display = (RCMD_MODELS.find(function(m){return m.name===d.name;}) || {}).display || d.name || active;
+        if (pullProgress) pullProgress.textContent = '下载中 ' + display + ' ' + (d.pct || 0) + '%';
         if (pullProgressBar) pullProgressBar.style.display = 'block';
       }
 

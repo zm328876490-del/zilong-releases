@@ -110,45 +110,29 @@ func (m *Manager) doDownload(job *Job) {
 	tmp := dest + ".tmp"
 
 	os.MkdirAll(m.dir, 0755)
-
-	// Remove stale tmp file
 	os.Remove(tmp)
 
-	resp, err := m.client.Get(job.URL)
-	if err != nil {
-		m.failJob(job, "下载失败: "+err.Error())
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		m.failJob(job, fmt.Sprintf("HTTP %d", resp.StatusCode))
+	// Probe: check whether server supports Range requests
+	total, acceptRanges := m.probe(job.URL)
+	if total <= 0 {
+		m.failJob(job, "无法获取文件大小")
 		return
 	}
 
-	job.Total = resp.ContentLength
+	job.Total = total
 	job.updatedAt = time.Now()
 
-	f, err := os.Create(tmp)
-	if err != nil {
-		m.failJob(job, "创建文件失败: "+err.Error())
-		return
-	}
-	defer f.Close()
-
-	pr := &progressReader{
-		r:   resp.Body,
-		job: job,
-		m:   m,
+	const workers = 8
+	if acceptRanges && total > workers*4*1024*1024 {
+		m.downloadChunked(job, tmp, workers)
+	} else {
+		m.downloadSingle(job, tmp)
 	}
 
-	if _, err := io.Copy(f, pr); err != nil {
+	if job.Status == "failed" {
 		os.Remove(tmp)
-		m.failJob(job, "下载中断: "+err.Error())
 		return
 	}
-
-	f.Close()
 
 	if err := os.Rename(tmp, dest); err != nil {
 		m.failJob(job, "重命名失败: "+err.Error())
@@ -164,6 +148,117 @@ func (m *Manager) doDownload(job *Job) {
 	if m.onChange != nil {
 		m.onChange()
 	}
+}
+
+func (m *Manager) probe(url string) (size int64, acceptRanges bool) {
+	req, _ := http.NewRequest("HEAD", url, nil)
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	resp.Body.Close()
+	return resp.ContentLength, resp.Header.Get("Accept-Ranges") == "bytes"
+}
+
+func (m *Manager) downloadSingle(job *Job, tmp string) {
+	resp, err := m.client.Get(job.URL)
+	if err != nil {
+		m.failJob(job, "下载失败: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		m.failJob(job, fmt.Sprintf("HTTP %d", resp.StatusCode))
+		return
+	}
+	f, err := os.Create(tmp)
+	if err != nil {
+		m.failJob(job, "创建文件失败: "+err.Error())
+		return
+	}
+	defer f.Close()
+	pr := &progressReader{r: resp.Body, job: job, m: m}
+	if _, err := io.Copy(f, pr); err != nil {
+		m.failJob(job, "下载中断: "+err.Error())
+	}
+}
+
+func (m *Manager) downloadChunked(job *Job, tmp string, workers int) {
+	chunkSize := job.Total / int64(workers)
+	var wg sync.WaitGroup
+	errs := make([]error, workers)
+	chunkFiles := make([]string, workers)
+
+	f, err := os.Create(tmp)
+	if err != nil {
+		m.failJob(job, "创建文件失败: "+err.Error())
+		return
+	}
+	defer f.Close()
+
+	for i := 0; i < workers; i++ {
+		start := int64(i) * chunkSize
+		end := start + chunkSize - 1
+		if i == workers-1 {
+			end = job.Total - 1
+		}
+		chunkFiles[i] = tmp + fmt.Sprintf(".part%d", i)
+
+		wg.Add(1)
+		go func(idx int, rangeStart, rangeEnd int64) {
+			defer wg.Done()
+			errs[idx] = m.downloadChunk(job, chunkFiles[idx], rangeStart, rangeEnd)
+		}(i, start, end)
+	}
+
+	wg.Wait()
+
+	// Check errors
+	for _, e := range errs {
+		if e != nil {
+			m.failJob(job, "分片下载失败: "+e.Error())
+			return
+		}
+	}
+
+	// Merge chunks in order
+	for _, cf := range chunkFiles {
+		chunk, err := os.ReadFile(cf)
+		if err != nil {
+			m.failJob(job, "读取分片失败: "+err.Error())
+			return
+		}
+		if _, err := f.Write(chunk); err != nil {
+			m.failJob(job, "合并分片失败: "+err.Error())
+			return
+		}
+		os.Remove(cf)
+	}
+}
+
+func (m *Manager) downloadChunk(job *Job, chunkFile string, start, end int64) error {
+	req, _ := http.NewRequest("GET", job.URL, nil)
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	f, err := os.Create(chunkFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	pr := &progressReader{r: resp.Body, job: job, m: m}
+	_, err = io.Copy(f, pr)
+	return err
 }
 
 func (m *Manager) failJob(job *Job, errMsg string) {
