@@ -1529,26 +1529,45 @@ func startLlamaServer(cfg *config.Config) (*exec.Cmd, error) {
 	llamaPort := cfg.LlamaPort()
 	llamaServerURL = fmt.Sprintf("http://127.0.0.1:%s", llamaPort)
 
-	cmd := exec.Command(cfg.LlamaServerExe,
+	// Build args — try GPU first, fall back to CPU
+	baseArgs := []string{
 		"-m", modelPath,
 		"--port", llamaPort,
 		"--host", "127.0.0.1",
 		"-c", "4096",
-		"-ngl", "99",
 		"-b", "512",
 		"-t", "4",
-	)
+	}
+	gpuArgs := append(baseArgs, "-ngl", "99")
+
+	var cmd *exec.Cmd
+	var err error
+
+	// Try with GPU layers first
+	cmd = exec.Command(cfg.LlamaServerExe, gpuArgs...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 
-	if err := cmd.Start(); err != nil {
+	if err = cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start llama-server: %w", err)
 	}
 
-	if err := waitForServer(llamaServerURL+"/health", 30*time.Second); err != nil {
+	if err = waitForServer(llamaServerURL+"/health", 15*time.Second); err != nil {
+		// GPU failed — kill and retry without GPU
 		cmd.Process.Kill()
-		return nil, fmt.Errorf("llama-server startup: %w", err)
+		fmt.Println("[main] llama-server GPU failed, retrying with CPU only...")
+		cmd = exec.Command(cfg.LlamaServerExe, baseArgs...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		cmd.Stderr = os.Stderr
+		cmd.Stdout = os.Stdout
+		if err = cmd.Start(); err != nil {
+			return nil, fmt.Errorf("start llama-server (CPU): %w", err)
+		}
+		if err = waitForServer(llamaServerURL+"/health", 30*time.Second); err != nil {
+			cmd.Process.Kill()
+			return nil, fmt.Errorf("llama-server startup: %w", err)
+		}
 	}
 
 	return cmd, nil
