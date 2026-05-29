@@ -242,6 +242,7 @@ async function handlePageOllamaTranslate(message, sendResponse) {
 
     const url = (message.ollamaUrl || 'http://localhost:11434').replace(/\/$/, '');
     const model = message.ollamaModel || 'qwen2.5:7b';
+
     const toName = ollamaLangName(message.to || 'zh-Hans');
     const payload = texts.filter(function (t) { return (t || '').trim(); });
     const payloadJSON = JSON.stringify(payload);
@@ -299,16 +300,45 @@ async function handlePageOllamaTranslate(message, sendResponse) {
   }
 }
 
+// ─── Cached default model (fetched from Go backend on first use) ──────────
+let _cachedDefaultModel = null;
+let _cachedDefaultModelAt = 0;
+
+async function getDefaultModel(ollamaUrl) {
+  // Return cached value if fresh (within 5 minutes)
+  if (_cachedDefaultModel && (Date.now() - _cachedDefaultModelAt) < 300000) {
+    return _cachedDefaultModel;
+  }
+  try {
+    const resp = await fetch('http://localhost:29527/model/list', { signal: AbortSignal.timeout(3000) });
+    if (resp.ok) {
+      const models = await resp.json();
+      if (Array.isArray(models) && models.length > 0) {
+        _cachedDefaultModel = models[0].name || '';
+        _cachedDefaultModelAt = Date.now();
+        return _cachedDefaultModel;
+      }
+    }
+  } catch (_) {}
+  return '';
+}
+
 // ─── Ollama single-text translate (page translation, one-by-one) ──────────
-// Uses /api/generate (native Ollama API) which is faster for single short texts
-// than the /v1/chat/completions OpenAI-compatible endpoint.
 async function handlePageOllamaTranslateOne(message, sendResponse) {
   try {
     const text = (message.text || '').trim();
     if (!text) { sendResponse({ ok: true, translation: '' }); return; }
 
     const url = (message.ollamaUrl || 'http://127.0.0.1:23323').replace(/\/$/, '');
-    const model = message.ollamaModel || '';
+    let model = message.ollamaModel || '';
+    if (!model) {
+      model = await getDefaultModel(url);
+    }
+    if (!model) {
+
+      sendResponse({ ok: false, translation: '' });
+      return;
+    }
     const toName = ollamaLangName(message.to || 'zh-Hans');
 
     const systemPrompt =
@@ -324,11 +354,13 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: text },
         ],
+        stream: false,
         temperature: 0.1,
       }),
     });
 
     if (!resp.ok) {
+
       sendResponse({ ok: false, translation: '' });
       return;
     }
@@ -337,6 +369,7 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
     const translation = (data.choices && data.choices[0] && data.choices[0].message.content || '').trim();
     sendResponse({ ok: true, translation: translation });
   } catch (e) {
+
     sendResponse({ ok: false, translation: '' });
   }
 }

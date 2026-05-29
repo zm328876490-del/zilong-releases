@@ -118,7 +118,7 @@ func Load() *Config {
 		}
 	}
 
-	// llama-server
+	// llama-server — resolve to absolute path so exec.Command works regardless of CWD
 	llamaExe := "llama-server.exe"
 	if runtime.GOOS != "windows" {
 		llamaExe = "llama-server"
@@ -132,7 +132,11 @@ func Load() *Config {
 	}
 	for _, c := range llamaCandidates {
 		if _, err := os.Stat(c); err == nil {
-			cfg.LlamaServerExe = c
+			if abs, err := filepath.Abs(c); err == nil {
+				cfg.LlamaServerExe = abs
+			} else {
+				cfg.LlamaServerExe = c
+			}
 			break
 		}
 	}

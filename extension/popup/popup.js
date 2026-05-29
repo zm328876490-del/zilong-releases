@@ -9,7 +9,7 @@
   const translateEngineSelect = document.getElementById('translateEngine');
   let prevEngine = translateEngineSelect.value;
   const ollamaModal = document.getElementById('ollamaModal');
-  const ollamaUrlInput = document.getElementById('ollamaUrl');
+
   const ollamaModelInput = document.getElementById('ollamaModel');
   const ollamaCancelBtn = document.getElementById('ollamaCancel');
   const ollamaConfirmBtn = document.getElementById('ollamaConfirm');
@@ -73,7 +73,7 @@
       svg: '<svg viewBox="0 0 18 18" width="16" height="16"><circle cx="9" cy="9" r="7" fill="none" stroke="#4285F4" stroke-width="1.3"/><path d="M9 2.5A6.5 6.5 0 0 0 2.8 7h2.3a4.3 4.3 0 0 1 7.5-1.8l-2 2h4.8V2.4l-1.7 1.7A6.5 6.5 0 0 0 9 2.5z" fill="#4285F4"/><text x="9" y="13.5" text-anchor="middle" font-size="8" font-weight="700" fill="#4285F4" font-family="Arial,sans-serif">G</text></svg>',
     },
     ollama: {
-      label: 'Ollama',
+      label: '本地模型',
       svg: '<svg viewBox="0 0 18 18" width="16" height="16"><ellipse cx="9" cy="13" rx="5" ry="2.5" fill="#1a1a1a"/><ellipse cx="9" cy="7" rx="3" ry="4" fill="#2d2d2d"/><ellipse cx="9" cy="6" rx="2" ry="2.5" fill="#3d3d3d"/><circle cx="7.5" cy="5.5" r="1" fill="#f5f5f5"/><circle cx="10.5" cy="5.5" r="1" fill="#f5f5f5"/><ellipse cx="8" cy="4" rx="1.5" ry="2" fill="#2d2d2d"/><ellipse cx="10" cy="4" rx="1.5" ry="2" fill="#2d2d2d"/></svg>',
     },
     deepseek: {
@@ -252,7 +252,7 @@
     sourceLangSelect.value = settings.sourceLang || DEFAULT_SETTINGS.sourceLang;
     targetLangSelect.value = targetLang;
     translateEngineSelect.value = settings.engine || DEFAULT_SETTINGS.engine;
-    ollamaUrlInput.value = settings.ollamaUrl || DEFAULT_SETTINGS.ollamaUrl;
+
     ollamaModelInput.value = settings.ollamaModel || DEFAULT_SETTINGS.ollamaModel;
     // New engine fields — restore from per-engine keys or defaults
     apiUrlInput.value = settings.openaiUrl || DEFAULT_SETTINGS.openaiUrl;
@@ -278,7 +278,7 @@
       sourceLang: sourceLangSelect.value,
       targetLang: targetLangSelect.value,
       engine: translateEngineSelect.value,
-      ollamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
+      ollamaUrl: 'http://127.0.0.1:23323',
       ollamaModel: ollamaModelInput.value.trim() || '',
       openaiUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
       openaiKey: apiKeyInput.value.trim(),
@@ -349,15 +349,12 @@
     }
   );
 
-  [ollamaUrlInput].forEach(function (el) {
-    el.addEventListener('change', function () { saveSettings(); checkOllamaStatus(); });
-    el.addEventListener('input', function () { saveSettings(); });
-  });
+
   ollamaModelInput.addEventListener('change', function () { saveSettings(); });
 
   function showOllamaModal() {
     var cfg = ENGINE_CONFIG['ollama'];
-    document.getElementById('ollamaModalTitle').innerHTML = (cfg ? cfg.svg : '') + ' ' + cfg.label + ' 本地翻译';
+    document.getElementById('ollamaModalTitle').innerHTML = (cfg ? cfg.svg : '') + ' ' + cfg.label;
     ollamaModal.style.display = 'flex';
     checkOllamaStatus();
     _ollamaTimer = setInterval(checkOllamaStatus, 3000);
@@ -513,7 +510,7 @@
       pageSourceLang: sourceLangSelect.value,
       pageTargetLang: targetLangSelect.value,
       pageEngine: engine,
-      pageOllamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
+      pageOllamaUrl: 'http://127.0.0.1:23323',
       pageOllamaModel: ollamaModelInput.value.trim() || '',
       pageOpenAIUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
       pageOpenAIKey: apiKeyInput.value.trim(),
@@ -525,7 +522,7 @@
         sourceLang: sourceLangSelect.value,
         targetLang: targetLangSelect.value,
         engine: engine,
-        ollamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
+        ollamaUrl: 'http://127.0.0.1:23323',
         ollamaModel: ollamaModelInput.value.trim() || '',
         openaiUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
         openaiKey: apiKeyInput.value.trim(),
@@ -725,15 +722,19 @@
   // ─── Engine badge (custom dropdown, replaces old <select>) ──────────
 
   // ─── Login / Account links ──────────────────────────────────────────
-  function openAppPage(hash) {
+  async function openAppPage(hash) {
     var url = chrome.runtime.getURL('app.html' + (hash ? '#' + hash : ''));
-    chrome.tabs.query({ url: chrome.runtime.getURL('app.html*') }, function (tabs) {
+    try {
+      var tabs = await chrome.tabs.query({ url: chrome.runtime.getURL('app.html*') });
       if (tabs.length > 0) {
-        chrome.tabs.update(tabs[0].id, { active: true, url: url });
+        await chrome.tabs.update(tabs[0].id, { active: true, url: url });
       } else {
-        chrome.tabs.create({ url: url });
+        await chrome.tabs.create({ url: url });
       }
-    });
+    } catch (_) {
+      // Fallback: try direct create
+      try { await chrome.tabs.create({ url: url }); } catch (__) {}
+    }
   }
 
   headerLogin.addEventListener('click', function () { openAppPage('login'); });
@@ -823,6 +824,9 @@
           }).join('');
           if (!modelNames.includes(savedModel)) {
             ollamaModelInput.value = modelNames[0];
+            // Auto-select first model and persist immediately so page-translate
+            // doesn't send empty model to llama-server.
+            saveSettings();
           }
         }
 

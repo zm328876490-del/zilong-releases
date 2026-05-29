@@ -11,6 +11,7 @@ import (
 	"html"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1501,6 +1502,53 @@ func waitForServer(url string, timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for whisper-server")
 }
 
+// ─── PID file helpers (survive parent restart) ─────────────────────────
+
+func pidFilePath(name string) string {
+	return filepath.Join(filepath.Dir(os.Args[0]), name+".pid")
+}
+
+func savePIDFile(name string, pid int) {
+	os.WriteFile(pidFilePath(name), []byte(fmt.Sprintf("%d", pid)), 0644)
+}
+
+func killPIDFile(name string) {
+	data, err := os.ReadFile(pidFilePath(name))
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		os.Remove(pidFilePath(name))
+		return
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		os.Remove(pidFilePath(name))
+		return
+	}
+	proc.Kill()
+	// Wait a moment for the port to free up
+	time.Sleep(500 * time.Millisecond)
+	os.Remove(pidFilePath(name))
+}
+
+func removePIDFile(name string) {
+	os.Remove(pidFilePath(name))
+}
+
+// portIsFree returns true if nothing is listening on addr.
+func portIsFree(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	if err != nil {
+		return true
+	}
+	conn.Close()
+	return false
+}
+
+// ─── llama-server lifecycle ─────────────────────────────────────────────
+
 // startLlamaServer launches llama-server as a persistent subprocess with an
 // OpenAI-compatible API on /v1/chat/completions. Requires at least one gguf
 // model installed under cfg.ModelDir.
@@ -1527,9 +1575,27 @@ func startLlamaServer(cfg *config.Config) (*exec.Cmd, error) {
 	}
 
 	llamaPort := cfg.LlamaPort()
-	llamaServerURL = fmt.Sprintf("http://127.0.0.1:%s", llamaPort)
+	addr := fmt.Sprintf("127.0.0.1:%s", llamaPort)
+	llamaURL := fmt.Sprintf("http://%s", addr)
 
-	// Build args — try GPU first, fall back to CPU
+	// ── Pre-flight: kill any stale process from a previous run ──────
+	killPIDFile("llama-server")
+
+	// If port is still occupied, check whether it is a healthy
+	// llama-server we can reuse (e.g. started manually or from an
+	// older instance we couldn't kill).
+	if !portIsFree(addr) {
+		if resp, err := httpGet(llamaURL + "/health"); err == nil {
+			resp.Body.Close()
+			llamaServerURL = llamaURL
+			fmt.Println("[main] llama-server: reusing existing instance on", addr)
+			return nil, nil // caller must handle nil cmd
+		}
+		// Port busy but not a healthy llama-server — bail.
+		return nil, fmt.Errorf("port %s is in use by another process", llamaPort)
+	}
+
+	// ── Build args — try GPU first, fall back to CPU ───────────────
 	baseArgs := []string{
 		"-m", modelPath,
 		"--port", llamaPort,
@@ -1543,34 +1609,41 @@ func startLlamaServer(cfg *config.Config) (*exec.Cmd, error) {
 	var cmd *exec.Cmd
 	var err error
 
-	// Try with GPU layers first
-	cmd = exec.Command(cfg.LlamaServerExe, gpuArgs...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stdout
-
-	if err = cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start llama-server: %w", err)
-	}
-
-	if err = waitForServer(llamaServerURL+"/health", 15*time.Second); err != nil {
-		// GPU failed — kill and retry without GPU
-		cmd.Process.Kill()
-		fmt.Println("[main] llama-server GPU failed, retrying with CPU only...")
-		cmd = exec.Command(cfg.LlamaServerExe, baseArgs...)
+	startAndWait := func(args []string, timeout time.Duration) error {
+		cmd = exec.Command(cfg.LlamaServerExe, args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		cmd.Stderr = os.Stderr
 		cmd.Stdout = os.Stdout
-		if err = cmd.Start(); err != nil {
-			return nil, fmt.Errorf("start llama-server (CPU): %w", err)
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("start llama-server: %w", err)
 		}
-		if err = waitForServer(llamaServerURL+"/health", 30*time.Second); err != nil {
+		if err := waitForServer(llamaURL+"/health", timeout); err != nil {
 			cmd.Process.Kill()
-			return nil, fmt.Errorf("llama-server startup: %w", err)
+			return err
+		}
+		return nil
+	}
+
+	fmt.Println("[main] llama-server: starting with GPU (", modelPath, ")...")
+	if err = startAndWait(gpuArgs, 15*time.Second); err != nil {
+		fmt.Println("[main] llama-server: GPU failed (", err, "), retrying CPU only...")
+		if err2 := startAndWait(baseArgs, 30*time.Second); err2 != nil {
+			return nil, fmt.Errorf("llama-server startup: GPU=%w CPU=%w", err, err2)
 		}
 	}
 
+	llamaServerURL = llamaURL
+
+	// Persist PID so the next restart can kill this process.
+	savePIDFile("llama-server", cmd.Process.Pid)
+	fmt.Printf("[main] llama-server: ready on %s (PID %d)\n", llamaURL, cmd.Process.Pid)
+
 	return cmd, nil
+}
+
+func httpGet(url string) (*http.Response, error) {
+	client := &http.Client{Timeout: 3 * time.Second}
+	return client.Get(url)
 }
 
 // ─── Model Management API ─────────────────────────────────────────────
@@ -1992,13 +2065,12 @@ func main() {
 	llamaCmd, err := startLlamaServer(cfg)
 	if err != nil {
 		fmt.Println("[main] llama-server:", err)
-	} else {
-		defer llamaCmd.Process.Kill()
 	}
 	modelManager.SetOnChange(func() {
 		if llamaCmd != nil {
 			llamaCmd.Process.Kill()
 		}
+		killPIDFile("llama-server")
 		cmd, err := startLlamaServer(cfg)
 		if err != nil {
 			fmt.Println("[main] llama-server restart:", err)
@@ -2047,7 +2119,12 @@ func main() {
 		}
 		if llamaCmd != nil {
 			llamaCmd.Process.Kill()
+		} else {
+			// We may have reused an existing server; try cleaning up by PID file.
+			killPIDFile("llama-server")
 		}
+		removePIDFile("llama-server")
+		removePIDFile("whisper-server")
 		os.Exit(0)
 	}()
 

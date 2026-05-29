@@ -698,7 +698,13 @@
         ollamaUrl: ollamaUrl,
         ollamaModel: ollamaModel,
       }, function (resp) {
-        if (chrome.runtime.lastError || !resp || !resp.ok) {
+        if (chrome.runtime.lastError) {
+
+          resolve('');
+          return;
+        }
+        if (!resp || !resp.ok) {
+
           resolve('');
           return;
         }

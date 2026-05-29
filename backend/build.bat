@@ -32,16 +32,23 @@ mkdir installer\embedded\models
 mkdir installer\embedded\scripts
 
 copy /y translation-server.exe.enc installer\embedded\translation-server.exe.enc >nul
+:: whisper.cpp
 copy /y whisper-server.exe installer\embedded\whisper-server.exe >nul
 copy /y whisper.dll installer\embedded\whisper.dll >nul
 copy /y SDL2.dll installer\embedded\SDL2.dll >nul
-copy /y ggml.dll installer\embedded\ggml.dll >nul
-copy /y ggml-base.dll installer\embedded\ggml-base.dll >nul
-copy /y ggml-cpu.dll installer\embedded\ggml-cpu.dll >nul
+:: llama.cpp Vulkan
 copy /y llama-server.exe installer\embedded\llama-server.exe >nul
 copy /y llama.dll installer\embedded\llama.dll >nul
 copy /y llama-common.dll installer\embedded\llama-common.dll >nul
 copy /y llama-server-impl.dll installer\embedded\llama-server-impl.dll >nul
+:: ggml core
+copy /y ggml.dll installer\embedded\ggml.dll >nul
+copy /y ggml-base.dll installer\embedded\ggml-base.dll >nul
+copy /y ggml-vulkan.dll installer\embedded\ggml-vulkan.dll >nul
+copy /y ggml-rpc.dll installer\embedded\ggml-rpc.dll >nul
+copy /y libomp140.x86_64.dll installer\embedded\libomp140.x86_64.dll >nul
+:: ggml CPU backends (for broad CPU compatibility)
+for %%f in (ggml-cpu-*.dll) do copy /y "%%f" installer\embedded\ >nul
 copy /y models\ggml-tiny.bin installer\embedded\models\ggml-tiny.bin >nul
 copy /y models\ggml-vad.bin installer\embedded\models\ggml-vad.bin >nul
 xcopy /y /e scripts\* installer\embedded\scripts\ >nul 2>&1
