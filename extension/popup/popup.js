@@ -818,7 +818,8 @@
         } else {
           ollamaModelInput.innerHTML = modelNames.map(function (n) {
             var selected = n === savedModel ? ' selected' : '';
-            return '<option value="' + n + '"' + selected + '>' + n + '</option>';
+            var display = (RCMD_MODELS.find(function(m){return m.name===n;}) || {}).display || n;
+            return '<option value="' + n + '"' + selected + '>' + display + '</option>';
           }).join('');
           if (!modelNames.includes(savedModel)) {
             ollamaModelInput.value = modelNames[0];
