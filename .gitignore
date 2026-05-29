@@ -6,8 +6,11 @@ backend/*.dll
 backend/*.enc
 backend/installer/installer.exe
 backend/installer/embedded/
-backend/models/ggml-tiny.bin
-backend/models/ggml-vad.bin
+backend/models/*.gguf
+backend/models/*.bin
+backend/models/.cache/
+backend/*.pid
+backend/*~
 auth-server/installer.exe
 auth-server/extension.zip
 auth-server/dist.zip
