@@ -26,6 +26,7 @@ import (
 
 	"ai-translation/backend/asr"
 	"ai-translation/backend/config"
+	"ai-translation/backend/model"
 	"ai-translation/backend/translate"
 	"ai-translation/backend/tts"
 
@@ -1127,6 +1128,12 @@ func isSentenceEndPunct(r rune) bool {
 // whisperServerURL is set at startup after whisper-server is ready.
 var whisperServerURL string
 
+// llamaServerURL is set at startup after llama-server is ready.
+var llamaServerURL string
+
+// modelManager handles gguf model downloads and listing.
+var modelManager *model.Manager
+
 // ocrServerURL is kept for backward-compat; not used when calling ocr.py directly.
 var ocrServerURL = "http://127.0.0.1:29529"
 
@@ -1176,7 +1183,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					client.translator.SetAsyncFn(client.translateViaBrowser)
 				}
 				if msg.Engine == "ollama" {
-					client.translator.SetOllama(msg.OllamaUrl, msg.OllamaModel)
+					client.translator.SetOllama(llamaServerURL, msg.OllamaModel)
 				}
 				if msg.Engine == "openai" {
 					client.translator.SetOpenAI(msg.OpenAIUrl, msg.OpenAIKey, msg.OpenAIModel)
@@ -1492,6 +1499,144 @@ func waitForServer(url string, timeout time.Duration) error {
 		time.Sleep(300 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout waiting for whisper-server")
+}
+
+// startLlamaServer launches llama-server as a persistent subprocess with an
+// OpenAI-compatible API on /v1/chat/completions. Requires at least one gguf
+// model installed under cfg.ModelDir.
+func startLlamaServer(cfg *config.Config) (*exec.Cmd, error) {
+	if cfg.LlamaServerExe == "" {
+		return nil, fmt.Errorf("llama-server.exe not found")
+	}
+
+	modelPath := ""
+	if cfg.LlamaModel != "" {
+		p := filepath.Join(cfg.ModelDir, cfg.LlamaModel+".gguf")
+		if _, err := os.Stat(p); err == nil {
+			modelPath = p
+		}
+	}
+	if modelPath == "" {
+		models, _ := modelManager.List()
+		if len(models) > 0 {
+			modelPath = models[0].Path
+		}
+	}
+	if modelPath == "" {
+		return nil, fmt.Errorf("no gguf model installed, download one first")
+	}
+
+	llamaPort := cfg.LlamaPort()
+	llamaServerURL = fmt.Sprintf("http://127.0.0.1:%s", llamaPort)
+
+	cmd := exec.Command(cfg.LlamaServerExe,
+		"-m", modelPath,
+		"--port", llamaPort,
+		"--host", "127.0.0.1",
+		"-c", "4096",
+	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start llama-server: %w", err)
+	}
+
+	if err := waitForServer(llamaServerURL+"/health", 30*time.Second); err != nil {
+		cmd.Process.Kill()
+		return nil, fmt.Errorf("llama-server startup: %w", err)
+	}
+
+	return cmd, nil
+}
+
+// ─── Model Management API ─────────────────────────────────────────────
+
+func writeJSON(w http.ResponseWriter, code int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(v)
+}
+
+func handleModelList(w http.ResponseWriter, r *http.Request) {
+	models, err := modelManager.List()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if models == nil {
+		models = []model.ModelInfo{}
+	}
+	writeJSON(w, http.StatusOK, models)
+}
+
+func handleModelDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	var req struct {
+		Name     string `json:"name"`
+		URL      string `json:"url"`
+		Filename string `json:"filename"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		return
+	}
+	if req.Name == "" || req.URL == "" || req.Filename == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name, url, filename required"})
+		return
+	}
+	id, err := modelManager.StartDownload(req.Name, req.URL, req.Filename)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": id})
+}
+
+func handleModelDownloadStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id required"})
+		return
+	}
+	job := modelManager.Job(id)
+	if job == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func handleModelDownloads(w http.ResponseWriter, r *http.Request) {
+	jobs := modelManager.Jobs()
+	writeJSON(w, http.StatusOK, jobs)
+}
+
+func handleModelDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		return
+	}
+	if req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name required"})
+		return
+	}
+	if err := modelManager.Delete(req.Name); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // startOCRServer launches the EasyOCR Python HTTP server as a persistent
@@ -1811,6 +1956,8 @@ func main() {
 
 	loadLicense()
 
+	modelManager = model.NewManager(cfg.ModelDir)
+
 	// Start whisper-server (keeps model warm)
 	whisperCmd, err := startWhisperServer(cfg)
 	if err != nil {
@@ -1818,6 +1965,25 @@ func main() {
 	} else {
 		defer whisperCmd.Process.Kill()
 	}
+
+	// Start llama-server (local LLM, OpenAI-compatible API)
+	llamaCmd, err := startLlamaServer(cfg)
+	if err != nil {
+		fmt.Println("[main] llama-server:", err)
+	} else {
+		defer llamaCmd.Process.Kill()
+	}
+	modelManager.SetOnChange(func() {
+		if llamaCmd != nil {
+			llamaCmd.Process.Kill()
+		}
+		cmd, err := startLlamaServer(cfg)
+		if err != nil {
+			fmt.Println("[main] llama-server restart:", err)
+			return
+		}
+		llamaCmd = cmd
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/set-token", handleSetToken)
@@ -1827,6 +1993,11 @@ func main() {
 	mux.HandleFunc("/fetch-subtitles", handleFetchSubtitles)
 	mux.HandleFunc("/update", handleUpdate)
 	mux.HandleFunc("/update/status", handleUpdateStatus)
+	mux.HandleFunc("/model/list", handleModelList)
+	mux.HandleFunc("/model/download", handleModelDownload)
+	mux.HandleFunc("/model/download/status", handleModelDownloadStatus)
+	mux.HandleFunc("/model/downloads", handleModelDownloads)
+	mux.HandleFunc("/model/delete", handleModelDelete)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := map[string]interface{}{
@@ -1837,6 +2008,7 @@ func main() {
 			"whisperExe": cfg.WhisperExe,
 			"modelPath":  cfg.ModelPath,
 			"asrServer":  whisperServerURL,
+			"llamaServer": llamaServerURL,
 		}
 		json.NewEncoder(w).Encode(status)
 	})
@@ -1850,6 +2022,9 @@ func main() {
 		<-sigCh
 		if whisperCmd != nil {
 			whisperCmd.Process.Kill()
+		}
+		if llamaCmd != nil {
+			llamaCmd.Process.Kill()
 		}
 		os.Exit(0)
 	}()

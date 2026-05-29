@@ -183,19 +183,16 @@
 
   let pendingApiEngine = null; // which engine triggered the apiKeyModal
 
-  // ─── Ollama recommended models ────────────────────────────────────
+  // ─── Recommended GGUF models (downloaded via hf-mirror.com) ──────
   const RCMD_MODELS = [
-    { name: 'qwen2.5:0.5b',  size: '0.4GB', quality: '差',   speed: '极快', scenario: '纯实验' },
-    { name: 'qwen2.5:7b',    size: '4.7GB', quality: '良好', speed: '中等', scenario: '推荐日常使用 · 默认' },
-    { name: 'qwen2.5:14b',   size: '8.9GB', quality: '优秀', speed: '较慢', scenario: '高质量需求' },
-    { name: 'qwen2.5:32b',   size: '19GB',  quality: '极佳', speed: '慢',   scenario: '需高端显卡' },
-    { name: 'llama3.1:8b',   size: '4.9GB', quality: '良好', speed: '中等', scenario: '英文→中文不错' },
-    { name: 'gemma3:12b',    size: '8GB',   quality: '优秀', speed: '中等', scenario: '多语种翻译强' },
-    { name: 'llava:7b',      size: '4GB',   quality: '—',   speed: '—',   scenario: '右键识别图片文字' },
+    { name: 'qwen2.5-0.5b-instruct-q4_k_m',  size: '0.4GB', quality: '差',   speed: '极快', scenario: '纯实验', url: 'https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf' },
+    { name: 'qwen2.5-7b-instruct-q4_k_m',    size: '4.7GB', quality: '良好', speed: '中等', scenario: '推荐日常使用 · 默认', url: 'https://hf-mirror.com/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf' },
+    { name: 'qwen2.5-14b-instruct-q4_k_m',   size: '8.9GB', quality: '优秀', speed: '较慢', scenario: '高质量需求', url: 'https://hf-mirror.com/Qwen/Qwen2.5-14B-Instruct-GGUF/resolve/main/qwen2.5-14b-instruct-q4_k_m.gguf' },
+    { name: 'Llama-3.1-8B-Instruct-Q4_K_M',   size: '4.9GB', quality: '良好', speed: '中等', scenario: '英文→中文不错', url: 'https://hf-mirror.com/bartowski/Llama-3.1-8B-Instruct-GGUF/resolve/main/Llama-3.1-8B-Instruct-Q4_K_M.gguf' },
+    { name: 'gemma-3-12b-it-Q4_K_M',    size: '8GB',   quality: '优秀', speed: '中等', scenario: '多语种翻译强', url: 'https://hf-mirror.com/bartowski/gemma-3-12b-it-GGUF/resolve/main/gemma-3-12b-it-Q4_K_M.gguf' },
   ];
 
   let _ollamaTimer = null;
-  let _ollamaPostChecked = false;
   let pulling = false;
 
   function detectDeviceRAM() {
@@ -222,8 +219,8 @@
     sourceLang: 'auto',
     targetLang: 'zh-Hans',
     engine: 'microsoft',
-    ollamaUrl: 'http://localhost:11434',
-    ollamaModel: 'qwen2.5:7b',
+    ollamaUrl: 'http://127.0.0.1:23323',
+    ollamaModel: '',
     openaiUrl: 'https://api.deepseek.com/v1',
     openaiKey: '',
     openaiModel: 'deepseek-chat',
@@ -282,7 +279,7 @@
       targetLang: targetLangSelect.value,
       engine: translateEngineSelect.value,
       ollamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
-      ollamaModel: ollamaModelInput.value.trim() || 'qwen2.5:7b',
+      ollamaModel: ollamaModelInput.value.trim() || '',
       openaiUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
       openaiKey: apiKeyInput.value.trim(),
       openaiModel: apiModelInput.value.trim() || DEFAULT_SETTINGS.openaiModel,
@@ -362,11 +359,8 @@
     var cfg = ENGINE_CONFIG['ollama'];
     document.getElementById('ollamaModalTitle').innerHTML = (cfg ? cfg.svg : '') + ' ' + cfg.label + ' 本地翻译';
     ollamaModal.style.display = 'flex';
-    _ollamaPostChecked = false;
     checkOllamaStatus();
-    // Auto-refresh models every 3 seconds
     _ollamaTimer = setInterval(checkOllamaStatus, 3000);
-    // Check for ongoing background downloads
     checkOngoingDownloads();
   }
 
@@ -520,7 +514,7 @@
       pageTargetLang: targetLangSelect.value,
       pageEngine: engine,
       pageOllamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
-      pageOllamaModel: ollamaModelInput.value.trim() || 'qwen2.5:7b',
+      pageOllamaModel: ollamaModelInput.value.trim() || '',
       pageOpenAIUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
       pageOpenAIKey: apiKeyInput.value.trim(),
       pageOpenAIModel: apiModelInput.value.trim() || DEFAULT_SETTINGS.openaiModel,
@@ -532,7 +526,7 @@
         targetLang: targetLangSelect.value,
         engine: engine,
         ollamaUrl: ollamaUrlInput.value.trim() || 'http://localhost:11434',
-        ollamaModel: ollamaModelInput.value.trim() || 'qwen2.5:7b',
+        ollamaModel: ollamaModelInput.value.trim() || '',
         openaiUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
         openaiKey: apiKeyInput.value.trim(),
         openaiModel: apiModelInput.value.trim() || DEFAULT_SETTINGS.openaiModel,
@@ -809,49 +803,39 @@
 
   async function checkOllamaStatus() {
     if (!ollamaStatusDot || !ollamaStatusText || !ollamaGuideLink || !ollamaGuide) return;
-    const urlInput = document.getElementById('ollamaUrl');
-    const baseUrl = (urlInput?.value || 'http://localhost:11434').replace(/\/$/, '');
     try {
-      const resp = await fetch(baseUrl + '/api/tags', { signal: AbortSignal.timeout(3000) });
+      const resp = await fetch(LOCAL_BASE + '/model/list', { signal: AbortSignal.timeout(3000) });
       if (resp.ok) {
-        const data = await resp.json();
-        const allModels = (data.models || []).map(function (m) { return m.name; });
+        const models = await resp.json();
+        const modelNames = (Array.isArray(models) ? models : []).map(function (m) { return m.name; });
 
         // Populate model select
         var result = await chrome.storage.local.get('translationSettings');
         var settings = result.translationSettings || {};
-        var savedModel = settings.ollamaModel || 'qwen2.5:7b';
-        if (allModels.length === 0) {
-          ollamaModelInput.innerHTML = '<option value="">请先拉取模型</option>';
+        var savedModel = settings.ollamaModel || '';
+        if (modelNames.length === 0) {
+          ollamaModelInput.innerHTML = '<option value="">请先下载模型</option>';
         } else {
-          ollamaModelInput.innerHTML = allModels.map(function (n) {
-            var clean = n.replace(/:latest$/, '');
-            var selected = (clean === savedModel || n === savedModel) ? ' selected' : '';
+          ollamaModelInput.innerHTML = modelNames.map(function (n) {
+            var selected = n === savedModel ? ' selected' : '';
             return '<option value="' + n + '"' + selected + '>' + n + '</option>';
           }).join('');
-          // Auto-select first if saved model not found
-          if (!allModels.some(function (n) { return n.replace(/:latest$/, '') === savedModel || n === savedModel; })) {
-            ollamaModelInput.value = allModels[0];
+          if (!modelNames.includes(savedModel)) {
+            ollamaModelInput.value = modelNames[0];
           }
         }
 
         // Refresh recommended models
-        renderModelInstallList(allModels);
+        renderModelInstallList(modelNames);
 
         // Status bar
-        var showModels = allModels.slice(0, 3);
+        var showModels = modelNames.slice(0, 3);
         ollamaStatusDot.style.background = '#10b981';
         ollamaStatusText.textContent = showModels.length > 0
           ? '已连接 · ' + showModels.join(', ') : '已连接 · 无本地模型';
         if (ollamaStatusBar) ollamaStatusBar.style.background = 'rgba(209,250,229,0.6)';
-        ollamaGuideLink.style.display = 'inline';
+        ollamaGuideLink.style.display = 'none';
         ollamaGuide.style.display = 'none';
-
-        // Test POST endpoint once
-        if (!_ollamaPostChecked) {
-          _ollamaPostChecked = true;
-          testOllamaPost(baseUrl);
-        }
         return;
       }
     } catch (_) {}
@@ -859,29 +843,12 @@
     ollamaStatusDot.style.background = '#ef4444';
     ollamaStatusText.textContent = '未检测到本地服务';
     if (ollamaStatusBar) ollamaStatusBar.style.background = 'rgba(255,255,255,0.6)';
-    ollamaGuideLink.style.display = 'inline';
-  }
-
-  async function testOllamaPost(baseUrl) {
-    try {
-      var resp = await fetch(baseUrl + '/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: '', prompt: '', stream: false }),
-        signal: AbortSignal.timeout(3000)
-      });
-      if (resp.status === 403) {
-        ollamaStatusDot.style.background = '#f59e0b';
-        ollamaStatusText.textContent = '⚠️ POST 被拒 — 请设置 OLLAMA_ORIGINS=* 后重启 Ollama';
-        if (ollamaStatusBar) ollamaStatusBar.style.background = 'rgba(254,243,199,0.8)';
-        ollamaGuideLink.style.display = 'inline';
-      }
-    } catch (_) {}
+    ollamaGuideLink.style.display = 'none';
   }
 
   function renderModelInstallList(installed) {
     if (!ollamaModelInstall || !ollamaModelCheckboxes) return;
-    var installedSet = new Set((installed || []).map(function (m) { return m.replace(/:latest$/, ''); }));
+    var installedSet = new Set((installed || []));
     var hasMissing = RCMD_MODELS.some(function (m) { return !installedSet.has(m.name); });
     ollamaModelInstall.style.display = hasMissing ? 'block' : 'none';
     if (!hasMissing) return;
@@ -952,13 +919,18 @@
 
   async function deleteModel(name) {
     if (!confirm('确认删除模型 ' + name + ' ？\n\n删除后需重新拉取才能使用。')) return;
-    var urlInput = document.getElementById('ollamaUrl');
-    var baseUrl = (urlInput?.value || 'http://localhost:11434').replace(/\/$/, '');
     try {
       if (pullProgressBar) pullProgressBar.style.display = 'none';
       if (pullProgress) { pullProgress.style.display = 'block'; pullProgress.textContent = '正在删除 ' + name + ' ...'; }
-      var resp = await chrome.runtime.sendMessage({ type: 'OLLAMA_DELETE', baseUrl: baseUrl, model: name });
-      if (!resp?.success) throw new Error(resp?.error || '未知错误');
+      var resp = await fetch(LOCAL_BASE + '/model/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name })
+      });
+      if (!resp.ok) {
+        var err = await resp.json().catch(function () { return {}; });
+        throw new Error(err.error || 'HTTP ' + resp.status);
+      }
       if (pullProgress) pullProgress.textContent = name + ' 已删除';
       await checkOllamaStatus();
       setTimeout(function () { if (pullProgress) pullProgress.style.display = 'none'; }, 2000);
@@ -974,8 +946,6 @@
 
   async function pullSelectedModels() {
     if (pulling) return;
-    var urlInput = document.getElementById('ollamaUrl');
-    var baseUrl = (urlInput?.value || 'http://localhost:11434').replace(/\/$/, '');
     var names = [];
     document.querySelectorAll('#ollamaModelCheckboxes input[type=checkbox]:checked:not([disabled])').forEach(function (cb) {
       names.push(cb.value);
@@ -983,29 +953,34 @@
     if (!names.length) return;
     pulling = true;
     _pullNames = names.slice();
-    if (btnPullModels) { btnPullModels.disabled = true; btnPullModels.textContent = '拉取中...'; }
-    if (pullProgress) { pullProgress.style.display = 'block'; pullProgress.textContent = '已提交 ' + names.length + ' 个下载任务到后台...'; }
+    if (btnPullModels) { btnPullModels.disabled = true; btnPullModels.textContent = '下载中...'; }
+    if (pullProgress) { pullProgress.style.display = 'block'; pullProgress.textContent = '已提交 ' + names.length + ' 个下载任务...'; }
     if (pullProgressBar) { pullProgressBar.style.display = 'block'; pullProgressFill.style.width = '0%'; }
 
-    // Send all pull requests to background SW (runs even if popup closes)
+    // Start download for each selected model via Go backend
     for (var i = 0; i < names.length; i++) {
-      chrome.runtime.sendMessage({ type: 'OLLAMA_PULL_START', baseUrl: baseUrl, model: names[i] }, function () {});
+      var mdl = RCMD_MODELS.find(function (m) { return m.name === names[i]; });
+      if (!mdl || !mdl.url) continue;
+      fetch(LOCAL_BASE + '/model/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: mdl.name, url: mdl.url, filename: mdl.name + '.gguf' })
+      }).catch(function () {});
     }
 
-    // Start polling for progress
     startPullPolling();
   }
 
   async function checkOngoingDownloads() {
     try {
-      var resp = await chrome.runtime.sendMessage({ type: 'OLLAMA_PULL_PROGRESS' });
-      var downloads = resp?.downloads || {};
-      var pullingNames = Object.keys(downloads).filter(function (n) { return downloads[n].status === 'pulling'; });
+      var resp = await fetch(LOCAL_BASE + '/model/downloads', { signal: AbortSignal.timeout(3000) });
+      if (!resp.ok) return;
+      var downloads = await resp.json();
+      var pullingNames = Object.keys(downloads).filter(function (n) { return downloads[n].status === 'downloading'; });
       if (pullingNames.length > 0) {
-        // Resume UI state for ongoing downloads
         pulling = true;
         _pullNames = pullingNames;
-        if (btnPullModels) { btnPullModels.disabled = true; btnPullModels.textContent = '拉取中...'; }
+        if (btnPullModels) { btnPullModels.disabled = true; btnPullModels.textContent = '下载中...'; }
         if (pullProgress) { pullProgress.style.display = 'block'; }
         if (pullProgressBar) { pullProgressBar.style.display = 'block'; }
         startPullPolling();
@@ -1020,13 +995,12 @@
 
   async function pollPullProgress() {
     try {
-      var resp = await chrome.runtime.sendMessage({ type: 'OLLAMA_PULL_PROGRESS' });
-      var downloads = resp?.downloads || {};
+      var resp = await fetch(LOCAL_BASE + '/model/downloads', { signal: AbortSignal.timeout(3000) });
+      if (!resp.ok) return;
+      var downloads = await resp.json();
 
-      // Check for ongoing downloads from _pullNames, or any downloads in progress
       var allNames = Object.keys(downloads);
       if (allNames.length === 0) {
-        // Check if _pullNames were cleaned up; if all models now installed, refresh
         if (_pullNames.length > 0) {
           stopPullPolling();
           await checkOllamaStatus();
@@ -1034,12 +1008,10 @@
         return;
       }
 
-      // Show progress for pulling models
-      var pullingNames = allNames.filter(function (n) { return downloads[n].status === 'pulling'; });
-      var doneNames = allNames.filter(function (n) { return downloads[n].status === 'success'; });
-      var errorNames = allNames.filter(function (n) { return downloads[n].status === 'error'; });
+      var pullingNames = allNames.filter(function (n) { return downloads[n].status === 'downloading'; });
+      var doneNames = allNames.filter(function (n) { return downloads[n].status === 'completed'; });
+      var errorNames = allNames.filter(function (n) { return downloads[n].status === 'failed'; });
 
-      // Find the first pulling model to show progress bar for
       var active = pullingNames.length > 0 ? pullingNames[0] : (doneNames.length > 0 ? doneNames[doneNames.length - 1] : null);
       if (active && downloads[active]) {
         var d = downloads[active];
@@ -1048,15 +1020,9 @@
         if (pullProgressBar) pullProgressBar.style.display = 'block';
       }
 
-      // All done?
       if (pullingNames.length === 0) {
         if (errorNames.length > 0 && pullProgress) {
-          var has403 = errorNames.some(function (n) { return downloads[n].error && downloads[n].error.indexOf('403') !== -1; });
-          if (has403) {
-            pullProgress.innerHTML = '<span style="color:#dc2626;">⚠️ 403 拒绝访问 — 请设置环境变量 OLLAMA_ORIGINS=* 后重启 Ollama</span>';
-          } else {
-            pullProgress.innerHTML = '<span style="color:#dc2626;">⚠️ 部分模型拉取失败：' + errorNames.join(', ') + '</span>';
-          }
+          pullProgress.innerHTML = '<span style="color:#dc2626;">⚠️ 部分模型下载失败：' + errorNames.join(', ') + '</span>';
         }
         stopPullPolling();
         await checkOllamaStatus();
@@ -1068,10 +1034,9 @@
     if (_pullTimer) { clearInterval(_pullTimer); _pullTimer = null; }
     pulling = false;
     _pullNames = [];
-    if (btnPullModels) { btnPullModels.disabled = false; btnPullModels.textContent = '拉取选中模型'; }
+    if (btnPullModels) { btnPullModels.disabled = false; btnPullModels.textContent = '下载选中模型'; }
     if (pullProgressBar) pullProgressBar.style.display = 'none';
     if (pullProgress && !pulling) {
-      // Keep text visible briefly then hide
       setTimeout(function () { if (pullProgress && !pulling) pullProgress.style.display = 'none'; }, 3000);
     }
   }

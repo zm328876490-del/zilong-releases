@@ -57,8 +57,8 @@
   let targetLang = 'zh-Hans';
   let engine = 'microsoft';
   let sourceLang = 'auto';
-  let ollamaUrl = 'http://localhost:11434';
-  let ollamaModel = 'qwen2.5:7b';
+  let ollamaUrl = 'http://127.0.0.1:23323';
+  let ollamaModel = '';
   let openaiUrl = 'https://api.deepseek.com/v1';
   let openaiKey = '';
   let openaiModel = 'deepseek-chat';

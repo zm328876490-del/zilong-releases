@@ -38,6 +38,10 @@ copy /y SDL2.dll installer\embedded\SDL2.dll >nul
 copy /y ggml.dll installer\embedded\ggml.dll >nul
 copy /y ggml-base.dll installer\embedded\ggml-base.dll >nul
 copy /y ggml-cpu.dll installer\embedded\ggml-cpu.dll >nul
+copy /y llama-server.exe installer\embedded\llama-server.exe >nul
+copy /y llama.dll installer\embedded\llama.dll >nul
+copy /y llama-common.dll installer\embedded\llama-common.dll >nul
+copy /y llama-server-impl.dll installer\embedded\llama-server-impl.dll >nul
 copy /y models\ggml-tiny.bin installer\embedded\models\ggml-tiny.bin >nul
 copy /y models\ggml-vad.bin installer\embedded\models\ggml-vad.bin >nul
 xcopy /y /e scripts\* installer\embedded\scripts\ >nul 2>&1

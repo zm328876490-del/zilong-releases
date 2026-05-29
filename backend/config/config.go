@@ -7,22 +7,29 @@ import (
 )
 
 type Config struct {
-	Port         string
-	WhisperExe   string // path to whisper-cli.exe (whisper-server.exe is derived from this)
-	ModelPath    string
-	ModelDir     string
-	VadModelPath string // path to ggml-vad.bin (Silero VAD model for whisper)
-	OllamaUrl    string
-	OllamaModel  string
-	OpenAIUrl    string
-	OpenAIKey    string
-	OpenAIModel  string
-	DeepLKey     string
+	Port           string
+	WhisperExe     string // path to whisper-cli.exe (whisper-server.exe is derived from this)
+	ModelPath      string
+	ModelDir       string
+	VadModelPath   string // path to ggml-vad.bin (Silero VAD model for whisper)
+	LlamaServerExe string // path to llama-server.exe (bundled with installer)
+	LlamaModel     string // selected gguf model file name (without .gguf)
+	OllamaUrl      string
+	OllamaModel    string
+	OpenAIUrl      string
+	OpenAIKey      string
+	OpenAIModel    string
+	DeepLKey       string
 }
 
 // WhisperPort returns the port for whisper-server (different from our WS port).
 func (c *Config) WhisperPort() string {
 	return "23321"
+}
+
+// LlamaPort returns the port for llama-server.
+func (c *Config) LlamaPort() string {
+	return "23323"
 }
 
 func Load() *Config {
@@ -53,6 +60,9 @@ func Load() *Config {
 	}
 	if k := os.Getenv("DEEPL_KEY"); k != "" {
 		cfg.DeepLKey = k
+	}
+	if m := os.Getenv("LLAMA_MODEL"); m != "" {
+		cfg.LlamaModel = m
 	}
 
 	exeName := "whisper-cli"
@@ -104,6 +114,25 @@ func Load() *Config {
 	for _, c := range vadCandidates {
 		if _, err := os.Stat(c); err == nil {
 			cfg.VadModelPath = c
+			break
+		}
+	}
+
+	// llama-server
+	llamaExe := "llama-server.exe"
+	if runtime.GOOS != "windows" {
+		llamaExe = "llama-server"
+	}
+	llamaCandidates := []string{
+		filepath.Join(".", llamaExe),
+		filepath.Join("..", llamaExe),
+	}
+	if envLlama := os.Getenv("LLAMA_EXE"); envLlama != "" {
+		llamaCandidates = append([]string{envLlama}, llamaCandidates...)
+	}
+	for _, c := range llamaCandidates {
+		if _, err := os.Stat(c); err == nil {
+			cfg.LlamaServerExe = c
 			break
 		}
 	}

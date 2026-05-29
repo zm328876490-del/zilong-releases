@@ -307,22 +307,20 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
     const text = (message.text || '').trim();
     if (!text) { sendResponse({ ok: true, translation: '' }); return; }
 
-    const url = (message.ollamaUrl || 'http://localhost:11434').replace(/\/$/, '');
-    const model = message.ollamaModel || 'qwen2.5:7b';
+    const url = (message.ollamaUrl || 'http://127.0.0.1:23323').replace(/\/$/, '');
     const toName = ollamaLangName(message.to || 'zh-Hans');
 
     const prompt =
       'Translate the following text to ' + toName +
       '. Return ONLY the translation, no explanations, no markdown, no quotes.\n\n' + text;
 
-    const resp = await fetch(url + '/api/generate', {
+    const resp = await fetch(url + '/completion', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: model,
         prompt: prompt,
-        stream: false,
-        options: { temperature: 0, num_predict: 256 },
+        temperature: 0,
+        n_predict: 256,
       }),
     });
 
@@ -332,7 +330,7 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
     }
 
     const data = await resp.json();
-    const translation = (data.response || '').trim();
+    const translation = (data.content || '').trim();
     // Strip common artifacts: quotes, bullet points, leading numbers
     const cleaned = translation
       .replace(/^["'「『]\s*|\s*["'」』]$/g, '')
