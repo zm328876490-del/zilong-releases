@@ -260,7 +260,7 @@ async function handlePageOllamaTranslate(message, sendResponse) {
           { role: 'user', content: payloadJSON },
         ],
         stream: false,
-        options: { temperature: 0 },
+        temperature: 0,
       }),
     });
 
@@ -308,19 +308,23 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
     if (!text) { sendResponse({ ok: true, translation: '' }); return; }
 
     const url = (message.ollamaUrl || 'http://127.0.0.1:23323').replace(/\/$/, '');
+    const model = message.ollamaModel || '';
     const toName = ollamaLangName(message.to || 'zh-Hans');
 
-    const prompt =
-      'Translate the following text to ' + toName +
-      '. Return ONLY the translation, no explanations, no markdown, no quotes.\n\n' + text;
+    const systemPrompt =
+      '你是翻译专家。将用户输入的文本翻译为' + toName +
+      '。只输出译文，一行，不要解释、不要引号、不要多余文字。';
 
-    const resp = await fetch(url + '/completion', {
+    const resp = await fetch(url + '/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        prompt: prompt,
-        temperature: 0,
-        n_predict: 256,
+        model: model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: text },
+        ],
+        temperature: 0.1,
       }),
     });
 
@@ -330,13 +334,8 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
     }
 
     const data = await resp.json();
-    const translation = (data.content || '').trim();
-    // Strip common artifacts: quotes, bullet points, leading numbers
-    const cleaned = translation
-      .replace(/^["'「『]\s*|\s*["'」』]$/g, '')
-      .replace(/^\d+[\.\)、]\s*/, '')
-      .trim();
-    sendResponse({ ok: true, translation: cleaned });
+    const translation = (data.choices && data.choices[0] && data.choices[0].message.content || '').trim();
+    sendResponse({ ok: true, translation: translation });
   } catch (e) {
     sendResponse({ ok: false, translation: '' });
   }
