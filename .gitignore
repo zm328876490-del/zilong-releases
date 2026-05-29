@@ -3,3 +3,11 @@ release/
 .env
 backend/*.exe
 backend/*.dll
+backend/*.enc
+backend/installer/installer.exe
+backend/installer/embedded/
+backend/models/ggml-tiny.bin
+backend/models/ggml-vad.bin
+auth-server/installer.exe
+auth-server/extension.zip
+auth-server/dist.zip
