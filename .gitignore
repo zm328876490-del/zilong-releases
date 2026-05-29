@@ -4,6 +4,7 @@ release/
 backend/*.exe
 backend/*.dll
 backend/*.enc
+backend/**/*.syso
 backend/installer/installer.exe
 backend/installer/embedded/
 backend/models/*.gguf
