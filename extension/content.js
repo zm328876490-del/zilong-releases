@@ -1244,7 +1244,25 @@ function generateSessionId() {
           audioContext = new AudioContext({ sampleRate: 16000 });
         }
         if (audioContext.state === 'suspended') {
-          audioContext.resume().catch(function () {});
+          audioContext.resume().then(function () {
+            if (audioContext && audioContext.state === 'running') {
+              sendStatus('info', '音频已就绪');
+            }
+          }).catch(function () {});
+          // Chrome autoplay policy: AudioContext needs a user gesture to start.
+          // Show a hint if it stays suspended, and wire a one-shot click handler.
+          if (audioContext.state === 'suspended') {
+            sendStatus('waiting_audio', '点击页面任意位置激活字幕');
+            var unlockAudio = function () {
+              if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume().catch(function () {});
+              }
+              document.removeEventListener('click', unlockAudio, true);
+              document.removeEventListener('keydown', unlockAudio, true);
+            };
+            document.addEventListener('click', unlockAudio, true);
+            document.addEventListener('keydown', unlockAudio, true);
+          }
         }
 
         if (processorNode) {
