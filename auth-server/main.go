@@ -108,7 +108,11 @@ func main() {
 		h := sha256.Sum256(data)
 		vc.InstallHash = hex.EncodeToString(h[:])
 	}
-	log.Printf("version cache: %s sha256=%s", vc.Version, vc.InstallHash[:16]+"...")
+	hashDisplay := "(none)"
+	if len(vc.InstallHash) >= 16 {
+		hashDisplay = vc.InstallHash[:16] + "..."
+	}
+	log.Printf("version cache: %s sha256=%s", vc.Version, hashDisplay)
 
 	mailer := mail.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword)
 	h := handler.New(cfg, db, mailer)
