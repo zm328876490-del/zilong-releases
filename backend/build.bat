@@ -92,7 +92,7 @@ echo       完成
 :: Step 8: Package extension as zip
 echo.
 echo [8/8] 打包浏览器扩展...
-powershell -Command "Compress-Archive -Path '%CD%\..\extension\*' -DestinationPath '%CD%\..\auth-server\extension-v%VER%.zip' -Force"
+powershell -Command "Compress-Archive -Path '%CD%\..\extension\*' -DestinationPath '%CD%\..\auth-server\extension.zip' -Force"
 if %errorlevel% neq 0 ( echo ERROR: 打包扩展失败！ & pause & exit /b 1 )
 echo       完成
 
@@ -105,7 +105,7 @@ del uninstall.exe
 echo.
 echo ========================================
 echo   产物: auth-server\installer.exe
-echo   产物: auth-server\extension-v%VER%.zip
+echo   产物: auth-server\extension.zip
 echo   上传 auth-server\ 整个目录到服务器
 echo   参考 auth-server\linux\deploy.txt
 echo ========================================
