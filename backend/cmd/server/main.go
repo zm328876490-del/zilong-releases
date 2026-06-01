@@ -1472,7 +1472,7 @@ func startWhisperServer(cfg *config.Config) (*exec.Cmd, error) {
 	}
 
 	cmd := exec.Command(serverExe, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 
@@ -1575,27 +1575,12 @@ func startLlamaServer(cfg *config.Config) (*exec.Cmd, error) {
 	}
 
 	llamaPort := cfg.LlamaPort()
-	addr := fmt.Sprintf("127.0.0.1:%s", llamaPort)
-	llamaURL := fmt.Sprintf("http://%s", addr)
+	llamaURL := fmt.Sprintf("http://127.0.0.1:%s", llamaPort)
 
-	// ── Pre-flight: kill any stale process from a previous run ──────
+	// Kill any stale process from a previous run.
 	killPIDFile("llama-server")
 
-	// If port is still occupied, check whether it is a healthy
-	// llama-server we can reuse (e.g. started manually or from an
-	// older instance we couldn't kill).
-	if !portIsFree(addr) {
-		if resp, err := httpGet(llamaURL + "/health"); err == nil {
-			resp.Body.Close()
-			llamaServerURL = llamaURL
-			fmt.Println("[main] llama-server: reusing existing instance on", addr)
-			return nil, nil // caller must handle nil cmd
-		}
-		// Port busy but not a healthy llama-server — bail.
-		return nil, fmt.Errorf("port %s is in use by another process", llamaPort)
-	}
-
-	// ── Build args — try GPU first, fall back to CPU ───────────────
+	// Build args — try GPU first, fall back to CPU.
 	baseArgs := []string{
 		"-m", modelPath,
 		"--port", llamaPort,
@@ -1611,7 +1596,7 @@ func startLlamaServer(cfg *config.Config) (*exec.Cmd, error) {
 
 	startAndWait := func(args []string, timeout time.Duration) error {
 		cmd = exec.Command(cfg.LlamaServerExe, args...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 		cmd.Stderr = os.Stderr
 		cmd.Stdout = os.Stdout
 		if err := cmd.Start(); err != nil {
@@ -1633,8 +1618,6 @@ func startLlamaServer(cfg *config.Config) (*exec.Cmd, error) {
 	}
 
 	llamaServerURL = llamaURL
-
-	// Persist PID so the next restart can kill this process.
 	savePIDFile("llama-server", cmd.Process.Pid)
 	fmt.Printf("[main] llama-server: ready on %s (PID %d)\n", llamaURL, cmd.Process.Pid)
 
@@ -1741,7 +1724,7 @@ func startOCRServer() (*exec.Cmd, error) {
 	scriptPath := filepath.Join(".", "scripts", "ocr_server.py")
 
 	cmd := exec.Command(python, scriptPath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 	cmd.Stderr = os.Stderr
 
 	stdout, err := cmd.StdoutPipe()
@@ -1957,7 +1940,7 @@ func runOCR(imagePath string) ([]ocrWord, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, python, scriptPath, imagePath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -2099,6 +2082,28 @@ func main() {
 		}
 		llamaCmd = cmd
 	})
+
+	// Auto-start watcher: retry every 30s if model exists but server isn't running.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if llamaServerURL != "" {
+				return
+			}
+			models, _ := modelManager.List()
+			if len(models) == 0 {
+				continue
+			}
+			cmd, err := startLlamaServer(cfg)
+			if err != nil {
+				fmt.Println("[main] llama-server auto-start:", err)
+				continue
+			}
+			llamaCmd = cmd
+			fmt.Println("[main] llama-server: auto-started after model became available")
+		}
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/set-token", handleSetToken)

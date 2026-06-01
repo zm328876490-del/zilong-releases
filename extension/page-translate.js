@@ -25,9 +25,7 @@
     'HR', 'WBR', 'HEAD', 'TITLE',
   ]);
 
-  const SKIP_ROLES = new Set([
-    'presentation', 'none',
-  ]);
+  const SKIP_ROLES = new Set([]);
 
   const CONCURRENCY = 4;
   const BATCH_SIZE = 30;
