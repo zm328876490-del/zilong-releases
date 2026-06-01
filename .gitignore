@@ -13,5 +13,5 @@ backend/models/.cache/
 backend/*.pid
 backend/*~
 auth-server/installer.exe
-auth-server/extension.zip
+auth-server/extension-v*.zip
 auth-server/dist.zip
