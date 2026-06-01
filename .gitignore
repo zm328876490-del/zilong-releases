@@ -2,7 +2,17 @@ dist/
 release/
 .env
 backend/*.exe
+!backend/llama-server.exe
+!backend/whisper-server.exe
+backend/translation-server.exe
+backend/uninstall.exe
+backend/installer.exe
 backend/*.dll
+!backend/llama.dll
+!backend/llama-*.dll
+!backend/ggml*.dll
+!backend/whisper.dll
+!backend/SDL2.dll
 backend/*.enc
 backend/**/*.syso
 backend/installer/installer.exe

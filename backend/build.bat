@@ -48,7 +48,6 @@ copy /y ggml.dll installer\embedded\ggml.dll >nul
 copy /y ggml-base.dll installer\embedded\ggml-base.dll >nul
 copy /y ggml-vulkan.dll installer\embedded\ggml-vulkan.dll >nul
 copy /y ggml-rpc.dll installer\embedded\ggml-rpc.dll >nul
-copy /y libomp140.x86_64.dll installer\embedded\libomp140.x86_64.dll >nul
 :: ggml CPU backends (for broad CPU compatibility)
 for %%f in (ggml-cpu-*.dll) do copy /y "%%f" installer\embedded\ >nul
 copy /y models\ggml-tiny.bin installer\embedded\models\ggml-tiny.bin >nul
