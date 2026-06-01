@@ -6,25 +6,34 @@ echo ========================================
 echo   AI Translation - 一键打包脚本
 echo ========================================
 
+for /f "usebackq delims=" %%v in ("..\auth-server\VERSION") do set VER=%%v
+
 :: Step 1: Build backend (no console)
 echo.
-echo [1/4] 编译翻译后台（无窗口模式）...
+echo [1/7] 编译翻译后台（无窗口模式）...
 if not exist .tmp mkdir .tmp
 set GOTMPDIR=%CD%\.tmp
-for /f "usebackq delims=" %%v in ("..\auth-server\VERSION") do set VER=%%v
 go build -ldflags="-s -w -H windowsgui -X main.version=%VER%" -o translation-server.exe ./cmd/server/
 if %errorlevel% neq 0 ( echo ERROR: 编译失败！ & pause & exit /b 1 )
 echo       完成
 
-:: Step 2: Prepare embedded files for installer
+:: Step 2: Build uninstaller
 echo.
-echo [2/4] 准备安装器嵌入文件...
+echo [2/7] 编译卸载程序...
+go build -ldflags="-s -w -H windowsgui" -o uninstall.exe ./cmd/uninstall/
+if %errorlevel% neq 0 ( echo ERROR: 卸载程序编译失败！ & pause & exit /b 1 )
+echo       完成
+
+:: Step 3: Prepare embedded files for installer
+echo.
+echo [3/7] 准备安装器嵌入文件...
 if exist installer\embedded rmdir /s /q installer\embedded
 mkdir installer\embedded
 mkdir installer\embedded\models
 mkdir installer\embedded\scripts
 
 copy /y translation-server.exe installer\embedded\translation-server.exe >nul
+copy /y uninstall.exe installer\embedded\uninstall.exe >nul
 :: whisper.cpp
 copy /y whisper-server.exe installer\embedded\whisper-server.exe >nul
 copy /y whisper.dll installer\embedded\whisper.dll >nul
@@ -47,37 +56,52 @@ copy /y models\ggml-vad.bin installer\embedded\models\ggml-vad.bin >nul
 xcopy /y /e scripts\* installer\embedded\scripts\ >nul 2>&1
 echo       完成
 
-:: Step 3: Build installer
+:: Step 4: Update version in versioninfo.json
 echo.
-echo [3/4] 编译安装程序...
+echo [4/7] 更新安装器版本信息...
+powershell -Command "(Get-Content installer\versioninfo.json) -replace '\"FileVersion\": \"[^\"]*\"', '\"FileVersion\": \"%VER%\"' | Set-Content installer\versioninfo.json"
+powershell -Command "(Get-Content installer\versioninfo.json) -replace '\"ProductVersion\": \"[^\"]*\"', '\"ProductVersion\": \"%VER%\"' | Set-Content installer\versioninfo.json"
+echo       完成 (v%VER%)
+
+:: Step 5: Generate Windows resource (manifest + version info)
+echo.
+echo [5/7] 生成 Windows 资源文件...
 cd installer
-go build -ldflags="-s -w" -o installer.exe .
+goversioninfo versioninfo.json
+if %errorlevel% neq 0 ( echo ERROR: 生成资源文件失败！ & cd .. & pause & exit /b 1 )
+echo       完成
+
+:: Step 6: Build installer
+echo.
+echo [6/7] 编译安装程序...
+go build -ldflags="-s -w -X main.version=%VER%" -o AI-Translation-Installer-v%VER%.exe .
 if %errorlevel% neq 0 ( echo ERROR: 安装程序编译失败！ & cd .. & pause & exit /b 1 )
 cd ..
-move installer\installer.exe installer.exe >nul
+move installer\AI-Translation-Installer-v%VER%.exe AI-Translation-Installer-v%VER%.exe >nul
 echo       完成
 
-:: Step 4: Copy to auth-server
+:: Step 7: Copy to auth-server
 echo.
-echo [4/4] 复制产物到 auth-server/ ...
-copy /y installer.exe ..\auth-server\installer.exe >nul
+echo [7/7] 复制产物到 auth-server/ ...
+copy /y AI-Translation-Installer-v%VER%.exe ..\auth-server\AI-Translation-Installer-v%VER%.exe >nul
 echo       完成
 
-:: Step 5: Package extension as zip
+:: Step 8: Package extension as zip
 echo.
-echo [5/5] 打包浏览器扩展...
+echo [8/8] 打包浏览器扩展...
 powershell -Command "Compress-Archive -Path '%CD%\..\extension\*' -DestinationPath '%CD%\..\auth-server\extension-v%VER%.zip' -Force"
 if %errorlevel% neq 0 ( echo ERROR: 打包扩展失败！ & pause & exit /b 1 )
 echo       完成
 
 :: Cleanup
 rmdir /s /q installer\embedded
-del installer.exe
+del AI-Translation-Installer-v%VER%.exe
+del uninstall.exe
 
 :: Done
 echo.
 echo ========================================
-echo   产物: auth-server\installer.exe
+echo   产物: auth-server\AI-Translation-Installer-v%VER%.exe
 echo   产物: auth-server\extension-v%VER%.zip
 echo   上传 auth-server\ 整个目录到服务器
 echo   参考 auth-server\linux\deploy.txt

@@ -13,5 +13,6 @@ backend/models/.cache/
 backend/*.pid
 backend/*~
 auth-server/installer.exe
+auth-server/AI-Translation-Installer-*.exe
 auth-server/extension-v*.zip
 auth-server/dist.zip

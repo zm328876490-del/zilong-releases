@@ -2060,6 +2060,27 @@ func main() {
 	} else {
 		defer whisperCmd.Process.Kill()
 	}
+		// Health-check whisper-server every 10s, restart if it crashes
+		go func() {
+			for {
+				time.Sleep(10 * time.Second)
+				if whisperServerURL == "" {
+					continue
+				}
+				resp, err := httpGet(whisperServerURL + "/inference")
+				if err == nil {
+					resp.Body.Close()
+					continue
+				}
+				fmt.Println("[main] whisper-server: lost, restarting...")
+				cmd, err := startWhisperServer(cfg)
+				if err != nil {
+					fmt.Println("[main] whisper-server restart:", err)
+					continue
+				}
+				whisperCmd = cmd
+			}
+		}()
 
 	// Start llama-server (local LLM, OpenAI-compatible API)
 	llamaCmd, err := startLlamaServer(cfg)
