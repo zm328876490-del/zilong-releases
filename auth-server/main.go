@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -18,8 +16,6 @@ import (
 	"ai-translation/auth-server/handler"
 	"ai-translation/auth-server/mail"
 	"ai-translation/auth-server/model"
-
-	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -50,35 +46,9 @@ func cors(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func validateToken(r *http.Request, cfg *config.Config, db *model.DB) (string, jwt.MapClaims, bool) {
-	tokenStr := r.Header.Get("Authorization")
-	if tokenStr == "" {
-		return "", nil, false
-	}
-	tokenStr = strings.TrimPrefix(tokenStr, "Bearer ")
-	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
-		return []byte(cfg.JWTSecret), nil
-	})
-	if err != nil || !token.Valid {
-		return "", nil, false
-	}
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return "", nil, false
-	}
-	email, _ := claims["email"].(string)
-	tokenVer, _ := claims["ver"].(float64)
-	user, _ := db.FindByEmail(email)
-	if user == nil || int(tokenVer) != user.TokenVersion {
-		return "", nil, false
-	}
-	return tokenStr, claims, true
-}
-
 // Computed at startup, served from memory on every /api/version call.
 type versionCache struct {
-	Version     string `json:"version"`
-	InstallHash string `json:"installHash"`
+	Version string `json:"version"`
 }
 
 func main() {
@@ -95,7 +65,7 @@ func main() {
 	}
 	log.Println("数据库就绪")
 
-	// Cache version + hash once at startup
+	// Cache version at startup
 	ver := strings.TrimSpace(string(func() []byte {
 		d, _ := os.ReadFile("VERSION")
 		return d
@@ -104,15 +74,7 @@ func main() {
 		ver = "1.0.0"
 	}
 	vc := versionCache{Version: ver}
-	if data, err := os.ReadFile("installer.exe"); err == nil {
-		h := sha256.Sum256(data)
-		vc.InstallHash = hex.EncodeToString(h[:])
-	}
-	hashDisplay := "(none)"
-	if len(vc.InstallHash) >= 16 {
-		hashDisplay = vc.InstallHash[:16] + "..."
-	}
-	log.Printf("version cache: %s sha256=%s", vc.Version, hashDisplay)
+	log.Printf("version cache: %s", vc.Version)
 
 	mailer := mail.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword)
 	h := handler.New(cfg, db, mailer)
@@ -122,16 +84,6 @@ func main() {
 	mux.HandleFunc("/api/auth/login", cors(h.Login))
 	mux.HandleFunc("/api/auth/me", cors(h.Me))
 	mux.HandleFunc("/api/admin/set-plan", cors(h.SetPlan))
-	mux.HandleFunc("/api/download/installer", func(w http.ResponseWriter, r *http.Request) {
-		_, _, ok := validateToken(r, cfg, db)
-		if !ok {
-			http.Error(w, `{"error":"未登录或token无效"}`, 401)
-			return
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", "attachment; filename=AI-Translation-Installer.exe")
-		http.ServeFile(w, r, "installer.exe")
-	})
 	mux.HandleFunc("/api/version", cors(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "public, max-age=300")

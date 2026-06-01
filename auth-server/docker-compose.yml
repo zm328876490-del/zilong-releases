@@ -13,7 +13,6 @@ services:
       MYSQL_DSN: root:gjdlmysql@2026@tcp(mysql:3306)/auth_server?charset=utf8mb4&parseTime=true&loc=UTC
       PORT: "14532"
     volumes:
-      - ./installer.exe:/app/installer.exe:ro
       - ./VERSION:/app/VERSION:ro
     networks:
       - app-net
