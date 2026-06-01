@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"golang.org/x/sys/windows/registry"
 )
@@ -21,6 +23,23 @@ func main() {
 	exec.Command("taskkill", "/f", "/im", "whisper-server.exe").Run()
 	exec.Command("taskkill", "/f", "/im", "llama-server.exe").Run()
 	exec.Command("taskkill", "/f", "/im", "python.exe").Run()
+	time.Sleep(1000 * time.Millisecond)
+	procs := []string{"translation-server.exe", "whisper-server.exe", "llama-server.exe"}
+	for i := 0; i < 50; i++ {
+		allGone := true
+		for _, name := range procs {
+			out, _ := exec.Command("tasklist", "/fi", "imagename eq "+name, "/fo", "csv").Output()
+			if strings.Contains(string(out), name) {
+				allGone = false
+				break
+			}
+		}
+		if allGone {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
 	fmt.Println(" 完成")
 
 	// Step 2: Remove auto-start registry

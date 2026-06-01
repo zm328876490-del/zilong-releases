@@ -348,13 +348,23 @@ func main() {
 	exec.Command("taskkill", "/f", "/im", "python.exe").Run()
 	time.Sleep(1000 * time.Millisecond)
 
+	// Wait for all related processes to fully exit (max 10s)
+	procs := []string{serviceExe, "whisper-server.exe", "llama-server.exe"}
 	for i := 0; i < 50; i++ {
-		out, _ := exec.Command("tasklist", "/fi", "imagename eq "+serviceExe, "/fo", "csv").Output()
-		if !strings.Contains(string(out), serviceExe) {
+		allGone := true
+		for _, name := range procs {
+			out, _ := exec.Command("tasklist", "/fi", "imagename eq "+name, "/fo", "csv").Output()
+			if strings.Contains(string(out), name) {
+				allGone = false
+				break
+			}
+		}
+		if allGone {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	time.Sleep(500 * time.Millisecond) // extra grace for file handles
 
 	// Step 2: Extract embedded files
 	os.MkdirAll(targetDir, 0755)
