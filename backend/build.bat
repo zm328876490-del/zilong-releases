@@ -56,6 +56,9 @@ copy /y models\ggml-vad.bin installer\embedded\models\ggml-vad.bin >nul
 xcopy /y /e scripts\* installer\embedded\scripts\ >nul 2>&1
 echo       完成
 
+:: Copy icon for installer
+copy /y ..\extension\icons\icon.ico installer\icon.ico >nul
+
 :: Step 4: Update version in versioninfo.json
 echo.
 echo [4/7] 更新安装器版本信息...

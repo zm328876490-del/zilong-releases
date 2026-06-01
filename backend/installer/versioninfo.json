@@ -35,5 +35,6 @@
       "CharsetID": "04B0"
     }
   },
+  "IconPath": "icon.ico",
   "ManifestPath": "installer.manifest"
 }
