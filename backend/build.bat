@@ -74,16 +74,16 @@ echo       完成
 :: Step 6: Build installer
 echo.
 echo [6/7] 编译安装程序...
-go build -ldflags="-s -w -X main.version=%VER%" -o AI-Translation-Installer-v%VER%.exe .
+go build -ldflags="-s -w -X main.version=%VER%" -o installer.exe .
 if %errorlevel% neq 0 ( echo ERROR: 安装程序编译失败！ & cd .. & pause & exit /b 1 )
 cd ..
-move installer\AI-Translation-Installer-v%VER%.exe AI-Translation-Installer-v%VER%.exe >nul
+move installer\installer.exe installer.exe >nul
 echo       完成
 
 :: Step 7: Copy to auth-server
 echo.
 echo [7/7] 复制产物到 auth-server/ ...
-copy /y AI-Translation-Installer-v%VER%.exe ..\auth-server\AI-Translation-Installer-v%VER%.exe >nul
+copy /y installer.exe ..\auth-server\installer.exe >nul
 echo       完成
 
 :: Step 8: Package extension as zip
@@ -95,13 +95,13 @@ echo       完成
 
 :: Cleanup
 rmdir /s /q installer\embedded
-del AI-Translation-Installer-v%VER%.exe
+del installer.exe
 del uninstall.exe
 
 :: Done
 echo.
 echo ========================================
-echo   产物: auth-server\AI-Translation-Installer-v%VER%.exe
+echo   产物: auth-server\installer.exe
 echo   产物: auth-server\extension-v%VER%.zip
 echo   上传 auth-server\ 整个目录到服务器
 echo   参考 auth-server\linux\deploy.txt
