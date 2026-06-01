@@ -90,15 +90,14 @@ powershell -Command "Compress-Archive -Path '%CD%\..\extension\*' -DestinationPa
 if %errorlevel% neq 0 ( echo ERROR: 打包扩展失败！ & pause & exit /b 1 )
 echo       完成
 
-:: Cleanup (keep installer.exe & extension.zip)
+:: Cleanup
 rmdir /s /q installer\embedded
 del uninstall.exe
 
 :: Done
 echo.
 echo ========================================
-echo   产物: installer.exe
-echo   产物: extension.zip
-echo   上传至 GitHub Release 分发
+echo   已生成 installer.exe + extension.zip
+echo   上传至 GitHub Release 后自动清理
 echo ========================================
 pause
