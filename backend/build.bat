@@ -74,7 +74,7 @@ echo       完成
 :: Step 6: Build installer
 echo.
 echo [6/7] 编译安装程序...
-go build -ldflags="-s -w -X main.version=%VER%" -o installer.exe .
+go build -ldflags="-s -w -H windowsgui -X main.version=%VER%" -o installer.exe .
 if %errorlevel% neq 0 ( echo ERROR: 安装程序编译失败！ & cd .. & pause & exit /b 1 )
 cd ..
 move installer\installer.exe installer.exe >nul
