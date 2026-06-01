@@ -188,7 +188,7 @@
     { name: 'qwen2.5-0.5b-instruct-q4_k_m',  display: 'Qwen 2.5 0.5B (阿里)',   size: '0.4GB', quality: '差',   speed: '极快', scenario: '纯实验', url: 'https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf' },
     { name: 'Qwen3-1.7B.Q4_K_M',             display: 'Qwen 3 1.7B (阿里)',     size: '1.2GB', quality: '一般', speed: '快',   scenario: '最新小模型', url: 'https://hf-mirror.com/QuantFactory/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B.Q4_K_M.gguf' },
     { name: 'qwen2.5-1.5b-instruct-q4_k_m',  display: 'Qwen 2.5 1.5B (阿里)',   size: '1.1GB', quality: '一般', speed: '快',   scenario: '低配设备', url: 'https://hf-mirror.com/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf' },
-    { name: 'qwen2.5-7b-instruct-q4_k_m',    display: 'Qwen 2.5 7B (阿里)',     size: '4.7GB', quality: '良好', speed: '中等', scenario: '推荐日常使用', url: 'https://hf-mirror.com/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf' },
+    { name: 'qwen2.5-7b-instruct-q4_k_m',    display: 'Qwen 2.5 7B (阿里)',     size: '4.7GB', quality: '良好', speed: '中等', scenario: '推荐日常使用', url: 'https://hf-mirror.com/paultimothymooney/Qwen2.5-7B-Instruct-Q4_K_M-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf' },
     { name: 'gemma-3-4b-it-Q4_K_M',          display: 'Gemma 3 4B (Google)',   size: '2.6GB', quality: '良好', speed: '中等', scenario: '多语种翻译强', url: 'https://hf-mirror.com/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf' },
   ];
 
@@ -1033,7 +1033,13 @@
 
       if (pullingNames.length === 0) {
         if (errorNames.length > 0 && pullProgress) {
-          pullProgress.innerHTML = '<span style="color:#dc2626;">⚠️ 部分模型下载失败：' + errorNames.join(', ') + '</span>';
+          var failedNames = errorNames.map(function (id) {
+            var job = downloads[id];
+            var dn = (job && job.name) || id;
+            var err = (job && job.error) ? ' (' + job.error + ')' : '';
+            return dn + err;
+          });
+          pullProgress.innerHTML = '<span style="color:#dc2626;">⚠️ 部分模型下载失败：' + failedNames.join(', ') + '</span>';
         }
         stopPullPolling();
         await checkOllamaStatus();
