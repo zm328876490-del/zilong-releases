@@ -350,10 +350,11 @@ func mapLangGoogle(lang string) string {
 // ─── Ollama (local LLM via OpenAI-compatible /v1/chat/completions) ──────
 
 type ollamaChatRequest struct {
-	Model       string              `json:"model"`
-	Messages    []ollamaChatMessage `json:"messages"`
-	Stream      bool                `json:"stream"`
-	Temperature float64             `json:"temperature"`
+	Model              string              `json:"model"`
+	Messages           []ollamaChatMessage `json:"messages"`
+	Stream             bool                `json:"stream"`
+	Temperature        float64             `json:"temperature"`
+	ChatTemplateKwargs map[string]bool     `json:"chat_template_kwargs,omitempty"`
 }
 
 type ollamaChatMessage struct {
@@ -409,7 +410,7 @@ func buildOllamaPrompt(to string) string {
 · 感叹和语气通过标点和措辞自然体现，不要括号注释
 · 品牌名、缩写、专有名词保留原文
 
-禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰（~~！！）。
+禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰（~~！！），原文照抄英文输出。
 
 上文是同一段话已翻译的内容，用于保持语气、人称和语境的连贯。
 翻译最后一句时要与上文自然衔接：
@@ -431,7 +432,7 @@ func buildOllamaPrompt(to string) string {
 · 感叹和语气通过标点和措辞自然体现，不要括号注释
 · 品牌名、缩写、专有名词保留原文
 
-禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰。
+禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰，原文照抄输出。
 
 上文是同一段话已翻译的内容，用于保持语气、人称和语境的连贯。
 翻译最后一句时要与上文自然衔接：保持同一人称，承接上文的逻辑关系
@@ -448,8 +449,6 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 		return "", fmt.Errorf("ollama model not configured")
 	}
 
-	if len(text) < 80 {
-	}
 
 	systemPrompt := buildOllamaPrompt(to)
 
@@ -473,6 +472,8 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 		Messages:    messages,
 		Stream:      false,
 		Temperature: 0.1,
+	
+		ChatTemplateKwargs: map[string]bool{"enable_thinking": false},
 	}
 
 	bodyBytes, _ := json.Marshal(reqBody)
@@ -503,14 +504,17 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
 	result = strings.Trim(result, "\"'")
 
-	// Store in context ring buffer for the next translation
-	t.ctxMu.Lock()
-	t.ctxRing[t.ctxIdx] = ctxPair{original: text, translated: result}
-	t.ctxIdx = (t.ctxIdx + 1) % len(t.ctxRing)
-	if t.ctxCount < len(t.ctxRing) {
-		t.ctxCount++
+	// Store in context ring (skip when LLM echoed original — would
+	// poison the ring and teach the model to copy input verbatim).
+	if strings.TrimSpace(result) != strings.TrimSpace(text) {
+		t.ctxMu.Lock()
+		t.ctxRing[t.ctxIdx] = ctxPair{original: text, translated: result}
+		t.ctxIdx = (t.ctxIdx + 1) % len(t.ctxRing)
+		if t.ctxCount < len(t.ctxRing) {
+			t.ctxCount++
+		}
+		t.ctxMu.Unlock()
 	}
-	t.ctxMu.Unlock()
 
 	return result, nil
 }
@@ -603,6 +607,8 @@ func (t *Translator) translateOllamaImage(text, from, to string) (string, error)
 		Messages:    messages,
 		Stream:      false,
 		Temperature: 0.1,
+	
+		ChatTemplateKwargs: map[string]bool{"enable_thinking": false},
 	}
 
 	bodyBytes, _ := json.Marshal(reqBody)
@@ -699,13 +705,15 @@ func (t *Translator) translateOpenAI(text, from, to string) (string, error) {
 	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
 	result = strings.Trim(result, "\"'")
 
-	t.ctxMu.Lock()
-	t.ctxRing[t.ctxIdx] = ctxPair{original: text, translated: result}
-	t.ctxIdx = (t.ctxIdx + 1) % len(t.ctxRing)
-	if t.ctxCount < len(t.ctxRing) {
-		t.ctxCount++
+	if strings.TrimSpace(result) != strings.TrimSpace(text) {
+		t.ctxMu.Lock()
+		t.ctxRing[t.ctxIdx] = ctxPair{original: text, translated: result}
+		t.ctxIdx = (t.ctxIdx + 1) % len(t.ctxRing)
+		if t.ctxCount < len(t.ctxRing) {
+			t.ctxCount++
+		}
+		t.ctxMu.Unlock()
 	}
-	t.ctxMu.Unlock()
 
 	return result, nil
 }

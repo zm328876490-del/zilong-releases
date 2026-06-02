@@ -27,13 +27,76 @@
 
   const SKIP_ROLES = new Set([]);
 
-  const CONCURRENCY = 4;
-  const BATCH_SIZE = 30;
+  const CONCURRENCY = 6;
+  const BATCH_SIZE = 10;
   const CHAR_LIMIT = 1500;
   const MAX_RETRIES = 3;
   const MAX_CACHE = 10000;
   const API = 'http://localhost:29527/translate/page';
   const host = location.hostname;
+
+  // ─── Built-in glossary for common short UI terms ─────────────────────
+  // Qwen3-1.7B often returns identity for short proper nouns / brand names.
+  // These are common across Amazon and other e-commerce sites.
+  const BUILT_IN_GLOSSARY = {
+    'prime': 'Prime会员',
+    'en': '英文',
+    'best sellers': '畅销榜',
+    'today\'s deals': '今日特惠',
+    'buy again': '再次购买',
+    'shop now': '立即购买',
+    'see more': '查看更多',
+    'see all': '查看全部',
+    'free delivery': '免费配送',
+    'free shipping': '免费配送',
+    'in stock': '有货',
+    'out of stock': '缺货',
+    'add to cart': '加入购物车',
+    'buy now': '立即购买',
+    'save more': '更多优惠',
+    'subscribe & save': '订阅省',
+    'customer reviews': '用户评价',
+    'top reviews': '热门评价',
+    'your orders': '我的订单',
+    'your account': '我的账户',
+    'your lists': '我的清单',
+    'your recommendations': '我的推荐',
+    'your recently viewed items': '最近浏览',
+    'back to top': '返回顶部',
+    'back to results': '返回结果',
+    'filter by': '筛选方式',
+    'sort by': '排序方式',
+    'facebook': '脸书',
+    'twitter': '推特',
+    'instagram': 'Instagram',
+    'youtube': 'YouTube',
+    'twitch': 'Twitch',
+    'tiktok': 'TikTok',
+    'unlimited': '无限',
+    'exclusive': '独家',
+    'limited time deal': '限时优惠',
+    'lightning deal': '闪购',
+    'coupon': '优惠券',
+    'featured': '精选',
+    'recommended': '推荐',
+    'sponsored': '赞助',
+    'bestseller': '畅销品',
+    'new arrival': '新品上市',
+    'top rated': '高评分',
+    'most wished for': '心愿榜单',
+    'gift ideas': '礼品推荐',
+    'gift cards': '礼品卡',
+    'top up your account': '账户充值',
+    'sell on amazon': '在Amazon开店',
+    'become an affiliate': '成为联盟会员',
+    'fulfilment by amazon': '亚马逊物流',
+    'see details': '查看详情',
+    'product details': '商品详情',
+    'product description': '商品描述',
+    'about this item': '商品信息',
+    'technical details': '技术参数',
+    'compare with similar items': '对比相似商品',
+  };
 
   // ─── State ──────────────────────────────────────────────────────────
   let isActive = false;
@@ -156,6 +219,7 @@
       for (var i = 0; i < pairs.length; i++) {
         var src = pairs[i].src, dst = pairs[i].dst;
         if (!src || !dst) continue;
+        if (src.toLowerCase() === dst.toLowerCase()) continue;
         var key = makeKey(h, src);
         var existing = await new Promise(function (resolve) {
           var r = store.get(key);
@@ -239,12 +303,12 @@
       // 1. Load page snapshot (instant restore for revisit)
       var snapPairs = await dbLoadPageSnapshot(location.href);
       if (snapPairs.length > 0) {
-        snapPairs.forEach(function (r) { if (r.src && r.dst) { cacheSet(r.src.toLowerCase(), r.dst); pageTranslationMap.set(r.src.toLowerCase(), r.dst); } });
+        snapPairs.forEach(function (r) { if (r.src && r.dst && r.src.toLowerCase() !== r.dst.toLowerCase()) { cacheSet(r.src.toLowerCase(), r.dst); pageTranslationMap.set(r.src.toLowerCase(), r.dst); } });
       }
       // 2. Load domain phrases (cross-page reuse)
       var rows = await dbExportDomain(host);
       rows.sort(function (a, b) { return b.hits - a.hits; });
-      rows.forEach(function (r) { if (r.src && r.dst && !memCache.has(r.src.toLowerCase())) cacheSet(r.src.toLowerCase(), r.dst); });
+      rows.forEach(function (r) { if (r.src && r.dst && r.src.toLowerCase() !== r.dst.toLowerCase() && !memCache.has(r.src.toLowerCase())) cacheSet(r.src.toLowerCase(), r.dst); });
     } catch (_) {}
     dbReady = true;
   }
@@ -261,13 +325,17 @@
   function shouldSkipEl(el) {
     if (SKIP_TAGS.has(el.tagName)) return true;
     if (el.id && (el.id.startsWith('__ai_') || el.id === 'ai-video-lock-overlay')) return true;
-    if (el.getAttribute('aria-hidden') === 'true') return true;
+    // Only skip genuinely hidden elements. Amazon uses aria-hidden="true"
+    // on truncated spans that ARE visually visible (screen-reader hint).
+    if (el.getAttribute('aria-hidden') === 'true' && !isVisible(el)) return true;
     if (el.getAttribute('translate') === 'no') return true;
     if (el.classList.contains('notranslate')) return true;
     if (el.isContentEditable) return true;
     var role = el.getAttribute('role');
     if (role && SKIP_ROLES.has(role)) return true;
     if (el.closest('[contenteditable="true"]')) return true;
+    // Skip text that was already monolingual-replaced (prevent feedback loop)
+    if (el.hasAttribute('data-ot-mono') || el.closest('[data-ot-mono]')) return true;
     return false;
   }
 
@@ -405,6 +473,7 @@
 
       var node;
       while ((node = walker.nextNode())) {
+        var _text = (node.textContent || '').trim();
         if (skipPageMarked && node.parentElement && node.parentElement.hasAttribute('data-ot-page')) continue;
         textNodes.push(node);
       }
@@ -433,12 +502,26 @@
 
   function enqueueGroup(group) {
     if (!group.cleanText || group.cleanText.length < 2) return;
-    // Note: do NOT skip parents with data-ot-page here.
-    // scanTextNodes already filters them for non-mutation scans.
-    // Mutation scans intentionally allow new text nodes under marked parents.
 
-    // Mark parent to prevent re-scanning (idempotent)
-    group.parent.setAttribute('data-ot-page', '');
+    // ── Glossary hook: apply immediately, bypass the pump/queue entirely ──
+    // This avoids race conditions where the page JS re-renders the element
+    // (e.g. Amazon nav hydration) before pump() gets to it, causing the group
+    // to be silently dropped in takeBatch() due to parent.isConnected=false.
+    var glossaryHit = BUILT_IN_GLOSSARY[group.cleanText.toLowerCase()];
+    if (glossaryHit) {
+      // Only apply if parent is still connected (just found by TreeWalker ms ago)
+      if (group.parent.isConnected) {
+        var allAttached = true;
+        for (var gi = 0; gi < group.nodes.length; gi++) {
+          if (group.nodes[gi].parentNode !== group.parent) { allAttached = false; break; }
+        }
+        if (allAttached) {
+          applyGroupTranslation(group, glossaryHit);
+          return;
+        }
+      }
+    }
+    // ── End glossary hook ─────────────────────────────────────────────────
 
     var rect = group.parent.getBoundingClientRect();
     if (rect.top >= -300 && rect.bottom <= window.innerHeight + 300) {
@@ -540,9 +623,20 @@
         applyGroupTranslation(group, pp);
         continue;
       }
-      // ── L1: memory cache ──────────────────────────────────────────────
+      // ── L1: memory cache + built-in glossary ──────────────────────────
+      // Built-in glossary for common short UI terms that small models
+      // (Qwen3-1.7B) refuse to translate, returning identity instead.
+      var glossaryHit = BUILT_IN_GLOSSARY[group.cleanText.toLowerCase()];
+      if (glossaryHit) {
+        console.log('[page-translate] glossary hit: "%s" → "%s"', group.cleanText, glossaryHit);
+        cacheSet(ck, glossaryHit);
+        pageTranslationMap.set(ck, glossaryHit);
+        translatedPairs.push({ src: group.cleanText, dst: glossaryHit });
+        applyGroupTranslation(group, glossaryHit);
+        continue;
+      }
       var hit = cacheGet(ck);
-      if (hit !== undefined) {
+      if (hit !== undefined && hit.toLowerCase() !== group.cleanText.toLowerCase()) {
         pageTranslationMap.set(ck, hit);
         translatedPairs.push({ src: group.cleanText, dst: hit });
         applyGroupTranslation(group, hit);
@@ -567,6 +661,7 @@
           var t = needTexts[k];
           if (dbHits.has(t)) {
             var dst = dbHits.get(t);
+            if (dst.toLowerCase() === t.toLowerCase()) { stillNeed.push(needModel[k]); continue; }
             var dk = t.toLowerCase();
             cacheSet(dk, dst);
             pageTranslationMap.set(dk, dst);
@@ -583,23 +678,31 @@
     if (!needModel.length) return;
 
     // ── L3: translation API ───────────────────────────────────────────
-    // Ollama: process one-by-one so each translation appears on screen immediately.
-    // Local models process sequentially anyway — batching just delays the first result.
+    // Ollama: small pool of concurrent requests for speed while keeping
+    // instant-on-screen feedback (each text rendered as it completes).
     if (engine === 'ollama') {
       var toSave = [];
-      for (var mi = 0; mi < needModel.length; mi++) {
-        var mg = needModel[mi];
-        if (!mg.parent.isConnected) { pendingCount--; continue; }
-        var src = needTexts[mi];
-        var translation = await translateSingleOllama(src);
-        if (!translation) { requeueOrGiveUp(mg); continue; }
-        var sk = src.toLowerCase();
-        cacheSet(sk, translation);
-        pageTranslationMap.set(sk, translation);
-        toSave.push({ src: src, dst: translation });
-        translatedPairs.push({ src: src, dst: translation });
-        applyGroupTranslation(mg, translation);
+      var POOL = 2;
+      var pi = 0;
+      async function ollamaWorker() {
+        while (pi < needModel.length) {
+          var mi = pi++;
+          var mg = needModel[mi];
+          if (!mg.parent.isConnected) { pendingCount--; continue; }
+          var src = needTexts[mi];
+          var translation = await translateSingleOllama(src);
+          if (!translation || translation.toLowerCase() === src.toLowerCase()) { requeueOrGiveUp(mg); continue; }
+          var sk = src.toLowerCase();
+          cacheSet(sk, translation);
+          pageTranslationMap.set(sk, translation);
+          toSave.push({ src: src, dst: translation });
+          translatedPairs.push({ src: src, dst: translation });
+          applyGroupTranslation(mg, translation);
+        }
       }
+      var workers = [];
+      for (var w = 0; w < POOL; w++) workers.push(ollamaWorker());
+      await Promise.all(workers);
       if (toSave.length > 0) {
         dbSave(host, toSave).catch(function () {});
         snapshotDirty = true;
@@ -625,7 +728,7 @@
       var mg = needModel[mi];
       var translation = results[mi] || '';
       var src = needTexts[mi];
-      if (!translation) { requeueOrGiveUp(mg); continue; }
+      if (!translation || translation.toLowerCase() === src.toLowerCase()) { requeueOrGiveUp(mg); continue; }
       var sk = src.toLowerCase();
       cacheSet(sk, translation);
       pageTranslationMap.set(sk, translation);
@@ -687,7 +790,10 @@
     });
   }
 
+  var _ollamaReqId = 0;
   async function translateSingleOllama(text) {
+    var reqId = ++_ollamaReqId;
+    console.log('[page-translate] translateSingleOllama #%s called, text=%s', reqId, text.substring(0, 50));
     return new Promise(function (resolve) {
       chrome.runtime.sendMessage({
         type: 'PAGE_OLLAMA_TRANSLATE_ONE',
@@ -695,17 +801,19 @@
         to: targetLang,
         ollamaUrl: ollamaUrl,
         ollamaModel: ollamaModel,
+        reqId: reqId,
       }, function (resp) {
         if (chrome.runtime.lastError) {
-
+          console.error('[page-translate] sendMessage #%s error:', reqId, chrome.runtime.lastError.message);
           resolve('');
           return;
         }
         if (!resp || !resp.ok) {
-
+          console.error('[page-translate] translation #%s failed: resp=%s', reqId, JSON.stringify(resp));
           resolve('');
           return;
         }
+        console.log('[page-translate] translation #%s success: "%s"', reqId, resp.translation);
         resolve(resp.translation || '');
       });
     });
@@ -715,6 +823,8 @@
     group._otRetries = (group._otRetries || 0) + 1;
     if (group._otRetries >= MAX_RETRIES) {
       pendingCount--;
+      // Clear marker so re-scan can pick it up (e.g. after engine switch)
+      if (group.parent) group.parent.removeAttribute('data-ot-page');
       return;
     }
     viewQ.push(group);
@@ -743,6 +853,12 @@
     pendingCount--;
     translatedCount++;
 
+    // Mark parent ONLY after successful translation, not in enqueueGroup.
+    // This prevents the race where enqueueGroup marks the parent, Amazon's JS
+    // re-renders the element before pump() runs, and the marker is left on a
+    // disconnected element while the replacement is unscanned.
+    group.parent.setAttribute('data-ot-page', '');
+
     recordPair(group.parent, group.cleanText, translation);
 
     if (!bilingualMode) {
@@ -758,6 +874,8 @@
     for (var i = 1; i < group.nodes.length; i++) {
       group.nodes[i].textContent = '';
     }
+    // Mark to prevent MutationObserver feedback loop
+    if (group.parent) group.parent.setAttribute('data-ot-mono', '1');
   }
 
   function applyBilingual(group, translation) {

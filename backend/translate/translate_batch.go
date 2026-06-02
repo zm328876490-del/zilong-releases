@@ -238,10 +238,11 @@ var ollamaWarmupOnce sync.Once
 
 func warmupOllama(url, model string) {
 	warmBody := ollamaChatRequest{
-		Model: model,
-		Messages: []ollamaChatMessage{{Role: "user", Content: "hello"}},
-		Stream:      false,
-		Temperature: 0,
+		Model:               model,
+		Messages:            []ollamaChatMessage{{Role: "user", Content: "hello"}},
+		Stream:              false,
+		Temperature:         0,
+		ChatTemplateKwargs:  map[string]bool{"enable_thinking": false},
 	}
 	b, _ := json.Marshal(warmBody)
 	go func() {
@@ -289,8 +290,9 @@ func (t *Translator) translateOllamaBatch(w io.Writer, texts []string, from, to 
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: string(payloadJSON)},
 		},
-		Stream:      false,
-		Temperature: 0,
+		Stream:             false,
+		Temperature:        0,
+		ChatTemplateKwargs: map[string]bool{"enable_thinking": false},
 	}
 
 	var results []string

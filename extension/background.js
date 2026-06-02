@@ -240,16 +240,23 @@ async function handlePageOllamaTranslate(message, sendResponse) {
     const texts = message.texts || [];
     if (texts.length === 0) { sendResponse({ ok: true, results: [] }); return; }
 
-    const url = (message.ollamaUrl || 'http://localhost:11434').replace(/\/$/, '');
-    const model = message.ollamaModel || 'qwen2.5:7b';
+    const url = (message.ollamaUrl || 'http://127.0.0.1:23323').replace(/\/$/, '');
+    let model = message.ollamaModel || '';
+    if (!model) { model = await getDefaultModel(url); }
+    if (!model) { sendResponse({ ok: false, results: null }); return; }
 
     const toName = ollamaLangName(message.to || 'zh-Hans');
-    const payload = texts.filter(function (t) { return (t || '').trim(); });
-    const payloadJSON = JSON.stringify(payload);
+    const payload = [];
+    const payloadTexts = [];
+    for (let i = 0; i < texts.length; i++) {
+      const t = (texts[i] || '').trim();
+      if (t) { payload.push({ text: t, idx: i }); payloadTexts.push(t); }
+    }
+    const payloadJSON = JSON.stringify(payloadTexts);
 
     const systemPrompt =
       '将以下 JSON 数组中的每一条文本翻译为' + toName +
-      '。返回相同长度和顺序的 JSON 字符串数组。只返回 JSON 数组，不要解释、不要 markdown 代码块、不要多余文字。';
+      '。所有内容都要翻译，不要保留英文原文（型号编号、网址除外）。返回相同长度和顺序的 JSON 字符串数组。只返回 JSON 数组，不要解释、不要 markdown 代码块、不要多余文字。';
 
     const resp = await fetch(url + '/v1/chat/completions', {
       method: 'POST',
@@ -262,6 +269,7 @@ async function handlePageOllamaTranslate(message, sendResponse) {
         ],
         stream: false,
         temperature: 0,
+        chat_template_kwargs: { enable_thinking: false },
       }),
     });
 
@@ -289,9 +297,7 @@ async function handlePageOllamaTranslate(message, sendResponse) {
 
     const results = new Array(texts.length).fill('');
     for (let i = 0; i < Math.min(payload.length, translated.length); i++) {
-      // Map back to original indices (payload was filtered)
-      const origIdx = texts.indexOf(payload[i]);
-      if (origIdx >= 0) results[origIdx] = translated[i] || '';
+      results[payload[i].idx] = translated[i] || '';
     }
 
     sendResponse({ ok: true, results: results });
@@ -309,12 +315,14 @@ async function getDefaultModel(ollamaUrl) {
   if (_cachedDefaultModel && (Date.now() - _cachedDefaultModelAt) < 300000) {
     return _cachedDefaultModel;
   }
+  const baseUrl = (ollamaUrl || 'http://127.0.0.1:23323').replace(/\/$/, '');
   try {
-    const resp = await fetch('http://localhost:29527/model/list', { signal: AbortSignal.timeout(3000) });
+    const resp = await fetch(baseUrl + '/v1/models', { signal: AbortSignal.timeout(3000) });
     if (resp.ok) {
-      const models = await resp.json();
-      if (Array.isArray(models) && models.length > 0) {
-        _cachedDefaultModel = models[0].name || '';
+      const data = await resp.json();
+      const models = data.data || [];
+      if (models.length > 0) {
+        _cachedDefaultModel = (models[0].id || '').replace(/\.gguf$/i, '');
         _cachedDefaultModelAt = Date.now();
         return _cachedDefaultModel;
       }
@@ -335,7 +343,7 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
       model = await getDefaultModel(url);
     }
     if (!model) {
-
+      console.error('[ollama-translate] no model available (ollamaModel=%s, getDefaultModel returned empty)', message.ollamaModel);
       sendResponse({ ok: false, translation: '' });
       return;
     }
@@ -343,9 +351,10 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
 
     const systemPrompt =
       '你是翻译专家。将用户输入的文本翻译为' + toName +
-      '。只输出译文，一行，不要解释、不要引号、不要多余文字。';
+      '。所有内容都要翻译，不要保留英文原文（型号编号、网址除外）。只输出译文，一行，不要解释、不要引号、不要多余文字。';
 
-    const resp = await fetch(url + '/v1/chat/completions', {
+    const apiUrl = url + '/v1/chat/completions';
+    const resp = await fetch(apiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -356,20 +365,27 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
         ],
         stream: false,
         temperature: 0.1,
+        chat_template_kwargs: { enable_thinking: false },
       }),
     });
 
     if (!resp.ok) {
-
+      console.error('[ollama-translate] API error: %s %s', resp.status, resp.statusText);
+      try { console.error('[ollama-translate] body:', await resp.text()); } catch (_) {}
       sendResponse({ ok: false, translation: '' });
       return;
     }
 
     const data = await resp.json();
     const translation = (data.choices && data.choices[0] && data.choices[0].message.content || '').trim();
-    sendResponse({ ok: true, translation: translation });
+    if (translation.toLowerCase() === text.toLowerCase()) {
+      console.warn('[ollama-translate] model returned identity (untranslated), treating as failure');
+      sendResponse({ ok: false, translation: '', reqId: message.reqId });
+      return;
+    }
+    sendResponse({ ok: true, translation: translation, reqId: message.reqId });
   } catch (e) {
-
+    console.error('[ollama-translate] exception:', e.message || e);
     sendResponse({ ok: false, translation: '' });
   }
 }

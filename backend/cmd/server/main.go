@@ -512,12 +512,9 @@ func (c *Client) resolveStickyGender(snap, conf string, startTime, endTime float
 		}
 	}
 
-	logCommit := func(reason string) {
-	}
 
 	// Rule 5: no detection — keep current sticky.
 	if snap == "" {
-		logCommit("no-pitch")
 		return c.stickyGender
 	}
 
@@ -526,7 +523,6 @@ func (c *Client) resolveStickyGender(snap, conf string, startTime, endTime float
 		c.stickyGender = snap
 		c.flipPendingGender = ""
 		c.flipPendingCount = 0
-		logCommit("bootstrap")
 		return c.stickyGender
 	}
 
@@ -534,7 +530,6 @@ func (c *Client) resolveStickyGender(snap, conf string, startTime, endTime float
 	if snap == c.stickyGender {
 		c.flipPendingGender = ""
 		c.flipPendingCount = 0
-		logCommit("agree")
 		return c.stickyGender
 	}
 
@@ -542,7 +537,6 @@ func (c *Client) resolveStickyGender(snap, conf string, startTime, endTime float
 
 	// Rule 3: weak disagreement → ignore.
 	if conf != "strong" {
-		logCommit("ignore-weak-flip")
 		return c.stickyGender
 	}
 
@@ -687,11 +681,6 @@ func (c *Client) generateAndSendTTS(text, utterId string, speechRate float64, is
 		sentBytes, err = trySynth(defaultVoice)
 	}
 
-	if err != nil {
-	} else if sentBytes == 0 {
-	} else if !isPartial {
-	}
-
 	// Always send audio_end so the frontend doesn't wait forever — even on
 	// error, even on zero-bytes (which keeps subtitle visible but releases
 	// the TTS queue slot).
@@ -744,11 +733,6 @@ func (c *Client) processOfflineASR(samples []int16, sampleRate int) {
 	if len(segs) == 0 {
 		c.sendJSON(OutMsg{Type: "error", Message: "离线 ASR 未识别到字幕"})
 		return
-	}
-
-	for i := range segs {
-		if i < 5 {
-		}
 	}
 
 	// Convert to Subtitle format, scaling timestamps to compensate for
@@ -2088,12 +2072,18 @@ func main() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			if llamaServerURL != "" {
-				return
-			}
 			models, _ := modelManager.List()
 			if len(models) == 0 {
 				continue
+			}
+			if llamaServerURL != "" {
+				// Verify it's still actually responding
+				if resp, err := httpGet(llamaServerURL + "/health"); err == nil {
+					resp.Body.Close()
+					continue
+				}
+				fmt.Println("[main] llama-server: lost, restarting...")
+				llamaServerURL = ""
 			}
 			cmd, err := startLlamaServer(cfg)
 			if err != nil {
@@ -2101,7 +2091,7 @@ func main() {
 				continue
 			}
 			llamaCmd = cmd
-			fmt.Println("[main] llama-server: auto-started after model became available")
+			fmt.Println("[main] llama-server: auto-started")
 		}
 	}()
 
