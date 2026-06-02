@@ -39,7 +39,7 @@ type Manager struct {
 	jobs      map[string]*Job
 	mu        sync.RWMutex
 	client    *http.Client
-	onChange  func() // called when a download completes (so caller can restart llama-server)
+	onChange  func() // called when a download completes
 }
 
 func NewManager(dir string) *Manager {

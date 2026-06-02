@@ -347,98 +347,99 @@ func mapLangGoogle(lang string) string {
 	return lang
 }
 
-// ─── Ollama (local LLM via OpenAI-compatible /v1/chat/completions) ──────
+// ─── Ollama (local LLM via /api/generate — raw prompt, no chat template) ──
 
-type ollamaChatRequest struct {
-	Model              string              `json:"model"`
-	Messages           []ollamaChatMessage `json:"messages"`
-	Stream             bool                `json:"stream"`
-	Temperature        float64             `json:"temperature"`
-	ChatTemplateKwargs map[string]bool     `json:"chat_template_kwargs,omitempty"`
+type ollamaGenerateRequest struct {
+	Model   string                 `json:"model"`
+	System  string                 `json:"system,omitempty"`
+	Prompt  string                 `json:"prompt"`
+	Stream  bool                   `json:"stream"`
+	Options map[string]interface{} `json:"options,omitempty"`
 }
 
-type ollamaChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+type ollamaGenerateResponse struct {
+	Response string `json:"response"`
+	Done     bool   `json:"done"`
 }
 
-type ollamaChatResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
+func ollamaLangName(lang string) string {
+	m := map[string]string{
+		"zh-Hans": "Simplified Chinese", "zh-Hant": "Traditional Chinese", "zh": "Chinese",
+		"en": "English", "ja": "Japanese", "ko": "Korean",
+		"fr": "French", "de": "German", "es": "Spanish",
+		"pt": "Portuguese", "ru": "Russian", "th": "Thai", "vi": "Vietnamese",
+	}
+	if v, ok := m[lang]; ok {
+		return v
+	}
+	return lang
 }
 
-func buildOllamaPrompt(to string) string {
-	langNames := map[string]string{
-		"zh-Hans": "简体中文", "zh-Hant": "繁體中文", "zh": "中文",
-		"en": "English", "ja": "日本語", "ko": "한국어",
-		"fr": "Français", "de": "Deutsch", "es": "Español",
-		"pt": "Português", "ru": "Русский", "ar": "العربية",
-		"th": "ไทย", "vi": "Tiếng Việt",
-	}
-	toName := langNames[to]
-	if toName == "" {
-		toName = to
-	}
-
-	fillerByLang := map[string]string{
-		"zh-Hans": "呀哦哈啦", "zh-Hant": "呀哦哈啦", "zh": "呀哦哈啦",
-		"ja": "あの、ええと、まあ", "ko": "음, 그, 저, 뭐",
-	}
-	filler := fillerByLang[to]
-	if filler == "" {
-		filler = "无意义语气词堆砌"
-	}
-
-	// Chinese targets get few-shot examples tuned for English→Chinese localization.
-	if to == "zh-Hans" || to == "zh-Hant" || to == "zh" {
-		return fmt.Sprintf(`你是视频字幕本地化专家。将英文口语翻译为地道自然的%s字幕——不是机械翻译，而是让中文观众觉得这句话本来就是用中文说的。
-
-翻译示例（注意风格，不只是意思对，更要像中文）：
-  "I'm not sure about that."   → "不太好说。"
-  "What the hell is going on?" → "怎么回事？"
-  "That's a great idea!"       → "好主意！"
-  "To be honest, I don't think so." → "说实话，我觉得不行。"
-  "Come on, you gotta be kidding me." → "别闹，开玩笑的吧。"
-
-本地化原则：
-· 英文填充词（well, you know, I mean, like, basically, actually）直接省略，不翻译
-· 英文习语用中文对应表达，不要字面直译（如 kidding→开玩笑，not sure→不好说）
-· 英文长句拆成短句，中文不习惯一句话塞太多信息
-· 感叹和语气通过标点和措辞自然体现，不要括号注释
-· 品牌名、缩写、专有名词保留原文
-
-禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰（~~！！），原文照抄英文输出。
-
-上文是同一段话已翻译的内容，用于保持语气、人称和语境的连贯。
-翻译最后一句时要与上文自然衔接：
-· 上文用"他/她"则继续用同一人称，不要换主语
-· 上文是问句则当前句可省略主语直接回答
-· 当前句若是上文的延续（开头是 and/but/so/because 等），用"而且/但是/所以/因为"承接，不要重起一句
-· 当前句若被切成半句（结尾没有标点），翻译时也不要硬补句号，用逗号或省略号自然衔接
-
-只翻译最后一句，一行输出。`, toName, filler)
+// stripThinking removes <｜end▁of▁thinking｜> /  Slow  blocks that thinking models
+// (qwen3, deepseek-r1, etc.) may emit via /api/generate. It also drops
+// leading "Okay, let me..." / "First, I need to..." preamble lines.
+func stripThinking(raw string) string {
+	// Remove XML-style thinking blocks
+	for {
+		restart := false
+		for _, tag := range []string{"think", "Thinking", "THINK", "response"} {
+			open := "<" + tag + ">"
+			closeTag := "</" + tag + ">"
+			for {
+				start := strings.Index(raw, open)
+				if start < 0 {
+					break
+				}
+				end := strings.Index(raw, closeTag)
+				if end < 0 {
+					// Unclosed tag — strip from start to end
+					raw = raw[:start]
+					restart = true
+					break
+				}
+				raw = raw[:start] + raw[end+len(closeTag):]
+				restart = true
+			}
+		}
+		if !restart {
+			break
+		}
 	}
 
-	// Generic localization prompt for all other target languages.
-	return fmt.Sprintf(`你是视频字幕本地化专家。将英文口语翻译为地道自然的%s字幕——不是机械翻译，而是让%s观众觉得这就是母语者说的话。
-
-本地化原则：
-· 英文填充词（well, you know, I mean, like, basically, actually）直接省略，不翻译
-· 英文习语用%s的地道对应表达，不要字面直译
-· 英文长句拆成短句，%s不习惯一句话塞太多信息
-· 感叹和语气通过标点和措辞自然体现，不要括号注释
-· 品牌名、缩写、专有名词保留原文
-
-禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰，原文照抄输出。
-
-上文是同一段话已翻译的内容，用于保持语气、人称和语境的连贯。
-翻译最后一句时要与上文自然衔接：保持同一人称，承接上文的逻辑关系
-（and/but/so 等连接词译为对应承接词），半句话不要硬补句号。
-
-只翻译最后一句，一行输出。`, toName, toName, toName, toName, filler)
+	// Remove common LLM preamble patterns
+	lines := strings.Split(raw, "\n")
+	var clean []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Skip preamble lines
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "okay") ||
+			strings.HasPrefix(lower, "first") ||
+			strings.HasPrefix(lower, "let me") ||
+			strings.HasPrefix(lower, "i need") ||
+			strings.HasPrefix(lower, "i'll") ||
+			strings.HasPrefix(lower, "here") ||
+			strings.HasPrefix(lower, "the translation") ||
+			strings.HasPrefix(lower, "sure") ||
+			strings.HasPrefix(lower, "certainly") ||
+			strings.HasPrefix(lower, "of course") {
+			continue
+		}
+		clean = append(clean, trimmed)
+	}
+	if len(clean) > 0 {
+		return strings.Join(clean, "\n")
+	}
+	// If all lines were stripped, return the last non-empty line
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			return t
+		}
+	}
+	return raw
 }
 
 func (t *Translator) translateOllama(text, from, to string) (string, error) {
@@ -449,37 +450,23 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 		return "", fmt.Errorf("ollama model not configured")
 	}
 
+	toName := ollamaLangName(to)
+	systemPrompt := "You are a translator. Translate the input into " + toName + ". Output only the translation, one line, no explanation, no extra text."
 
-	systemPrompt := buildOllamaPrompt(to)
-
-	// Build messages with context window (last 3 pairs)
-	t.ctxMu.Lock()
-	var messages []ollamaChatMessage
-	messages = append(messages, ollamaChatMessage{Role: "system", Content: systemPrompt})
-	// Append recent context as user/assistant pairs for continuity
-	pairs := t.ctxPairsLocked()
-	for _, p := range pairs {
-		messages = append(messages,
-			ollamaChatMessage{Role: "user", Content: p.original},
-			ollamaChatMessage{Role: "assistant", Content: p.translated},
-		)
-	}
-	t.ctxMu.Unlock()
-	messages = append(messages, ollamaChatMessage{Role: "user", Content: text})
-
-	reqBody := ollamaChatRequest{
-		Model:       t.ollamaModel,
-		Messages:    messages,
-		Stream:      false,
-		Temperature: 0.1,
-	
-		ChatTemplateKwargs: map[string]bool{"enable_thinking": false},
+	reqBody := ollamaGenerateRequest{
+		Model:  t.ollamaModel,
+		System: systemPrompt,
+		Prompt: text,
+		Stream: false,
+		Options: map[string]interface{}{
+			"temperature": 0.1,
+			"num_predict": 1024,
+		},
 	}
 
 	bodyBytes, _ := json.Marshal(reqBody)
-	endpoint := t.ollamaUrl + "/v1/chat/completions"
 
-	req, _ := http.NewRequest("POST", endpoint, strings.NewReader(string(bodyBytes)))
+	req, _ := http.NewRequest("POST", t.ollamaUrl+"/api/generate", strings.NewReader(string(bodyBytes)))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := t.client.Do(req)
@@ -493,19 +480,22 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 		return "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var chatResp ollamaChatResponse
-	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+	var genResp ollamaGenerateResponse
+	if err := json.Unmarshal(respBody, &genResp); err != nil {
 		return "", fmt.Errorf("ollama parse: %w", err)
 	}
-	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("ollama empty response")
+
+	rawResponse := genResp.Response
+
+	result := strings.TrimSpace(rawResponse)
+	result = stripThinking(result)
+	result = strings.Trim(result, "\"'")
+	result = strings.TrimSpace(result)
+	if result == "" {
+		return "", fmt.Errorf("ollama empty response (thinking model may need higher num_predict)")
 	}
 
-	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
-	result = strings.Trim(result, "\"'")
-
-	// Store in context ring (skip when LLM echoed original — would
-	// poison the ring and teach the model to copy input verbatim).
+	// Store in context ring for OpenAI fallback.
 	if strings.TrimSpace(result) != strings.TrimSpace(text) {
 		t.ctxMu.Lock()
 		t.ctxRing[t.ctxIdx] = ctxPair{original: text, translated: result}
@@ -549,6 +539,150 @@ func (t *Translator) ctxPairsLocked() []ctxPair {
 
 // ─── Ollama image text translation (no context, simple prompt) ─────────
 
+func (t *Translator) translateOllamaImage(text, from, to string) (string, error) {
+	if t.ollamaUrl == "" {
+		return "", fmt.Errorf("ollama URL not configured")
+	}
+	if t.ollamaModel == "" {
+		return "", fmt.Errorf("ollama model not configured")
+	}
+
+	toName := ollamaLangName(to)
+	systemPrompt := "You are a translator. Translate image text (signs, menus, UI labels, buttons) into natural " + toName + ". Keep it concise, no explanations. ALL-CAPS English should be translated in normal case. Proper nouns, brand names, abbreviations stay in original language. Output only the translation, one line."
+
+	reqBody := ollamaGenerateRequest{
+		Model:  t.ollamaModel,
+		System: systemPrompt,
+		Prompt: text,
+		Stream: false,
+		Options: map[string]interface{}{
+			"temperature": 0.1,
+			"num_predict": 1024,
+		},
+	}
+
+	bodyBytes, _ := json.Marshal(reqBody)
+
+	req, _ := http.NewRequest("POST", t.ollamaUrl+"/api/generate", strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var genResp ollamaGenerateResponse
+	if err := json.Unmarshal(respBody, &genResp); err != nil {
+		return "", fmt.Errorf("ollama parse: %w", err)
+	}
+
+	result := strings.TrimSpace(genResp.Response)
+	result = stripThinking(result)
+	result = strings.Trim(result, "\"'")
+	result = strings.TrimSpace(result)
+	if result == "" {
+		return "", fmt.Errorf("ollama empty response")
+	}
+	return result, nil
+}
+
+// ─── OpenAI-compatible (DeepSeek, 豆包/火山, 通义千问/DashScope) ─────────
+
+type ollamaChatRequest struct {
+	Model       string              `json:"model"`
+	Messages    []ollamaChatMessage `json:"messages"`
+	Stream      bool                `json:"stream"`
+	Temperature float64             `json:"temperature"`
+}
+
+type ollamaChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type ollamaChatResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+func buildOllamaPrompt(to string) string {
+	langNames := map[string]string{
+		"zh-Hans": "简体中文", "zh-Hant": "繁體中文", "zh": "中文",
+		"en": "English", "ja": "日本語", "ko": "한국어",
+		"fr": "Français", "de": "Deutsch", "es": "Español",
+		"pt": "Português", "ru": "Русский", "ar": "العربية",
+		"th": "ไทย", "vi": "Tiếng Việt",
+	}
+	toName := langNames[to]
+	if toName == "" {
+		toName = to
+	}
+
+	fillerByLang := map[string]string{
+		"zh-Hans": "呀哦哈啦", "zh-Hant": "呀哦哈啦", "zh": "呀哦哈啦",
+		"ja": "あの、ええと、まあ", "ko": "음, 그, 저, 뭐",
+	}
+	filler := fillerByLang[to]
+	if filler == "" {
+		filler = "无意义语气词堆砌"
+	}
+
+	if to == "zh-Hans" || to == "zh-Hant" || to == "zh" {
+		return fmt.Sprintf(`你是视频字幕本地化专家。将英文口语翻译为地道自然的%s字幕——不是机械翻译，而是让中文观众觉得这句话本来就是用中文说的。
+
+翻译示例（注意风格，不只是意思对，更要像中文）：
+  "I'm not sure about that."   → "不太好说。"
+  "What the hell is going on?" → "怎么回事？"
+  "That's a great idea!"       → "好主意！"
+  "To be honest, I don't think so." → "说实话，我觉得不行。"
+  "Come on, you gotta be kidding me." → "别闹，开玩笑的吧。"
+
+本地化原则：
+· 英文填充词（well, you know, I mean, like, basically, actually）直接省略，不翻译
+· 英文习语用中文对应表达，不要字面直译（如 kidding→开玩笑，not sure→不好说）
+· 英文长句拆成短句，中文不习惯一句话塞太多信息
+· 感叹和语气通过标点和措辞自然体现，不要括号注释
+· 品牌名、缩写、专有名词保留原文
+
+禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰（~~！！），原文照抄英文输出。
+
+上文是同一段话已翻译的内容，用于保持语气、人称和语境的连贯。
+翻译最后一句时要与上文自然衔接：
+· 上文用"他/她"则继续用同一人称，不要换主语
+· 上文是问句则当前句可省略主语直接回答
+· 当前句若是上文的延续（开头是 and/but/so/because 等），用"而且/但是/所以/因为"承接，不要重起一句
+· 当前句若被切成半句（结尾没有标点），翻译时也不要硬补句号，用逗号或省略号自然衔接
+
+只翻译最后一句，一行输出。`, toName, filler)
+	}
+
+	return fmt.Sprintf(`你是视频字幕本地化专家。将英文口语翻译为地道自然的%s字幕——不是机械翻译，而是让%s观众觉得这就是母语者说的话。
+
+本地化原则：
+· 英文填充词（well, you know, I mean, like, basically, actually）直接省略，不翻译
+· 英文习语用%s的地道对应表达，不要字面直译
+· 英文长句拆成短句，%s不习惯一句话塞太多信息
+· 感叹和语气通过标点和措辞自然体现，不要括号注释
+· 品牌名、缩写、专有名词保留原文
+
+禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰，原文照抄输出。
+
+上文是同一段话已翻译的内容，用于保持语气、人称和语境的连贯。
+翻译最后一句时要与上文自然衔接：保持同一人称，承接上文的逻辑关系
+（and/but/so 等连接词译为对应承接词），半句话不要硬补句号。
+
+只翻译最后一句，一行输出。`, toName, toName, toName, toName, filler)
+}
+
 func buildOllamaImagePrompt(to string) string {
 	langNames := map[string]string{
 		"zh-Hans": "简体中文", "zh-Hant": "繁體中文", "zh": "中文",
@@ -562,7 +696,6 @@ func buildOllamaImagePrompt(to string) string {
 		toName = to
 	}
 
-	// Chinese targets get a zh-CN prompt for natural localization.
 	if to == "zh-Hans" || to == "zh-Hant" || to == "zh" {
 		return fmt.Sprintf(`你是翻译专家。将图片中的文字翻译为地道的%s。
 
@@ -586,62 +719,6 @@ Rules:
 · Proper nouns, brand names, abbreviations stay in original language
 · Output ONLY the translation, one line, nothing else`, toName)
 }
-
-func (t *Translator) translateOllamaImage(text, from, to string) (string, error) {
-	if t.ollamaUrl == "" {
-		return "", fmt.Errorf("ollama URL not configured")
-	}
-	if t.ollamaModel == "" {
-		return "", fmt.Errorf("ollama model not configured")
-	}
-
-	systemPrompt := buildOllamaImagePrompt(to)
-
-	messages := []ollamaChatMessage{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: text},
-	}
-
-	reqBody := ollamaChatRequest{
-		Model:       t.ollamaModel,
-		Messages:    messages,
-		Stream:      false,
-		Temperature: 0.1,
-	
-		ChatTemplateKwargs: map[string]bool{"enable_thinking": false},
-	}
-
-	bodyBytes, _ := json.Marshal(reqBody)
-	endpoint := t.ollamaUrl + "/v1/chat/completions"
-
-	req, _ := http.NewRequest("POST", endpoint, strings.NewReader(string(bodyBytes)))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("ollama request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var chatResp ollamaChatResponse
-	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		return "", fmt.Errorf("ollama parse: %w", err)
-	}
-	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("ollama empty response")
-	}
-
-	result := strings.TrimSpace(chatResp.Choices[0].Message.Content)
-	result = strings.Trim(result, "\"'")
-	return result, nil
-}
-
-// ─── OpenAI-compatible (DeepSeek, 豆包/火山, 通义千问/DashScope) ─────────
 
 func (t *Translator) translateOpenAI(text, from, to string) (string, error) {
 	if t.openaiUrl == "" {

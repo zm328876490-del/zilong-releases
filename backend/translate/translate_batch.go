@@ -237,16 +237,15 @@ func (t *Translator) translateGoogleBatch(texts []string, from, to string) ([]st
 var ollamaWarmupOnce sync.Once
 
 func warmupOllama(url, model string) {
-	warmBody := ollamaChatRequest{
-		Model:               model,
-		Messages:            []ollamaChatMessage{{Role: "user", Content: "hello"}},
-		Stream:              false,
-		Temperature:         0,
-		ChatTemplateKwargs:  map[string]bool{"enable_thinking": false},
+	warmBody := ollamaGenerateRequest{
+		Model:   model,
+		Prompt:  "hello",
+		Stream:  false,
+		Options: map[string]interface{}{"temperature": 0, "num_predict": 10},
 	}
 	b, _ := json.Marshal(warmBody)
 	go func() {
-		http.Post(url+"/v1/chat/completions", "application/json", bytes.NewReader(b))
+		http.Post(url+"/api/generate", "application/json", bytes.NewReader(b))
 	}()
 }
 
@@ -260,7 +259,7 @@ func (t *Translator) translateOllamaBatch(w io.Writer, texts []string, from, to 
 		return fmt.Errorf("ollama model not configured")
 	}
 
-	toName := langNameForOllama(to)
+	toName := ollamaLangName(to)
 
 	// Separate empty texts — they'll get empty results
 	indexMap := make([]int, 0, len(texts)) // original index for each non-empty text
@@ -277,22 +276,15 @@ func (t *Translator) translateOllamaBatch(w io.Writer, texts []string, from, to 
 		return nil
 	}
 
-	// Build single prompt: JSON array of all texts
 	payloadJSON, _ := json.Marshal(payload)
-	systemPrompt := fmt.Sprintf(
-		"将以下 JSON 数组中的每一条文本翻译为%s。返回相同长度和顺序的 JSON 字符串数组。只返回 JSON 数组，不要解释、不要 markdown 代码块、不要多余文字。",
-		toName,
-	)
+	systemPrompt := "Translate each text in the JSON array below into " + toName + ". Return a JSON string array of the same length and order. Only return the JSON array, no markdown, no explanation, no extra text."
 
-	reqBody := ollamaChatRequest{
-		Model: t.ollamaModel,
-		Messages: []ollamaChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: string(payloadJSON)},
-		},
-		Stream:             false,
-		Temperature:        0,
-		ChatTemplateKwargs: map[string]bool{"enable_thinking": false},
+	reqBody := ollamaGenerateRequest{
+		Model:   t.ollamaModel,
+		System:  systemPrompt,
+		Prompt:  string(payloadJSON),
+		Stream:  false,
+		Options: map[string]interface{}{"temperature": 0, "num_predict": 2048},
 	}
 
 	var results []string
@@ -302,7 +294,7 @@ func (t *Translator) translateOllamaBatch(w io.Writer, texts []string, from, to 
 		}
 		bodyBytes, _ := json.Marshal(reqBody)
 		resp, err := t.client.Post(
-			t.ollamaUrl+"/v1/chat/completions",
+			t.ollamaUrl+"/api/generate",
 			"application/json",
 			strings.NewReader(string(bodyBytes)),
 		)
@@ -318,18 +310,13 @@ func (t *Translator) translateOllamaBatch(w io.Writer, texts []string, from, to 
 			continue
 		}
 
-		var chatResp struct {
-			Choices []struct {
-				Message struct {
-					Content string `json:"content"`
-				} `json:"message"`
-			} `json:"choices"`
-		}
-		if err := json.Unmarshal(respBody, &chatResp); err != nil || len(chatResp.Choices) == 0 {
+		var genResp ollamaGenerateResponse
+		if err := json.Unmarshal(respBody, &genResp); err != nil {
 			continue
 		}
 
-		content := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+		content := strings.TrimSpace(genResp.Response)
+		content = stripThinking(content)
 		// Strip markdown code fences if model wraps output
 		content = strings.TrimPrefix(content, "```json")
 		content = strings.TrimPrefix(content, "```")
@@ -337,7 +324,6 @@ func (t *Translator) translateOllamaBatch(w io.Writer, texts []string, from, to 
 		content = strings.TrimSpace(content)
 
 		if err := json.Unmarshal([]byte(content), &results); err != nil {
-			// Try to extract JSON array with bracket matching
 			start := strings.Index(content, "[")
 			end := strings.LastIndex(content, "]")
 			if start >= 0 && end > start {

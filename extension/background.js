@@ -228,11 +228,52 @@ async function handlePageTranslateFetch(message, sendResponse) {
 // ─── Ollama direct batch: single prompt with JSON array → single inference ──
 
 function ollamaLangName(lang) {
-  const m = { 'zh-Hans': '简体中文', 'zh-Hant': '繁體中文', 'zh': '中文',
-    'en': 'English', 'ja': '日本語', 'ko': '한국어',
-    'fr': 'Français', 'de': 'Deutsch', 'es': 'Español',
-    'pt': 'Português', 'ru': 'Русский', 'th': 'ไทย', 'vi': 'Tiếng Việt' };
+  const m = { 'zh-Hans': 'Simplified Chinese', 'zh-Hant': 'Traditional Chinese', 'zh': 'Chinese',
+    'en': 'English', 'ja': 'Japanese', 'ko': 'Korean',
+    'fr': 'French', 'de': 'German', 'es': 'Spanish',
+    'pt': 'Portuguese', 'ru': 'Russian', 'th': 'Thai', 'vi': 'Vietnamese' };
   return m[lang] || lang;
+}
+
+// Strip <think>, <Thinking>, <response> blocks that thinking models (qwen3, deepseek-r1)
+// may emit via /api/generate. Also drops preamble lines like "Okay, let me..."
+function stripThinkingTags(raw) {
+  let s = raw;
+  // Remove XML-style thinking blocks (handles unclosed tags too)
+  const tags = ['think', 'Thinking', 'THINK', 'response'];
+  for (const tag of tags) {
+    const open = '<' + tag + '>';
+    const close = '</' + tag + '>';
+    while (s.includes(open)) {
+      const start = s.indexOf(open);
+      const end = s.indexOf(close, start + open.length);
+      if (end < 0) {
+        s = s.substring(0, start);
+        break;
+      }
+      s = s.substring(0, start) + s.substring(end + close.length);
+    }
+  }
+  // Remove preamble lines
+  const lines = s.split('\n');
+  const clean = [];
+  const preambles = ['okay', 'first', 'let me', 'i need', 'i\'ll', 'here', 'the translation', 'sure', 'certainly', 'of course'];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const lower = trimmed.toLowerCase();
+    let skip = false;
+    for (const p of preambles) {
+      if (lower.startsWith(p)) { skip = true; break; }
+    }
+    if (!skip) clean.push(trimmed);
+  }
+  if (clean.length > 0) return clean.join('\n');
+  // Fallback: last non-empty line
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim()) return lines[i].trim();
+  }
+  return s;
 }
 
 async function handlePageOllamaTranslate(message, sendResponse) {
@@ -240,7 +281,7 @@ async function handlePageOllamaTranslate(message, sendResponse) {
     const texts = message.texts || [];
     if (texts.length === 0) { sendResponse({ ok: true, results: [] }); return; }
 
-    const url = (message.ollamaUrl || 'http://127.0.0.1:23323').replace(/\/$/, '');
+    const url = (message.ollamaUrl || 'http://127.0.0.1:11434').replace(/\/$/, '');
     let model = message.ollamaModel || '';
     if (!model) { model = await getDefaultModel(url); }
     if (!model) { sendResponse({ ok: false, results: null }); return; }
@@ -255,21 +296,18 @@ async function handlePageOllamaTranslate(message, sendResponse) {
     const payloadJSON = JSON.stringify(payloadTexts);
 
     const systemPrompt =
-      '将以下 JSON 数组中的每一条文本翻译为' + toName +
-      '。所有内容都要翻译，不要保留英文原文（型号编号、网址除外）。返回相同长度和顺序的 JSON 字符串数组。只返回 JSON 数组，不要解释、不要 markdown 代码块、不要多余文字。';
+      'Translate each text in the JSON array below into ' + toName +
+      '. Translate ALL text, do not keep any English original (except model numbers and URLs). Return a JSON string array of the same length and order. Only return the JSON array, no markdown, no explanation, no extra text.';
 
-    const resp = await fetch(url + '/v1/chat/completions', {
+    const resp = await fetch(url + '/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: payloadJSON },
-        ],
+        system: systemPrompt,
+        prompt: payloadJSON,
         stream: false,
-        temperature: 0,
-        chat_template_kwargs: { enable_thinking: false },
+        options: { temperature: 0, num_predict: 2048 },
       }),
     });
 
@@ -279,7 +317,8 @@ async function handlePageOllamaTranslate(message, sendResponse) {
     }
 
     const data = await resp.json();
-    const content = (data.choices && data.choices[0] && data.choices[0].message.content) || '[]';
+    let content = (data.response || '[]').trim();
+    content = stripThinkingTags(content);
 
     // Parse JSON array from model response (strip markdown fences if present)
     let raw = content.trim();
@@ -315,7 +354,7 @@ async function getDefaultModel(ollamaUrl) {
   if (_cachedDefaultModel && (Date.now() - _cachedDefaultModelAt) < 300000) {
     return _cachedDefaultModel;
   }
-  const baseUrl = (ollamaUrl || 'http://127.0.0.1:23323').replace(/\/$/, '');
+  const baseUrl = (ollamaUrl || 'http://127.0.0.1:11434').replace(/\/$/, '');
   try {
     const resp = await fetch(baseUrl + '/v1/models', { signal: AbortSignal.timeout(3000) });
     if (resp.ok) {
@@ -337,7 +376,7 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
     const text = (message.text || '').trim();
     if (!text) { sendResponse({ ok: true, translation: '' }); return; }
 
-    const url = (message.ollamaUrl || 'http://127.0.0.1:23323').replace(/\/$/, '');
+    const url = (message.ollamaUrl || 'http://127.0.0.1:11434').replace(/\/$/, '');
     let model = message.ollamaModel || '';
     if (!model) {
       model = await getDefaultModel(url);
@@ -350,22 +389,19 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
     const toName = ollamaLangName(message.to || 'zh-Hans');
 
     const systemPrompt =
-      '你是翻译专家。将用户输入的文本翻译为' + toName +
-      '。所有内容都要翻译，不要保留英文原文（型号编号、网址除外）。只输出译文，一行，不要解释、不要引号、不要多余文字。';
+      'You are a translator. Translate the user input into ' + toName +
+      '. Translate ALL text, do not keep any English original (except model numbers and URLs). Output only the translation, one line, no explanation, no quotes, no extra text.';
 
-    const apiUrl = url + '/v1/chat/completions';
+    const apiUrl = url + '/api/generate';
     const resp = await fetch(apiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: text },
-        ],
+        system: systemPrompt,
+        prompt: text,
         stream: false,
-        temperature: 0.1,
-        chat_template_kwargs: { enable_thinking: false },
+        options: { temperature: 0.1, num_predict: 1024 },
       }),
     });
 
@@ -377,8 +413,9 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
     }
 
     const data = await resp.json();
-    const translation = (data.choices && data.choices[0] && data.choices[0].message.content || '').trim();
-    if (translation.toLowerCase() === text.toLowerCase()) {
+    const rawResponse = (data.response || '').trim();
+    const translation = stripThinkingTags(rawResponse);
+    if (!translation || translation.toLowerCase() === text.toLowerCase()) {
       console.warn('[ollama-translate] model returned identity (untranslated), treating as failure');
       sendResponse({ ok: false, translation: '', reqId: message.reqId });
       return;

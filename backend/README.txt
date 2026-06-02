@@ -23,7 +23,6 @@ go build -ldflags="-s -w -H windowsgui -X main.version=dev" -o translation-serve
 
 启动后服务监听 http://localhost:29527
 - 健康检查: http://localhost:29527/health
-- 本地 LLM: http://127.0.0.1:23323 (llama-server 自动启动)
 - 语音识别: http://127.0.0.1:23321 (whisper-server 自动启动)
 
 首次启动会自动下载 llama.cpp 运行库（ggml-*.dll）到 backend 目录。
@@ -54,7 +53,7 @@ cd ..\..
 mkdir installer\embedded\models installer\embedded\scripts
 copy translation-server.exe installer\embedded\
 copy whisper-server.exe whisper.dll SDL2.dll installer\embedded\
-copy llama-server.exe llama*.dll ggml*.dll libomp140*.dll installer\embedded\
+copy llama*.dll ggml*.dll libomp140*.dll installer\embedded\
 copy ggml-cpu-*.dll installer\embedded\
 copy models\ggml-tiny.bin models\ggml-vad.bin installer\embedded\models\
 xcopy scripts installer\embedded\scripts /E /Y
@@ -79,7 +78,6 @@ copy installer.exe ..\auth-server\installer.exe
 - installer.exe 安装到 %LOCALAPPDATA%\AI-Translation，注册开机自启
 - 模型文件（.gguf）存放在 backend\models\，按需下载
 - 配置文件保存在 exe 同目录
-- 本地 LLM 端口：23323
 - 后端 API 端口：29527
 - 语音识别端口：23321
 - 浏览器扩展在 chrome://extensions 开发者模式加载 extension 目录

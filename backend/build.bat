@@ -39,10 +39,8 @@ copy /y whisper-server.exe installer\embedded\whisper-server.exe >nul
 copy /y whisper.dll installer\embedded\whisper.dll >nul
 copy /y SDL2.dll installer\embedded\SDL2.dll >nul
 :: llama.cpp Vulkan
-copy /y llama-server.exe installer\embedded\llama-server.exe >nul
 copy /y llama.dll installer\embedded\llama.dll >nul
 copy /y llama-common.dll installer\embedded\llama-common.dll >nul
-copy /y llama-server-impl.dll installer\embedded\llama-server-impl.dll >nul
 :: ggml core
 copy /y ggml.dll installer\embedded\ggml.dll >nul
 copy /y ggml-base.dll installer\embedded\ggml-base.dll >nul
@@ -50,6 +48,17 @@ copy /y ggml-vulkan.dll installer\embedded\ggml-vulkan.dll >nul
 copy /y ggml-rpc.dll installer\embedded\ggml-rpc.dll >nul
 :: ggml CPU backends (for broad CPU compatibility)
 for %%f in (ggml-cpu-*.dll) do copy /y "%%f" installer\embedded\ >nul
+:: Ollama installer (bundled for auto-install)
+if not exist OllamaSetup.exe (
+    echo       正在下载 OllamaSetup.exe (~250MB) ...
+    powershell -Command "Invoke-WebRequest -Uri 'https://ollama.com/download/OllamaSetup.exe' -OutFile 'OllamaSetup.exe'" 2>nul
+)
+if exist OllamaSetup.exe (
+    copy /y OllamaSetup.exe installer\embedded\OllamaSetup.exe >nul
+    echo       OllamaSetup.exe 已打包
+) else (
+    echo       WARNING: OllamaSetup.exe 未下载，跳过打包
+)
 copy /y models\ggml-tiny.bin installer\embedded\models\ggml-tiny.bin >nul
 copy /y models\ggml-vad.bin installer\embedded\models\ggml-vad.bin >nul
 xcopy /y /e scripts\* installer\embedded\scripts\ >nul 2>&1

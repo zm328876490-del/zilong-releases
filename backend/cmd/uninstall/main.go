@@ -21,10 +21,9 @@ func main() {
 	fmt.Print("正在停止服务...")
 	exec.Command("taskkill", "/f", "/im", "translation-server.exe").Run()
 	exec.Command("taskkill", "/f", "/im", "whisper-server.exe").Run()
-	exec.Command("taskkill", "/f", "/im", "llama-server.exe").Run()
-	exec.Command("taskkill", "/f", "/im", "python.exe").Run()
+		exec.Command("taskkill", "/f", "/im", "python.exe").Run()
 	time.Sleep(1000 * time.Millisecond)
-	procs := []string{"translation-server.exe", "whisper-server.exe", "llama-server.exe"}
+	procs := []string{"translation-server.exe", "whisper-server.exe"}
 	for i := 0; i < 50; i++ {
 		allGone := true
 		for _, name := range procs {

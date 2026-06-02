@@ -12,8 +12,6 @@ type Config struct {
 	ModelPath      string
 	ModelDir       string
 	VadModelPath   string // path to ggml-vad.bin (Silero VAD model for whisper)
-	LlamaServerExe string // path to llama-server.exe (bundled with installer)
-	LlamaModel     string // selected gguf model file name (without .gguf)
 	OllamaUrl      string
 	OllamaModel    string
 	OpenAIUrl      string
@@ -27,15 +25,20 @@ func (c *Config) WhisperPort() string {
 	return "23321"
 }
 
-// LlamaPort returns the port for llama-server.
-func (c *Config) LlamaPort() string {
-	return "23323"
+// exeDir returns the directory containing the running executable.
+func exeDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "."
+	}
+	return filepath.Dir(exe)
 }
 
 func Load() *Config {
+	ed := exeDir()
 	cfg := &Config{
 		Port:        "29527",
-		ModelDir:    filepath.Join(".", "models"),
+		ModelDir:    filepath.Join(ed, "models"),
 		OllamaUrl:   "http://localhost:11434",
 		OllamaModel: "qwen2.5:7b",
 	}
@@ -61,10 +64,6 @@ func Load() *Config {
 	if k := os.Getenv("DEEPL_KEY"); k != "" {
 		cfg.DeepLKey = k
 	}
-	if m := os.Getenv("LLAMA_MODEL"); m != "" {
-		cfg.LlamaModel = m
-	}
-
 	exeName := "whisper-cli"
 	if runtime.GOOS == "windows" {
 		exeName = "whisper-cli.exe"
@@ -72,11 +71,11 @@ func Load() *Config {
 
 	// Look for whisper-cli in common locations
 	candidates := []string{
-		filepath.Join(".", "whisper-server.exe"),
-		filepath.Join(".", exeName),
-		filepath.Join("..", "whisper.cpp", "build", "bin", "Release", exeName),
-		filepath.Join("..", "whisper.cpp", "build", "bin", exeName),
-		filepath.Join("..", "whisper.cpp", exeName),
+		filepath.Join(ed, "whisper-server.exe"),
+		filepath.Join(ed, exeName),
+		filepath.Join(ed, "..", "whisper.cpp", "build", "bin", "Release", exeName),
+		filepath.Join(ed, "..", "whisper.cpp", "build", "bin", exeName),
+		filepath.Join(ed, "..", "whisper.cpp", exeName),
 	}
 	if envExe := os.Getenv("WHISPER_EXE"); envExe != "" {
 		candidates = append([]string{envExe}, candidates...)
@@ -114,29 +113,6 @@ func Load() *Config {
 	for _, c := range vadCandidates {
 		if _, err := os.Stat(c); err == nil {
 			cfg.VadModelPath = c
-			break
-		}
-	}
-
-	// llama-server — resolve to absolute path so exec.Command works regardless of CWD
-	llamaExe := "llama-server.exe"
-	if runtime.GOOS != "windows" {
-		llamaExe = "llama-server"
-	}
-	llamaCandidates := []string{
-		filepath.Join(".", llamaExe),
-		filepath.Join("..", llamaExe),
-	}
-	if envLlama := os.Getenv("LLAMA_EXE"); envLlama != "" {
-		llamaCandidates = append([]string{envLlama}, llamaCandidates...)
-	}
-	for _, c := range llamaCandidates {
-		if _, err := os.Stat(c); err == nil {
-			if abs, err := filepath.Abs(c); err == nil {
-				cfg.LlamaServerExe = abs
-			} else {
-				cfg.LlamaServerExe = c
-			}
 			break
 		}
 	}

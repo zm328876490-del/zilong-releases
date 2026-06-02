@@ -59,6 +59,106 @@ func licPath() string {
 	return filepath.Join(filepath.Dir(os.Args[0]), "license.json")
 }
 
+// ensureOllama detects if Ollama is installed, installs it silently if bundled,
+// sets OLLAMA_ORIGINS=*, and ensures the service is running.
+func ensureOllama() {
+	exeDir := filepath.Dir(os.Args[0])
+
+	// ── Step 1: Detect existing Ollama ──────────────────────
+	ollamaPath := filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "Ollama", "ollama.exe")
+	installed := fileExists(ollamaPath)
+
+	if !installed {
+		// Also check PATH
+		if _, err := exec.LookPath("ollama"); err == nil {
+			installed = true
+			ollamaPath = "ollama"
+		}
+	}
+
+	if installed {
+		fmt.Println("[ollama] found:", ollamaPath)
+	} else {
+		// ── Step 2: Install from bundled OllamaSetup.exe ────
+		setupExe := filepath.Join(exeDir, "OllamaSetup.exe")
+		if !fileExists(setupExe) {
+			fmt.Println("[ollama] not installed and OllamaSetup.exe not bundled, skipping auto-install")
+			return
+		}
+		fmt.Println("[ollama] installing from:", setupExe)
+		cmd := exec.Command(setupExe, "/VERYSILENT", "/NORESTART")
+		cmd.Dir = exeDir
+		if err := cmd.Run(); err != nil {
+			fmt.Println("[ollama] install failed:", err)
+			return
+		}
+		fmt.Println("[ollama] install complete")
+		ollamaPath = filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "Ollama", "ollama.exe")
+		installed = true
+	}
+
+	// ── Step 3: Set OLLAMA_ORIGINS ─────────────────────────
+	key := `HKCU\Environment`
+	val, err := registryGetString(key, "OLLAMA_ORIGINS")
+	if err != nil || val != "*" {
+		cmd := exec.Command("setx", "OLLAMA_ORIGINS", "*")
+		if err := cmd.Run(); err != nil {
+			fmt.Println("[ollama] warn: failed to set OLLAMA_ORIGINS=*:", err)
+		} else {
+			fmt.Println("[ollama] OLLAMA_ORIGINS=* set")
+			// Restart Ollama so the new env var takes effect
+			exec.Command("taskkill", "/f", "/im", "ollama.exe").Run()
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	// ── Step 4: Ensure Ollama is running ───────────────────
+	if isOllamaRunning() {
+		fmt.Println("[ollama] service is running")
+		return
+	}
+	// Launch Ollama
+	fmt.Println("[ollama] starting...")
+	launchCmd := exec.Command(ollamaPath)
+	launchCmd.Dir = filepath.Dir(ollamaPath)
+	if err := launchCmd.Start(); err != nil {
+		fmt.Println("[ollama] failed to start:", err)
+	} else {
+		fmt.Println("[ollama] started")
+	}
+}
+
+func isOllamaRunning() bool {
+	resp, err := httpGet("http://127.0.0.1:11434/api/tags")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func registryGetString(key, name string) (string, error) {
+	cmd := exec.Command("reg", "query", key, "/v", name)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	// Parse "    OLLAMA_ORIGINS    REG_SZ    *" or "    OLLAMA_ORIGINS    REG_EXPAND_SZ    *"
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) >= 3 && strings.EqualFold(parts[0], name) {
+			return parts[len(parts)-1], nil
+		}
+	}
+	return "", fmt.Errorf("not found")
+}
+
 func loadLicense() {
 	data, err := os.ReadFile(licPath())
 	if err != nil {
@@ -854,6 +954,11 @@ func (c *Client) handlePreprocess(subs []Subtitle) {
 		wg.Add(1)
 		go func(idx int, text string) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("[preprocess] PANIC in translate goroutine idx=%d text=%s: %v\n", idx, text[:min(50, len(text))], r)
+				}
+			}()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			result, err := c.translator.Translate(text, from, to)
@@ -1113,9 +1218,6 @@ func isSentenceEndPunct(r rune) bool {
 // whisperServerURL is set at startup after whisper-server is ready.
 var whisperServerURL string
 
-// llamaServerURL is set at startup after llama-server is ready.
-var llamaServerURL string
-
 // modelManager handles gguf model downloads and listing.
 var modelManager *model.Manager
 
@@ -1168,7 +1270,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					client.translator.SetAsyncFn(client.translateViaBrowser)
 				}
 				if msg.Engine == "ollama" {
-					client.translator.SetOllama(llamaServerURL, msg.OllamaModel)
+					client.translator.SetOllama(msg.OllamaUrl, msg.OllamaModel)
 				}
 				if msg.Engine == "openai" {
 					client.translator.SetOpenAI(msg.OpenAIUrl, msg.OpenAIKey, msg.OpenAIModel)
@@ -1529,83 +1631,6 @@ func portIsFree(addr string) bool {
 	}
 	conn.Close()
 	return false
-}
-
-// ─── llama-server lifecycle ─────────────────────────────────────────────
-
-// startLlamaServer launches llama-server as a persistent subprocess with an
-// OpenAI-compatible API on /v1/chat/completions. Requires at least one gguf
-// model installed under cfg.ModelDir.
-func startLlamaServer(cfg *config.Config) (*exec.Cmd, error) {
-	if cfg.LlamaServerExe == "" {
-		return nil, fmt.Errorf("llama-server.exe not found")
-	}
-
-	modelPath := ""
-	if cfg.LlamaModel != "" {
-		p := filepath.Join(cfg.ModelDir, cfg.LlamaModel+".gguf")
-		if _, err := os.Stat(p); err == nil {
-			modelPath = p
-		}
-	}
-	if modelPath == "" {
-		models, _ := modelManager.List()
-		if len(models) > 0 {
-			modelPath = models[0].Path
-		}
-	}
-	if modelPath == "" {
-		return nil, fmt.Errorf("no gguf model installed, download one first")
-	}
-
-	llamaPort := cfg.LlamaPort()
-	llamaURL := fmt.Sprintf("http://127.0.0.1:%s", llamaPort)
-
-	// Kill any stale process from a previous run.
-	killPIDFile("llama-server")
-
-	// Build args — try GPU first, fall back to CPU.
-	baseArgs := []string{
-		"-m", modelPath,
-		"--port", llamaPort,
-		"--host", "127.0.0.1",
-		"-c", "4096",
-		"-b", "512",
-		"-t", "4",
-	}
-	gpuArgs := append(baseArgs, "-ngl", "99")
-
-	var cmd *exec.Cmd
-	var err error
-
-	startAndWait := func(args []string, timeout time.Duration) error {
-		cmd = exec.Command(cfg.LlamaServerExe, args...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
-		cmd.Stderr = os.Stderr
-		cmd.Stdout = os.Stdout
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("start llama-server: %w", err)
-		}
-		if err := waitForServer(llamaURL+"/health", timeout); err != nil {
-			cmd.Process.Kill()
-			return err
-		}
-		return nil
-	}
-
-	fmt.Println("[main] llama-server: starting with GPU (", modelPath, ")...")
-	if err = startAndWait(gpuArgs, 15*time.Second); err != nil {
-		fmt.Println("[main] llama-server: GPU failed (", err, "), retrying CPU only...")
-		if err2 := startAndWait(baseArgs, 30*time.Second); err2 != nil {
-			return nil, fmt.Errorf("llama-server startup: GPU=%w CPU=%w", err, err2)
-		}
-	}
-
-	llamaServerURL = llamaURL
-	savePIDFile("llama-server", cmd.Process.Pid)
-	fmt.Printf("[main] llama-server: ready on %s (PID %d)\n", llamaURL, cmd.Process.Pid)
-
-	return cmd, nil
 }
 
 func httpGet(url string) (*http.Response, error) {
@@ -2018,6 +2043,8 @@ func main() {
 
 	loadLicense()
 
+	ensureOllama()
+
 	modelManager = model.NewManager(cfg.ModelDir)
 
 	// Start whisper-server (keeps model warm)
@@ -2049,51 +2076,6 @@ func main() {
 			}
 		}()
 
-	// Start llama-server (local LLM, OpenAI-compatible API)
-	llamaCmd, err := startLlamaServer(cfg)
-	if err != nil {
-		fmt.Println("[main] llama-server:", err)
-	}
-	modelManager.SetOnChange(func() {
-		if llamaCmd != nil {
-			llamaCmd.Process.Kill()
-		}
-		killPIDFile("llama-server")
-		cmd, err := startLlamaServer(cfg)
-		if err != nil {
-			fmt.Println("[main] llama-server restart:", err)
-			return
-		}
-		llamaCmd = cmd
-	})
-
-	// Auto-start watcher: retry every 30s if model exists but server isn't running.
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			models, _ := modelManager.List()
-			if len(models) == 0 {
-				continue
-			}
-			if llamaServerURL != "" {
-				// Verify it's still actually responding
-				if resp, err := httpGet(llamaServerURL + "/health"); err == nil {
-					resp.Body.Close()
-					continue
-				}
-				fmt.Println("[main] llama-server: lost, restarting...")
-				llamaServerURL = ""
-			}
-			cmd, err := startLlamaServer(cfg)
-			if err != nil {
-				fmt.Println("[main] llama-server auto-start:", err)
-				continue
-			}
-			llamaCmd = cmd
-			fmt.Println("[main] llama-server: auto-started")
-		}
-	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/set-token", handleSetToken)
@@ -2108,6 +2090,27 @@ func main() {
 	mux.HandleFunc("/model/download/status", handleModelDownloadStatus)
 	mux.HandleFunc("/model/downloads", handleModelDownloads)
 	mux.HandleFunc("/model/delete", handleModelDelete)
+	mux.HandleFunc("/ollama/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp, err := httpGet("http://127.0.0.1:11434/api/tags")
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"online": false, "models": []string{}})
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		var data struct {
+			Models []struct{ Name string `json:"name"` } `json:"models"`
+		}
+		var models []string
+		if json.Unmarshal(body, &data) == nil {
+			for _, m := range data.Models {
+				models = append(models, m.Name)
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"online": true, "models": models})
+	})
+
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := map[string]interface{}{
@@ -2118,7 +2121,6 @@ func main() {
 			"whisperExe": cfg.WhisperExe,
 			"modelPath":  cfg.ModelPath,
 			"asrServer":  whisperServerURL,
-			"llamaServer": llamaServerURL,
 		}
 		json.NewEncoder(w).Encode(status)
 	})
@@ -2133,13 +2135,6 @@ func main() {
 		if whisperCmd != nil {
 			whisperCmd.Process.Kill()
 		}
-		if llamaCmd != nil {
-			llamaCmd.Process.Kill()
-		} else {
-			// We may have reused an existing server; try cleaning up by PID file.
-			killPIDFile("llama-server")
-		}
-		removePIDFile("llama-server")
 		removePIDFile("whisper-server")
 		os.Exit(0)
 	}()

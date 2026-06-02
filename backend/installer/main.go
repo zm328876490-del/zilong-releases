@@ -303,12 +303,11 @@ func doInstall(targetDir string, totalFiles int) {
 	sendProgress("正在停止旧服务...", 0)
 	runHidden("taskkill", "/f", "/im", serviceExe)
 	runHidden("taskkill", "/f", "/im", "whisper-server.exe")
-	runHidden("taskkill", "/f", "/im", "llama-server.exe")
-	runHidden("taskkill", "/f", "/im", "python.exe")
+		runHidden("taskkill", "/f", "/im", "python.exe")
 	time.Sleep(1000 * time.Millisecond)
 
 	// Wait for processes to exit (max 10s), update label during wait
-	procs := []string{serviceExe, "whisper-server.exe", "llama-server.exe"}
+	procs := []string{serviceExe, "whisper-server.exe"}
 	for i := 0; i < 50; i++ {
 		allGone := true
 		for _, name := range procs {
