@@ -583,7 +583,8 @@
 
     serviceWasRunning = localOk;
 
-    var storage = await chrome.storage.local.get(['localVersion']);
+    var runningVer = "";
+	    var storage = await chrome.storage.local.get(['localVersion']);
     if (localOk) {
       var ver = storage.localVersion || '';
       serviceStatus.textContent = '本地服务: 运行中 ✅' + (ver ? ' v' + ver : '');
@@ -594,10 +595,10 @@
         var hResp = await fetch(LOCAL_HEALTH);
         if (hResp.ok) {
           var hData = await hResp.json();
-          var runningVer = hData.version || '';
+          runningVer = hData.version || '';
           var lic = hData.licensed;
           var plan = hData.plan || '';
-          if (runningVer && runningVer !== storage.localVersion) {
+          if (runningVer) {
             await chrome.storage.local.set({ localVersion: runningVer });
             ver = runningVer;
           }
@@ -622,8 +623,7 @@
       if (verResp.ok) {
         var verData = await verResp.json();
         latestVersion = verData.version || '';
-        var storage = await chrome.storage.local.get(['localVersion']);
-        var localVer = storage.localVersion || '0.0.0';
+        var localVer = runningVer || storage.localVersion || '0.0.0';
         if (latestVersion && cmpVersion(latestVersion, localVer) > 0) {
           installBtn.style.display = '';
           installBtn.textContent = localOk ? '更新 v' + latestVersion : '下载安装 (v' + latestVersion + ')';

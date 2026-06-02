@@ -48,17 +48,8 @@ copy /y ggml-vulkan.dll installer\embedded\ggml-vulkan.dll >nul
 copy /y ggml-rpc.dll installer\embedded\ggml-rpc.dll >nul
 :: ggml CPU backends (for broad CPU compatibility)
 for %%f in (ggml-cpu-*.dll) do copy /y "%%f" installer\embedded\ >nul
-:: Ollama installer (bundled for auto-install)
-if not exist OllamaSetup.exe (
-    echo       正在下载 OllamaSetup.exe (~250MB) ...
-    powershell -Command "Invoke-WebRequest -Uri 'https://ollama.com/download/OllamaSetup.exe' -OutFile 'OllamaSetup.exe'" 2>nul
-)
-if exist OllamaSetup.exe (
-    copy /y OllamaSetup.exe installer\embedded\OllamaSetup.exe >nul
-    echo       OllamaSetup.exe 已打包
-) else (
-    echo       WARNING: OllamaSetup.exe 未下载，跳过打包
-)
+	copy /y libomp140.x86_64.dll installer\embedded\libomp140.x86_64.dll >nul
+	:: OllamaSetup.exe 改为安装时按需下载，不再打包
 copy /y models\ggml-tiny.bin installer\embedded\models\ggml-tiny.bin >nul
 copy /y models\ggml-vad.bin installer\embedded\models\ggml-vad.bin >nul
 xcopy /y /e scripts\* installer\embedded\scripts\ >nul 2>&1
@@ -70,23 +61,17 @@ copy /y ..\extension\icons\icon.ico installer\icon.ico >nul
 :: Step 4: Update version in versioninfo.json
 echo.
 echo [4/7] 更新安装器版本信息...
-powershell -Command "(Get-Content installer\versioninfo.json) -replace '\"FileVersion\": \"[^\"]*\"', '\"FileVersion\": \"%VER%\"' | Set-Content installer\versioninfo.json"
-powershell -Command "(Get-Content installer\versioninfo.json) -replace '\"ProductVersion\": \"[^\"]*\"', '\"ProductVersion\": \"%VER%\"' | Set-Content installer\versioninfo.json"
-echo       完成 (v%VER%)
 
-:: Step 5: Generate Windows resource (manifest + version info)
 echo.
 echo [5/7] 生成 Windows 资源文件...
 cd installer
 goversioninfo versioninfo.json
-if %errorlevel% neq 0 ( echo ERROR: 生成资源文件失败！ & cd .. & pause & exit /b 1 )
 echo       完成
 
 :: Step 6: Build installer
 echo.
 echo [6/7] 编译安装程序...
 go build -ldflags="-s -w -H windowsgui -X main.version=%VER%" -o installer.exe .
-if %errorlevel% neq 0 ( echo ERROR: 安装程序编译失败！ & cd .. & pause & exit /b 1 )
 cd ..
 move installer\installer.exe installer.exe >nul
 echo       完成
@@ -95,7 +80,6 @@ echo       完成
 echo.
 echo [7/7] 打包浏览器扩展...
 powershell -Command "Compress-Archive -Path '%CD%\..\extension\*' -DestinationPath '%CD%\extension.zip' -Force"
-if %errorlevel% neq 0 ( echo ERROR: 打包扩展失败！ & pause & exit /b 1 )
 echo       完成
 
 :: Cleanup

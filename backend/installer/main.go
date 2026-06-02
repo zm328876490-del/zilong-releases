@@ -2,8 +2,10 @@ package main
 
 import (
 	"embed"
+	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -348,7 +350,7 @@ func doInstall(targetDir string, totalFiles int) {
 			return copyErr
 		}
 		fileIdx++
-		pct := 5 + fileIdx*85/totalFiles
+		pct := 5 + fileIdx*55/totalFiles
 		sendProgress("正在安装: "+relPath, pct)
 		return nil
 	})
@@ -357,7 +359,26 @@ func doInstall(targetDir string, totalFiles int) {
 		return
 	}
 
-	// Step 3: Registry (90% → 95%)
+	// Step 3: Ensure Ollama is installed (60% → 90%)
+	if !isOllamaInstalled() {
+		sendProgress("正在准备下载 Ollama...", 60)
+		installerPath := filepath.Join(targetDir, "OllamaSetup.exe")
+		if err := downloadOllama(installerPath); err != nil {
+			sendDone(fmt.Errorf("下载 Ollama 失败: %w", err))
+			return
+		}
+		sendProgress("正在安装 Ollama (可能需要几分钟)...", 85)
+		if err := installOllamaSilent(installerPath); err != nil {
+			sendDone(fmt.Errorf("安装 Ollama 失败: %w", err))
+			return
+		}
+		os.Remove(installerPath)
+		sendProgress("Ollama 安装完成", 90)
+	} else {
+		sendProgress("Ollama 已安装", 90)
+	}
+
+	// Step 4: Registry (90% → 95%)
 	sendProgress("正在注册系统...", 92)
 
 	k, err := registry.OpenKey(registry.CURRENT_USER,
@@ -385,15 +406,119 @@ func doInstall(targetDir string, totalFiles int) {
 		uk.Close()
 	}
 
-	// Step 4: Launch service (95% → 100%)
-	sendProgress("正在启动服务...", 97)
+	// Step 5: Launch service + verify (95% → 100%)
+	sendProgress("正在启动服务...", 95)
 	cmd := exec.Command(filepath.Join(targetDir, serviceExe))
 	cmd.Dir = targetDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	cmd.Start()
 
-	sendProgress("安装完成", 100)
-	sendDone(nil)
+	// Poll /health until the service is ready
+	healthURL := "http://127.0.0.1:29527/health"
+	for i := 0; i < 40; i++ {
+		time.Sleep(500 * time.Millisecond)
+		resp, err := http.Get(healthURL)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				sendProgress("安装完成", 100)
+				sendDone(nil)
+				return
+			}
+		}
+		if i%4 == 0 {
+			sendProgress("正在等待服务就绪...", 97)
+		}
+	}
+	sendDone(fmt.Errorf("服务启动超时，请检查 %s 是否运行", serviceExe))
+}
+
+// ─── Ollama on-demand install ──────────────────────────────────────
+
+const ollamaDownloadURL = "https://ollama.com/download/OllamaSetup.exe"
+
+func isOllamaInstalled() bool {
+	// Check common locations
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		localAppData = filepath.Join(os.Getenv("APPDATA"), "..", "Local")
+	}
+	paths := []string{
+		filepath.Join(localAppData, "Programs", "Ollama", "ollama.exe"),
+		filepath.Join(os.Getenv("ProgramFiles"), "Ollama", "ollama.exe"),
+		filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "Programs", "Ollama", "ollama.exe"),
+	}
+	for _, p := range paths {
+		if fileExists(p) {
+			return true
+		}
+	}
+	// Also try PATH
+	_, err := exec.LookPath("ollama.exe")
+	if err == nil {
+		return true
+	}
+	_, err = exec.LookPath("ollama")
+	return err == nil
+}
+
+func downloadOllama(dest string) error {
+	sendProgress("正在下载 Ollama (连接中...)", 0)
+
+	resp, err := http.Get(ollamaDownloadURL)
+	if err != nil {
+		return fmt.Errorf("下载 Ollama 失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("下载 Ollama 失败: HTTP %d", resp.StatusCode)
+	}
+
+	totalSize := resp.ContentLength
+	f, err := os.Create(dest)
+	if err != nil {
+		return fmt.Errorf("创建文件失败: %w", err)
+	}
+	defer f.Close()
+
+	buf := make([]byte, 32*1024)
+	var downloaded int64
+	for {
+		nr, readErr := resp.Body.Read(buf)
+		if nr > 0 {
+			nw, writeErr := f.Write(buf[0:nr])
+			if writeErr != nil {
+				return fmt.Errorf("写入文件失败: %w", writeErr)
+			}
+			if nw != nr {
+				return fmt.Errorf("写入不完整")
+			}
+			downloaded += int64(nw)
+			if totalSize > 0 {
+				pct := int(downloaded * 100 / totalSize)
+				mbDownloaded := float64(downloaded) / (1024 * 1024)
+				mbTotal := float64(totalSize) / (1024 * 1024)
+				sendProgress(fmt.Sprintf("正在下载 Ollama (%.0f / %.0f MB)", mbDownloaded, mbTotal), pct)
+			} else {
+				mbDownloaded := float64(downloaded) / (1024 * 1024)
+				sendProgress(fmt.Sprintf("正在下载 Ollama (%.0f MB)", mbDownloaded), 50)
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return fmt.Errorf("下载中断: %w", readErr)
+		}
+	}
+	return nil
+}
+
+func installOllamaSilent(installerPath string) error {
+	cmd := exec.Command(installerPath, "/S")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	return cmd.Run()
 }
 
 // ─── Main ─────────────────────────────────────────────────────────
