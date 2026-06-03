@@ -94,18 +94,22 @@ func detectVRAM() (model string, vramMB int) {
 
 func detectNvidiaSMI() (string, int) {
 	// Query GPU name and memory
-	nameOut, err := exec.Command("nvidia-smi",
+	cmd := exec.Command("nvidia-smi",
 		"--query-gpu=name",
 		"--format=csv,noheader",
-	).Output()
+	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	nameOut, err := cmd.Output()
 	if err != nil {
 		return "", 0
 	}
 
-	memOut, err := exec.Command("nvidia-smi",
+	cmd2 := exec.Command("nvidia-smi",
 		"--query-gpu=memory.total",
 		"--format=csv,noheader,nounits",
-	).Output()
+	)
+	cmd2.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	memOut, err := cmd2.Output()
 	if err != nil {
 		return "", 0
 	}
@@ -126,11 +130,13 @@ func detectNvidiaSMI() (string, int) {
 }
 
 func detectWMI() (string, int) {
-	out, err := exec.Command("wmic",
+	cmd := exec.Command("wmic",
 		"path", "win32_videocontroller",
 		"get", "name,adapterram",
 		"/format:csv",
-	).Output()
+	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.Output()
 	if err != nil {
 		return "", 0
 	}
