@@ -18,6 +18,10 @@ type Config struct {
 	OpenAIKey      string
 	OpenAIModel    string
 	DeepLKey       string
+
+	// Populated by hardware detection at startup.
+	DefaultModel string
+	ModelTier    string // "light" / "standard" / "advanced"
 }
 
 // WhisperPort returns the port for whisper-server (different from our WS port).

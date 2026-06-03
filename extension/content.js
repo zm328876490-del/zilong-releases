@@ -3759,7 +3759,7 @@ function generateSessionId() {
       }
     }
     if (newSettings.ollamaUrl !== undefined) settings.ollamaUrl = newSettings.ollamaUrl;
-    if (newSettings.ollamaModel !== undefined) settings.ollamaModel = newSettings.ollamaModel;
+    if (newSettings.ollamaModel !== undefined) settings.ollamaModel = newSettings.ollamaModel || settings.ollamaModel;
     if (newSettings.openaiUrl !== undefined) settings.openaiUrl = newSettings.openaiUrl;
     if (newSettings.openaiKey !== undefined) settings.openaiKey = newSettings.openaiKey;
     if (newSettings.openaiModel !== undefined) settings.openaiModel = newSettings.openaiModel;

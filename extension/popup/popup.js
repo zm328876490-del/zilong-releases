@@ -8,23 +8,6 @@
   const targetLangSelect = document.getElementById('targetLang');
   const translateEngineSelect = document.getElementById('translateEngine');
   let prevEngine = translateEngineSelect.value;
-  const ollamaModal = document.getElementById('ollamaModal');
-
-  const ollamaModelInput = document.getElementById('ollamaModel');
-  const ollamaCancelBtn = document.getElementById('ollamaCancel');
-  const ollamaConfirmBtn = document.getElementById('ollamaConfirm');
-  // Ollama management elements
-  const ollamaStatusBar = document.getElementById('ollamaStatusBar');
-  const ollamaStatusDot = document.getElementById('ollamaStatusDot');
-  const ollamaStatusText = document.getElementById('ollamaStatusText');
-  const ollamaGuideLink = document.getElementById('ollamaGuideLink');
-  const ollamaGuide = document.getElementById('ollamaGuide');
-  const ollamaModelInstall = document.getElementById('ollamaModelInstall');
-  const ollamaModelCheckboxes = document.getElementById('ollamaModelCheckboxes');
-  const btnPullModels = document.getElementById('btnPullModels');
-  const pullProgress = document.getElementById('pullProgress');
-  const pullProgressBar = document.getElementById('pullProgressBar');
-  const pullProgressFill = document.getElementById('pullProgressFill');
   const subtitleToggle = document.getElementById('subtitleToggle');
   const subtitleSizeSection = document.getElementById('subtitleSizeSection');
   const subtitleSizeSlider = document.getElementById('subtitleSize');
@@ -40,7 +23,30 @@
   const errorMsg = document.getElementById('errorMsg');
   const serviceStatus = document.getElementById('serviceStatus');
   const installBtn = document.getElementById('installBtn');
-  const versionBadge = document.getElementById('versionBadge');
+  const serviceHint = document.getElementById('serviceHint');
+
+  // Model status elements
+  const modelStatus = document.getElementById('modelStatus');
+  const modelStatusIcon = document.getElementById('modelStatusIcon');
+  const modelStatusText = document.getElementById('modelStatusText');
+  const modelProgressWrap = document.getElementById('modelProgressWrap');
+  const modelProgressBar = document.getElementById('modelProgressBar');
+  const modelProgressFill = document.getElementById('modelProgressFill');
+  const modelProgressDetail = document.getElementById('modelProgressDetail');
+  const modelHardwareHint = document.getElementById('modelHardwareHint');
+
+  // Model status brief (in service card)
+  const modelStatusBrief = document.getElementById('modelStatusBrief');
+
+  // Update progress elements
+  const updateProgressWrap = document.getElementById('updateProgressWrap');
+  const updateProgressFill = document.getElementById('updateProgressFill');
+  const updateProgressDetail = document.getElementById('updateProgressDetail');
+
+  // Local model modal
+  const localModelModal = document.getElementById('localModelModal');
+  const localModelCancel = document.getElementById('localModelCancel');
+  const localModelConfirm = document.getElementById('localModelConfirm');
 
   // Header elements
   const headerAvatar = document.getElementById('headerAvatar');
@@ -117,13 +123,13 @@
 
   function selectEngine(engine) {
     translateEngineSelect.value = engine;
-    prevEngine = engine;
     renderEngineDropdown(engine);
-    if (engine === 'ollama') {
-      showOllamaModal();
-    } else if (isOpenAIEngine(engine) || engine === 'deepl') {
+    if (isOpenAIEngine(engine) || engine === 'deepl') {
       showApiKeyModal(engine);
+    } else if (engine === 'ollama') {
+      showLocalModelModal();
     } else {
+      prevEngine = engine;
       saveSettings();
       syncPageLangEngine();
     }
@@ -183,35 +189,7 @@
 
   let pendingApiEngine = null; // which engine triggered the apiKeyModal
 
-  // ─── Recommended Ollama models ─────────────────────────────────
-  const RCMD_MODELS = [
-    { name: 'gemma3:1b',       display: 'Gemma 3 1B (Google)',   size: '0.8GB', quality: '一般', speed: '极快', scenario: 'Google 最新小模型' },
-    { name: 'qwen2.5:1.5b',    display: 'Qwen 2.5 1.5B (阿里)',   size: '1.0GB', quality: '一般', speed: '快',   scenario: '低配设备 / 日常' },
-    { name: 'llama3.2:1b',     display: 'Llama 3.2 1B (Meta)',   size: '1.3GB', quality: '一般', speed: '快',   scenario: 'Meta 最新轻量' },
-    { name: 'qwen2.5:3b',      display: 'Qwen 2.5 3B (阿里)',     size: '1.9GB', quality: '中等', speed: '中等', scenario: '推荐日常使用' },
-    { name: 'llama3.2:3b',     display: 'Llama 3.2 3B (Meta)',   size: '2.0GB', quality: '中等', speed: '中等', scenario: 'Meta 最新中量' },
-    { name: 'phi3.5:3.8b',     display: 'Phi-3.5 3.8B (微软)',    size: '2.2GB', quality: '中等', speed: '中等', scenario: '微软轻量级' },
-    { name: 'gemma3:4b',       display: 'Gemma 3 4B (Google)',   size: '2.6GB', quality: '良好', speed: '中等', scenario: '多语种翻译强' },
-    { name: 'qwen2.5:7b',      display: 'Qwen 2.5 7B (阿里)',     size: '4.7GB', quality: '良好', speed: '中等', scenario: '翻译质量好' },
-    { name: 'qwen2.5:14b',     display: 'Qwen 2.5 14B (阿里)',    size: '8.5GB', quality: '优秀', speed: '慢',   scenario: '最佳翻译质量' },
-  ];
-
-  let _ollamaTimer = null;
-  let pulling = false;
-
-  function detectDeviceRAM() {
-    try { const gb = navigator.deviceMemory; return typeof gb === 'number' && gb > 0 ? gb : null; } catch (_) { return null; }
-  }
-
-  function modelLevel(m) {
-    const gb = parseFloat(m.size);
-    if (gb <= 2) return 'light';
-    if (gb <= 8) return 'mid';
-    return 'heavy';
-  }
-
   const AUTH_API = 'http://101.96.227.131/auth-server';
-  const INSTALLER_URL = 'https://github.com/zm328876490-del/zilong-releases/releases/latest/download/installer.exe';
   const LOCAL_BASE = 'http://localhost:29527';
   const LOCAL_HEALTH = LOCAL_BASE + '/health';
 
@@ -224,7 +202,7 @@
     targetLang: 'zh-Hans',
     engine: 'microsoft',
     ollamaUrl: 'http://127.0.0.1:11434',
-    ollamaModel: '',
+    ollamaModel: 'qwen2.5:7b',
     openaiUrl: 'https://api.deepseek.com/v1',
     openaiKey: '',
     openaiModel: 'deepseek-chat',
@@ -257,12 +235,13 @@
     targetLangSelect.value = targetLang;
     translateEngineSelect.value = settings.engine || DEFAULT_SETTINGS.engine;
 
-    ollamaModelInput.value = settings.ollamaModel || DEFAULT_SETTINGS.ollamaModel;
     // New engine fields — restore from per-engine keys or defaults
     apiUrlInput.value = settings.openaiUrl || DEFAULT_SETTINGS.openaiUrl;
     apiKeyInput.value = settings.openaiKey || DEFAULT_SETTINGS.openaiKey;
     apiModelInput.value = settings.openaiModel || DEFAULT_SETTINGS.openaiModel;
     prevEngine = settings.engine || DEFAULT_SETTINGS.engine;
+    // Migrate old empty ollamaModel to default
+    if (!settings.ollamaModel) settings.ollamaModel = DEFAULT_SETTINGS.ollamaModel;
     subtitleToggle.checked = settings.subtitleEnabled !== false;
     updateSubtitleSizeVisibility();
     subtitleSizeSlider.value = settings.subtitleSize || 50;
@@ -283,7 +262,7 @@
       targetLang: targetLangSelect.value,
       engine: translateEngineSelect.value,
       ollamaUrl: 'http://127.0.0.1:11434',
-      ollamaModel: ollamaModelInput.value.trim() || '',
+      ollamaModel: 'qwen2.5:7b',
       openaiUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
       openaiKey: apiKeyInput.value.trim(),
       openaiModel: apiModelInput.value.trim() || DEFAULT_SETTINGS.openaiModel,
@@ -325,7 +304,7 @@
     };
     const label = text || statusMap[status] || status;
     if (status === 'listening' || status === 'connected') {
-      serviceStatus.textContent = '本地服务: 运行中 ✅';
+      serviceStatus.innerHTML = '<span class="status-dot"></span>本地服务';
       serviceStatus.className = 'service-status running';
     }
   }
@@ -352,51 +331,6 @@
       el.addEventListener('input', saveSettings);
     }
   );
-
-
-  ollamaModelInput.addEventListener('change', function () { saveSettings(); });
-
-  function showOllamaModal() {
-    var cfg = ENGINE_CONFIG['ollama'];
-    document.getElementById('ollamaModalTitle').innerHTML = (cfg ? cfg.svg : '') + ' ' + cfg.label;
-    ollamaModal.style.display = 'flex';
-    checkOllamaStatus();
-    _ollamaTimer = setInterval(checkOllamaStatus, 3000);
-    checkOngoingDownloads();
-  }
-
-  function hideOllamaModal() {
-    ollamaModal.style.display = 'none';
-    if (_ollamaTimer) { clearInterval(_ollamaTimer); _ollamaTimer = null; }
-    // Keep pull polling running in background (SW handles the actual download)
-  }
-
-  ollamaConfirmBtn.addEventListener('click', function () {
-    prevEngine = 'ollama';
-    renderEngineDropdown('ollama');
-    hideOllamaModal();
-    saveSettings();
-    syncPageLangEngine();
-  });
-
-  ollamaCancelBtn.addEventListener('click', function () {
-    translateEngineSelect.value = prevEngine;
-    renderEngineDropdown(prevEngine);
-    hideOllamaModal();
-  });
-
-  ollamaModal.addEventListener('click', function (e) {
-    if (e.target === ollamaModal) {
-      translateEngineSelect.value = prevEngine;
-      renderEngineDropdown(prevEngine);
-      hideOllamaModal();
-    }
-  });
-
-  // Ollama guide link
-  ollamaGuideLink.addEventListener('click', function () {
-    ollamaGuide.style.display = ollamaGuide.style.display === 'none' ? '' : 'none';
-  });
 
   // ─── API Key modal (for DeepL and OpenAI-compatible engines) ────────
 
@@ -448,10 +382,37 @@
     }
   });
 
-  apiKeyModal.addEventListener('click', function (e) {
-    if (e.target === apiKeyModal) {
+  // ─── Local model modal ──────────────────────────────────────────────
+
+  function showLocalModelModal() {
+    fetchModelStatus();
+    localModelModal.style.display = 'flex';
+  }
+
+  function hideLocalModelModal(save) {
+    localModelModal.style.display = 'none';
+    if (save) {
+      prevEngine = 'ollama';
+      renderEngineDropdown('ollama');
+      saveSettings();
+      syncPageLangEngine();
+    } else {
       translateEngineSelect.value = prevEngine;
-      hideApiKeyModal();
+      renderEngineDropdown(prevEngine);
+    }
+  }
+
+  localModelConfirm.addEventListener('click', function () {
+    hideLocalModelModal(true);
+  });
+
+  localModelCancel.addEventListener('click', function () {
+    hideLocalModelModal(false);
+  });
+
+  localModelModal.addEventListener('click', function (e) {
+    if (e.target === localModelModal) {
+      hideLocalModelModal(false);
     }
   });
 
@@ -515,7 +476,7 @@
       pageTargetLang: targetLangSelect.value,
       pageEngine: engine,
       pageOllamaUrl: 'http://127.0.0.1:11434',
-      pageOllamaModel: ollamaModelInput.value.trim() || '',
+      pageOllamaModel: customModel.value.trim() || '',
       pageOpenAIUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
       pageOpenAIKey: apiKeyInput.value.trim(),
       pageOpenAIModel: apiModelInput.value.trim() || DEFAULT_SETTINGS.openaiModel,
@@ -527,7 +488,7 @@
         targetLang: targetLangSelect.value,
         engine: engine,
         ollamaUrl: 'http://127.0.0.1:11434',
-        ollamaModel: ollamaModelInput.value.trim() || '',
+        ollamaModel: 'qwen2.5:7b',
         openaiUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
         openaiKey: apiKeyInput.value.trim(),
         openaiModel: apiModelInput.value.trim() || DEFAULT_SETTINGS.openaiModel,
@@ -568,13 +529,11 @@
   }
 
   // ─── Local Service ──────────────────────────────────────────────
-  let latestVersion = '';
-  let latestHash = '';
   let serviceWasRunning = false;
 
   async function checkLocalService() {
-    serviceStatus.textContent = '检测中...';
-    serviceStatus.className = 'service-status checking';
+    if (expectingRestart) return;
+
     var localOk = false;
     try {
       var resp = await fetch(LOCAL_HEALTH);
@@ -583,64 +542,29 @@
 
     serviceWasRunning = localOk;
 
-    var runningVer = "";
-	    var storage = await chrome.storage.local.get(['localVersion']);
     if (localOk) {
-      var ver = storage.localVersion || '';
-      serviceStatus.textContent = '本地服务: 运行中 ✅' + (ver ? ' v' + ver : '');
-      serviceStatus.className = 'service-status running';
       await sendTokenToLocalService();
       // Sync version + license from real health response
       try {
         var hResp = await fetch(LOCAL_HEALTH);
         if (hResp.ok) {
           var hData = await hResp.json();
-          runningVer = hData.version || '';
-          var lic = hData.licensed;
-          var plan = hData.plan || '';
+          var runningVer = hData.version || '';
           if (runningVer) {
             await chrome.storage.local.set({ localVersion: runningVer });
-            ver = runningVer;
           }
-          if (!lic) {
-            serviceStatus.textContent = '本地服务: 运行中 ⚠️ 未激活' + (ver ? ' v' + ver : '');
-            serviceStatus.className = 'service-status unlicensed';
-          } else {
-            serviceStatus.textContent = '本地服务: 运行中 ✅ 已激活' + (ver ? ' v' + ver : '');
-          }
+          updateServiceUI('running', '<span class="status-dot"></span>本地服务: v' + (runningVer || ''));
         }
       } catch (_) {}
       installBtn.style.display = 'none';
+      serviceHint.style.display = '';
     } else {
-      serviceStatus.textContent = '本地服务: 未安装';
-      serviceStatus.className = 'service-status stopped';
+      updateServiceUI('stopped', '<span class="status-dot"></span>本地服务: 未安装');
       installBtn.style.display = '';
+      serviceHint.style.display = 'none';
     }
 
-    // Version check
-    try {
-      var verResp = await fetch(AUTH_API + '/api/version');
-      if (verResp.ok) {
-        var verData = await verResp.json();
-        latestVersion = verData.version || '';
-        var localVer = runningVer || storage.localVersion || '0.0.0';
-        if (latestVersion && cmpVersion(latestVersion, localVer) > 0) {
-          installBtn.style.display = '';
-          installBtn.textContent = localOk ? '更新 v' + latestVersion : '下载安装 (v' + latestVersion + ')';
-          if (localOk) versionBadge.style.display = '';
-        }
-      }
-    } catch (_) {}
-  }
-
-  function cmpVersion(a, b) {
-    var pa = (a || '0.0.0').split('.').map(Number);
-    var pb = (b || '0.0.0').split('.').map(Number);
-    for (var i = 0; i < 3; i++) {
-      if ((pa[i] || 0) > (pb[i] || 0)) return 1;
-      if ((pa[i] || 0) < (pb[i] || 0)) return -1;
-    }
-    return 0;
+    checkRemoteVersion();
   }
 
   async function sendTokenToLocalService() {
@@ -657,71 +581,189 @@
     } catch (_) {}
   }
 
-  let activeDownloadId = null;
-  let progressTimer = null;
+  // ─── Version check ─────────────────────────────────────────────────
+  let latestVersion = '';
 
-  function pollProgress() {
-    if (activeDownloadId == null) { clearInterval(progressTimer); return; }
-    chrome.downloads.search({ id: activeDownloadId }, function (results) {
-      if (results.length === 0) return;
-      var item = results[0];
-      if (item.state === 'complete') {
-        clearInterval(progressTimer);
-        progressTimer = null;
-        chrome.downloads.open(activeDownloadId);
-        if (latestVersion) chrome.storage.local.set({ localVersion: latestVersion });
-        versionBadge.style.display = 'none';
-        activeDownloadId = null;
-        if (serviceWasRunning) {
+  async function checkRemoteVersion() {
+    try {
+      var verResp = await fetch(AUTH_API + '/api/version');
+      if (verResp.ok) {
+        var verData = await verResp.json();
+        latestVersion = verData.version || '';
+        var storage = await chrome.storage.local.get(['localVersion']);
+        var localVer = storage.localVersion || '0.0.0';
+        if (latestVersion && cmpVersion(latestVersion, localVer) > 0) {
+          installBtn.style.display = '';
+          serviceHint.style.display = 'none';
+          installBtn.textContent = serviceWasRunning ? '更新 v' + latestVersion : '下载安装 (v' + latestVersion + ')';
+        }
+      }
+    } catch (_) {}
+  }
+
+  function cmpVersion(a, b) {
+    var pa = (a || '0.0.0').split('.').map(Number);
+    var pb = (b || '0.0.0').split('.').map(Number);
+    for (var i = 0; i < 3; i++) {
+      if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+      if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+    }
+    return 0;
+  }
+
+  // ─── Self-update flow (Chrome downloads API) ────────────────────────
+  let expectingRestart = false;
+  let activeDownloadId = null;
+  let downloadProgressTimer = null;
+
+  const INSTALLER_URLS = [
+    'https://github.com/zm328876490-del/zilong-releases/releases/latest/download/installer.exe',
+    'https://ghproxy.com/https://github.com/zm328876490-del/zilong-releases/releases/latest/download/installer.exe'
+  ];
+
+  function updateServiceUI(status, text) {
+    serviceStatus.innerHTML = text;
+    serviceStatus.className = 'service-status ' + status;
+  }
+
+  function showUpdateProgress(pct, detail) {
+    updateProgressWrap.style.display = '';
+    updateProgressFill.style.width = (pct || 0) + '%';
+    updateProgressDetail.textContent = detail || '';
+  }
+
+  function hideUpdateProgress() {
+    updateProgressWrap.style.display = 'none';
+    clearInterval(downloadProgressTimer);
+    downloadProgressTimer = null;
+  }
+
+  function pollChromeDownloadProgress() {
+    if (downloadProgressTimer) clearInterval(downloadProgressTimer);
+    downloadProgressTimer = setInterval(function () {
+      if (activeDownloadId == null) return;
+      chrome.downloads.search({ id: activeDownloadId }, function (results) {
+        if (!results || results.length === 0) return;
+        var dl = results[0];
+        if (dl.state === 'complete') {
+          clearInterval(downloadProgressTimer);
+          downloadProgressTimer = null;
+          showUpdateProgress(100, '下载完成，正在安装...');
           installBtn.style.display = 'none';
-          serviceStatus.textContent = '本地服务: 安装程序已启动，等待重启...';
-        } else {
-          installBtn.textContent = '下载安装程序';
+          serviceHint.style.display = '';
+          expectingRestart = true;
+          // Tell backend to run the installer silently
+          var filePath = dl.filename;
+          activeDownloadId = null;
+          fetch(LOCAL_BASE + '/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: filePath })
+          }).catch(function () {});
+          startRestartPolling();
+        } else if (dl.state === 'interrupted') {
+          clearInterval(downloadProgressTimer);
+          downloadProgressTimer = null;
+          activeDownloadId = null;
+          hideUpdateProgress();
+          updateServiceUI('error', '<span class="status-dot"></span>下载失败，请检查网络后重试');
+          installBtn.style.display = '';
+          serviceHint.style.display = 'none';
+          installBtn.textContent = '重试更新';
+          installBtn.disabled = false;
+        } else if (dl.totalBytes > 0) {
+          var pct = Math.round((dl.bytesReceived || 0) * 100 / dl.totalBytes);
+          showUpdateProgress(pct, '正在下载更新 ' + pct + '%');
+        } else if (dl.bytesReceived > 0) {
+          showUpdateProgress(0, '正在下载更新 ' + formatBytes(dl.bytesReceived));
+        }
+      });
+    }, 500);
+  }
+
+  function formatBytes(n) {
+    if (n < 1024) return n + 'B';
+    if (n < 1048576) return (n / 1024).toFixed(0) + 'KB';
+    if (n < 1073741824) return (n / 1048576).toFixed(0) + 'MB';
+    return (n / 1073741824).toFixed(1) + 'GB';
+  }
+
+  function startRestartPolling() {
+    var attempts = 0;
+    updateServiceUI('checking', '<span class="status-dot"></span>服务重启中...');
+    var check = setInterval(function () {
+      attempts++;
+      fetch(LOCAL_HEALTH)
+        .then(function (r) {
+          if (r.ok) return r.json();
+          return Promise.reject('not ok');
+        })
+        .then(function (data) {
+          clearInterval(check);
+          hideUpdateProgress();
+          var newVer = data.version || '';
+          if (newVer) {
+            chrome.storage.local.set({ localVersion: newVer });
+          }
+          updateServiceUI('running', '<span class="status-dot"></span>本地服务: v' + (newVer || ''));
+          installBtn.style.display = 'none';
+          serviceHint.style.display = '';
+          expectingRestart = false;
+        })
+        .catch(function () {
+          if (attempts <= 2) {
+            updateServiceUI('checking', '<span class="status-dot"></span>服务重启中...');
+          } else if (attempts <= 15) {
+            updateServiceUI('checking', '<span class="status-dot"></span>服务重启中' + '.'.repeat((attempts - 2) % 4));
+          } else {
+            clearInterval(check);
+            hideUpdateProgress();
+            updateServiceUI('stopped', '<span class="status-dot"></span>本地服务: 未安装');
+            installBtn.style.display = '';
+            serviceHint.style.display = 'none';
+            installBtn.textContent = '下载安装程序';
+            installBtn.disabled = false;
+            expectingRestart = false;
+          }
+        });
+    }, 1000);
+  }
+
+  async function startUpdate() {
+    if (expectingRestart) return;
+    if (_userPlan !== 'premium') {
+      openAppPage('login');
+      return;
+    }
+    installBtn.disabled = true;
+    installBtn.textContent = '正在连接...';
+    // Try each URL until one starts downloading
+    for (var i = 0; i < INSTALLER_URLS.length; i++) {
+      try {
+        var dlId = await chrome.downloads.download({
+          url: INSTALLER_URLS[i],
+          filename: 'ai-translation-update.exe',
+          conflictAction: 'overwrite',
+          saveAs: false
+        });
+        activeDownloadId = dlId;
+        showUpdateProgress(0, '正在下载更新 0%');
+        installBtn.style.display = 'none';
+        serviceHint.style.display = '';
+        pollChromeDownloadProgress();
+        return;
+      } catch (e) {
+        // chrome.downloads.download rejects on network error — try next URL
+        if (i === INSTALLER_URLS.length - 1) {
+          updateServiceUI('error', '<span class="status-dot"></span>下载启动失败，请检查网络');
+          installBtn.textContent = '重试更新';
           installBtn.disabled = false;
         }
-      } else if (item.state === 'interrupted') {
-        clearInterval(progressTimer);
-        progressTimer = null;
-        activeDownloadId = null;
-        installBtn.textContent = '下载安装程序';
-        installBtn.disabled = false;
-      } else if (item.totalBytes > 0) {
-        var pct = Math.round(item.bytesReceived / item.totalBytes * 100);
-        installBtn.textContent = '下载中 ' + pct + '%';
       }
-    });
-  }
-
-  function restoreDownloadState() {
-    chrome.downloads.search({ state: 'in_progress', filenameRegex: 'AI-Translation-Installer' }, function (results) {
-      if (results.length > 0) {
-        activeDownloadId = results[0].id;
-        pollProgress();
-        progressTimer = setInterval(pollProgress, 500);
-        installBtn.disabled = true;
-        installBtn.style.display = '';
-      }
-    });
-  }
-
-  installBtn.addEventListener('click', async function () {
-    installBtn.textContent = '开始下载...';
-    installBtn.disabled = true;
-    try {
-      activeDownloadId = await chrome.downloads.download({
-        url: INSTALLER_URL,
-        filename: 'AI-Translation-Installer-v' + (latestVersion || 'latest') + '.exe',
-        saveAs: false,
-      });
-      pollProgress();
-      progressTimer = setInterval(pollProgress, 500);
-    } catch (e) {
-      alert('下载失败: ' + (e.message || '网络错误'));
-      installBtn.textContent = serviceWasRunning ? '更新 v' + latestVersion : '下载安装程序 (v' + latestVersion + ')';
-      installBtn.disabled = false;
-      activeDownloadId = null;
     }
-  });
+  }
+
+  installBtn.addEventListener('click', startUpdate);
 
   // ─── Engine badge (custom dropdown, replaces old <select>) ──────────
 
@@ -751,8 +793,11 @@
     openAppPage(licText.indexOf('已登录') !== -1 ? 'account' : 'login');
   });
 
+  var _userPlan = 'trial';
+
   // Update header based on login state
   function updateHeaderFromToken(token, plan) {
+    _userPlan = plan || 'trial';
     if (token) {
       headerLicText.textContent = (plan === 'premium' ? '专业版' : '体验版') + ' · 已登录';
       licDot.className = 'lic-dot active';
@@ -804,316 +849,126 @@
     updateHeaderFromToken(null, 'trial');
   }
 
-  // ─── Ollama management ───────────────────────────────────────────
-
-  async function checkOllamaStatus() {
-    if (!ollamaStatusDot || !ollamaStatusText || !ollamaGuideLink || !ollamaGuide) return;
-
-    // Check Ollama via Go backend proxy (avoids CORS issues)
-    var ollamaOnline = false;
-    var ollamaModels = [];
-    try {
-      var proxyResp = await fetch(LOCAL_BASE + '/ollama/health', { signal: AbortSignal.timeout(5000) });
-      if (proxyResp.ok) {
-        var proxyData = await proxyResp.json();
-        ollamaOnline = proxyData.online;
-        ollamaModels = proxyData.models || [];
-      }
-    } catch (_) {}
-
-    // Fallback: direct check
-    if (!ollamaOnline) {
-      try {
-        var ollamaResp = await fetch('http://127.0.0.1:11434/api/tags', { signal: AbortSignal.timeout(3000) });
-        if (ollamaResp.ok) {
-          ollamaOnline = true;
-          var ollamaData = await ollamaResp.json();
-          ollamaModels = (ollamaData.models || []).map(function (m) { return m.name; });
-        }
-      } catch (_) {}
-    }
-
-    if (!ollamaOnline) {
-      ollamaStatusDot.style.background = '#ef4444';
-      ollamaStatusText.textContent = 'Ollama 未启动 · 请安装并启动 Ollama';
-      if (ollamaStatusBar) ollamaStatusBar.style.background = 'rgba(254,226,226,0.6)';
-      ollamaGuideLink.style.display = '';
-      ollamaGuide.style.display = '';
-      ollamaModelInput.innerHTML = '<option value="">请先启动 Ollama</option>';
-      if (ollamaModelInstall) ollamaModelInstall.style.display = 'none';
+  function checkLicenseWarning() {
+    if (!serviceWasRunning) return;
+    if (_userPlan === 'premium') {
+      // Already premium — ensure service status is clean
       return;
     }
+    // Backend running but user not premium — show warning
+    updateServiceUI('stopped', '<span class="status-dot"></span>本地服务: 翻译功能需专业版，请登录或升级');
+    installBtn.style.display = '';
+    serviceHint.style.display = 'none';
+    installBtn.textContent = '登录/升级';
+  }
 
-    // Always use Ollama models for the dropdown (what page-translate actually uses)
-    var result = await chrome.storage.local.get('translationSettings');
-    var settings = result.translationSettings || {};
-    var savedModel = settings.ollamaModel || '';
+  // ─── Model status ────────────────────────────────────────────────
 
-    if (ollamaModels.length === 0) {
-      ollamaModelInput.innerHTML = '<option value="">请拉取模型 (ollama pull qwen2.5:1.5b)</option>';
+  var _modelState = null;
+
+  function updateModelStatus(msg) {
+    _modelState = msg;
+
+    // Update brief status in service card
+    if (modelStatusBrief) {
+      var briefPhase = msg.phase;
+      if (briefPhase === 'ready') {
+        var modelName = msg.model || '';
+        modelStatusBrief.innerHTML = '<span class="status-dot"></span>本地模型: ' + (modelName || '');
+        modelStatusBrief.className = 'model-status-brief running';
+      } else if (briefPhase === 'error') {
+        modelStatusBrief.innerHTML = '<span class="status-dot"></span>本地模型: 异常';
+        modelStatusBrief.className = 'model-status-brief stopped';
+      } else if (briefPhase === 'pulling_model' || briefPhase === 'downloading_ollama') {
+        modelStatusBrief.innerHTML = '<span class="status-dot"></span>本地模型: 下载中 ' + (msg.progress || 0) + '%';
+        modelStatusBrief.className = 'model-status-brief checking';
+      } else {
+        modelStatusBrief.innerHTML = '<span class="status-dot"></span>本地模型: 准备中...';
+        modelStatusBrief.className = 'model-status-brief checking';
+      }
+      modelStatusBrief.style.display = '';
+    }
+
+    // Update detailed status in modal
+    if (!modelStatus) return;
+    modelStatus.style.display = '';
+
+    var phase = msg.phase;
+    var icon = '○';
+    var text = msg.message || '';
+
+    if (phase === 'ready') {
+      icon = '●';
+      modelStatusIcon.style.color = '#10b981';
+      modelProgressWrap.style.display = 'none';
+    } else if (phase === 'error') {
+      icon = '✕';
+      modelStatusIcon.style.color = '#ef4444';
+      text = '准备失败 · 点此重试';
+      modelProgressWrap.style.display = 'none';
     } else {
-      ollamaModelInput.innerHTML = ollamaModels.map(function (n) {
-        var selected = n === savedModel ? ' selected' : '';
-        return '<option value="' + n + '"' + selected + '>' + n + '</option>';
-      }).join('');
-      if (!ollamaModels.includes(savedModel) && ollamaModels.length > 0) {
-        ollamaModelInput.value = ollamaModels[0];
-        saveSettings();
-      }
-    }
-
-    // Also check Go backend for model file management (GGUF downloads)
-    var backendModelNames = [];
-    try {
-      var resp = await fetch(LOCAL_BASE + '/model/list', { signal: AbortSignal.timeout(3000) });
-      if (resp.ok) {
-        var backendModels = await resp.json();
-        backendModelNames = (Array.isArray(backendModels) ? backendModels : []).map(function (m) { return m.name; });
-      }
-    } catch (_) {}
-
-    // Recommended models: check against both Ollama and Go backend
-    var allInstalled = ollamaModels.concat(backendModelNames.filter(function (n) { return !ollamaModels.includes(n); }));
-    renderModelInstallList(allInstalled);
-
-    // Status bar
-    var showModels = ollamaModels.slice(0, 3);
-    ollamaStatusDot.style.background = '#10b981';
-    ollamaStatusText.textContent = ollamaModels.length > 0
-      ? '已连接 · ' + showModels.join(', ') : '已连接 · 无本地模型';
-    if (ollamaStatusBar) ollamaStatusBar.style.background = 'rgba(209,250,229,0.6)';
-    ollamaGuideLink.style.display = 'none';
-    ollamaGuide.style.display = 'none';
-  }
-
-  function renderModelInstallList(installed) {
-    if (!ollamaModelInstall || !ollamaModelCheckboxes) return;
-    var installedSet = new Set((installed || []));
-    var hasMissing = RCMD_MODELS.some(function (m) { return !installedSet.has(m.name); });
-    ollamaModelInstall.style.display = hasMissing ? 'block' : 'none';
-    if (!hasMissing) return;
-
-    var ram = detectDeviceRAM();
-    var checkedBefore = new Set();
-    ollamaModelCheckboxes.querySelectorAll('input[type=checkbox]:checked').forEach(function (cb) { checkedBefore.add(cb.value); });
-
-    ollamaModelCheckboxes.innerHTML = RCMD_MODELS.map(function (m) {
-      var ok = installedSet.has(m.name);
-      var lv = modelLevel(m);
-      var tagColor = lv === 'light' ? '#10b981' : lv === 'heavy' ? '#f59e0b' : '#6366f1';
-      var ramWarn = '';
-      if (ram && !ok) {
-        var gb = parseFloat(m.size);
-        if (gb > ram * 0.6) ramWarn = ' <span style="font-size:10px;color:#ef4444;">⚠️ 内存不足</span>';
-      }
-
-      if (ok) {
-        return '<div style="padding:4px 0;border-bottom:1px solid rgba(0,0,0,0.04);">' +
-          '<div style="display:flex;align-items:center;">' +
-          '<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:#10b9811a;color:#10b981;flex-shrink:0;margin-right:6px;">已安装</span>' +
-          '<b style="font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (m.display || m.name) + '</b>' +
-          '<span style="font-size:10px;color:#9ca3af;flex-shrink:0;">' + m.size + '</span>' +
-          '</div>' +
-          '<div style="margin-top:2px;margin-left:18px;">' +
-          '<button data-delete-model="' + m.name + '" style="padding:1px 6px;border:1px solid rgba(239,68,68,0.3);border-radius:4px;background:rgba(254,226,226,0.6);color:#dc2626;font-size:10px;cursor:pointer;flex-shrink:0;line-height:1.4;">删除</button>' +
-          '</div>' +
-          '</div>';
-      }
-
-      return '<div style="padding:4px 0;border-bottom:1px solid rgba(0,0,0,0.04);">' +
-        '<label style="display:flex;align-items:center;cursor:pointer;">' +
-        '<input type="checkbox" value="' + m.name + '" style="accent-color:#6366f1;flex-shrink:0;margin-right:6px;">' +
-        '<b style="font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (m.display || m.name) + '</b>' +
-        '<span style="font-size:10px;color:#9ca3af;flex-shrink:0;">' + m.size + '</span>' +
-        '</label>' +
-        '<div style="font-size:9px;margin-left:18px;margin-top:1px;">' +
-        '<span style="padding:1px 5px;border-radius:3px;background:' + tagColor + '1a;color:' + tagColor + ';white-space:nowrap;">' + m.scenario + '</span>' +
-        (ramWarn ? ramWarn : '') +
-        '</div>' +
-        '</div>';
-    }).join('');
-
-    // Wire delete buttons
-    ollamaModelCheckboxes.querySelectorAll('[data-delete-model]').forEach(function (btn) {
-      btn.onclick = function (e) {
-        e.preventDefault();
-        deleteModel(btn.dataset.deleteModel);
-      };
-    });
-
-    // Restore checked state
-    ollamaModelCheckboxes.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
-      if (checkedBefore.has(cb.value)) cb.checked = true;
-    });
-
-    // RAM info
-    var existingInfo = document.getElementById('ramInfo');
-    if (existingInfo) existingInfo.remove();
-    if (ram) {
-      var info = document.createElement('div');
-      info.id = 'ramInfo';
-      info.style.cssText = 'font-size:10px;color:#9ca3af;margin-bottom:4px;';
-      info.textContent = '⚡ 本机内存 ' + ram + 'GB，⚠️ 标注的大模型需充足显存';
-      ollamaModelCheckboxes.parentNode.insertBefore(info, ollamaModelCheckboxes);
-    }
-
-    if (btnPullModels) btnPullModels.disabled = false;
-  }
-
-  async function deleteModel(name) {
-    if (!confirm('确认删除模型 ' + name + ' ？\n\n删除后需重新拉取才能使用。')) return;
-    try {
-      if (pullProgressBar) pullProgressBar.style.display = 'none';
-      if (pullProgress) { pullProgress.style.display = 'block'; pullProgress.textContent = '正在删除 ' + name + ' ...'; }
-      var resp = await fetch('http://127.0.0.1:11434/api/delete', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name })
-      });
-      if (!resp.ok) {
-        var err = await resp.text().catch(function () { return 'HTTP ' + resp.status; });
-        throw new Error(err);
-      }
-      if (pullProgress) pullProgress.textContent = name + ' 已删除';
-      await checkOllamaStatus();
-      setTimeout(function () { if (pullProgress) pullProgress.style.display = 'none'; }, 2000);
-    } catch (e) {
-      if (pullProgress) pullProgress.textContent = '删除失败: ' + e.message;
-    }
-  }
-
-  var _pullNames = [];
-  var _pullPollTimer = null;
-
-  btnPullModels.addEventListener('click', pullSelectedModels);
-
-  async function pullSelectedModels() {
-    if (pulling) return;
-    var names = [];
-    document.querySelectorAll('#ollamaModelCheckboxes input[type=checkbox]:checked:not([disabled])').forEach(function (cb) {
-      names.push(cb.value);
-    });
-    if (!names.length) return;
-    pulling = true;
-    _pullNames = names.slice();
-    if (btnPullModels) { btnPullModels.disabled = true; btnPullModels.textContent = '下载中...'; }
-    if (pullProgress) { pullProgress.style.display = 'block'; pullProgress.textContent = '正在拉取 ' + names[0] + ' ...'; }
-    if (pullProgressBar) { pullProgressBar.style.display = 'block'; pullProgressFill.style.width = '0%'; }
-
-    // Delegate to background service worker — survives popup close
-    for (var i = 0; i < names.length; i++) {
-      chrome.runtime.sendMessage({
-        type: 'OLLAMA_PULL_START',
-        model: names[i],
-        baseUrl: 'http://127.0.0.1:11434',
-      }, function (resp) {
-        if (resp && resp.already) { /* already pulling in SW */ }
-      });
-    }
-
-    // Poll progress from background SW every second
-    if (_pullPollTimer) clearInterval(_pullPollTimer);
-    _pullPollTimer = setInterval(pollPullProgress, 1000);
-  }
-
-  function pollPullProgress() {
-    chrome.runtime.sendMessage({ type: 'OLLAMA_PULL_PROGRESS' }, function (resp) {
-      if (!resp || !resp.downloads) return;
-      var downloads = resp.downloads;
-      var allDone = true;
-      var anySuccess = false;
-      var totalPct = 0;
-      var activeCount = 0;
-
-      for (var i = 0; i < _pullNames.length; i++) {
-        var name = _pullNames[i];
-        var d = downloads[name];
-        if (!d || d.status === 'error') {
-          // failed or not started
-          if (d && d.status === 'error') allDone = true;
-          else allDone = false;
-        } else if (d.status === 'success') {
-          anySuccess = true;
-          totalPct += 100;
-        } else if (d.status === 'pulling') {
-          allDone = false;
-          activeCount++;
-          totalPct += d.pct || 0;
+      icon = '◎';
+      modelStatusIcon.style.color = '#f59e0b';
+      var hasProgress = phase === 'pulling_model' || phase === 'downloading_ollama';
+      if (hasProgress) {
+        modelProgressWrap.style.display = '';
+        modelProgressFill.style.width = (msg.progress || 0) + '%';
+        var detail = '';
+        if (msg.downloaded && msg.total) {
+          detail = '已下载 ' + msg.downloaded + ' / ' + msg.total;
+          if (msg.eta) detail += ' · 预计剩余 ' + msg.eta;
         }
+        modelProgressDetail.textContent = detail;
+      } else {
+        modelProgressWrap.style.display = 'none';
       }
-
-      if (_pullNames.length > 0) {
-        var avgPct = Math.round(totalPct / _pullNames.length);
-        if (pullProgressFill) pullProgressFill.style.width = avgPct + '%';
-        if (pullProgress) {
-          if (activeCount > 0) {
-            // Show the first still-pulling model name
-            var activeName = '';
-            for (var k = 0; k < _pullNames.length; k++) {
-              var dn = _pullNames[k];
-              var dd = downloads[dn];
-              if (dd && dd.status === 'pulling') { activeName = dn; break; }
-            }
-            pullProgress.textContent = '正在拉取 ' + (activeName || _pullNames[0]) + ' ... ' + avgPct + '%';
-          } else if (allDone && anySuccess) {
-            pullProgress.textContent = '全部下载完成！';
-          }
-        }
-      }
-
-      if (allDone) {
-        stopPullPolling();
-        if (anySuccess) {
-          setTimeout(function () { checkOllamaStatus(); }, 500);
-        }
-      }
-    });
-  }
-
-  function checkOngoingDownloads() {
-    // Check if background SW has active pulls
-    chrome.runtime.sendMessage({ type: 'OLLAMA_PULL_PROGRESS' }, function (resp) {
-      if (!resp || !resp.downloads) return;
-      var downloads = resp.downloads;
-      var hasActive = false;
-      var names = [];
-      for (var name in downloads) {
-        var d = downloads[name];
-        if (d.status === 'pulling') {
-          hasActive = true;
-          names.push(name);
-        }
-      }
-      if (hasActive) {
-        pulling = true;
-        _pullNames = names;
-        if (btnPullModels) { btnPullModels.disabled = true; btnPullModels.textContent = '下载中...'; }
-        if (pullProgress) { pullProgress.style.display = 'block'; pullProgress.textContent = '正在拉取 ' + names[0] + ' ...'; }
-        if (pullProgressBar) { pullProgressBar.style.display = 'block'; pullProgressFill.style.width = '0%'; }
-        if (_pullPollTimer) clearInterval(_pullPollTimer);
-        _pullPollTimer = setInterval(pollPullProgress, 1000);
-      }
-    });
-  }
-
-  function stopPullPolling() {
-    if (_pullPollTimer) { clearInterval(_pullPollTimer); _pullPollTimer = null; }
-    pulling = false;
-    _pullNames = [];
-    if (btnPullModels) { btnPullModels.disabled = false; btnPullModels.textContent = '拉取选中模型'; }
-    if (pullProgressBar) { pullProgressBar.style.display = 'none'; pullProgressFill.style.width = '0%'; }
-    if (pullProgress) {
-      setTimeout(function () { if (!pulling) pullProgress.style.display = 'none'; }, 3000);
     }
+
+    modelStatusIcon.textContent = icon;
+    if (msg.model && (phase === 'ready' || phase === 'pulling_model' || phase === 'loading_model')) {
+      modelStatusText.textContent = text + ' (' + msg.model + ')';
+    } else {
+      modelStatusText.textContent = text;
+    }
+
+    if (modelHardwareHint) {
+      if (msg.gpuModel && msg.vramMB) {
+        modelHardwareHint.textContent = '根据 GPU 自动选择: ' + msg.gpuModel + ' (' + Math.round(msg.vramMB / 1024) + 'GB)';
+        modelHardwareHint.style.display = '';
+      } else {
+        modelHardwareHint.style.display = 'none';
+      }
+    }
+  }
+
+  function fetchModelStatus() {
+    fetch(LOCAL_BASE + '/model/prepare/status')
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (s) { updateModelStatus(s); })
+      .catch(function () {});
+  }
+
+  modelStatus.addEventListener('click', function () {
+    if (_modelState && _modelState.phase === 'error') {
+      updateModelStatus({ phase: 'checking_ollama', message: '正在重试...' });
+      fetchModelStatus();
+    }
+  });
+
+  // ─── WS model_status handler ──────────────────────────────────────
+
+  function handleModelStatus(msg) {
+    updateModelStatus(msg);
   }
 
   // ─── Init ─────────────────────────────────────────────────────────
   async function init() {
     await loadSettings();
     renderEngineDropdown(translateEngineSelect.value);
-    checkLocalService();
-    restoreDownloadState();
-    checkLoginState();
+    await Promise.all([checkLocalService(), checkLoginState()]);
+    checkLicenseWarning();
+    fetchModelStatus();
+    setInterval(fetchModelStatus, 2000);
 
     // Sync separate keys for page-translate.js (which reads them individually)
     chrome.storage.local.set({

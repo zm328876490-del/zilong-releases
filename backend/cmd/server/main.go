@@ -27,6 +27,7 @@ import (
 
 	"ai-translation/backend/asr"
 	"ai-translation/backend/config"
+	"ai-translation/backend/hardware"
 	"ai-translation/backend/model"
 	"ai-translation/backend/translate"
 	"ai-translation/backend/tts"
@@ -35,8 +36,20 @@ import (
 )
 
 var version = "dev"
+
+var prepareManager *model.PrepareManager
+
+type UpdateState struct {
+	Status     string `json:"status"`
+	Progress   int    `json:"progress"`
+	Downloaded string `json:"downloaded,omitempty"`
+	Total      string `json:"total,omitempty"`
+	Message    string `json:"message"`
+	Error      string `json:"error,omitempty"`
+}
+
 var updateMu sync.Mutex
-var updateStatus = "idle" // "idle" | "downloading" | "installing" | "failed"
+var updateState = UpdateState{Status: "idle"}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -227,32 +240,44 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if !updateMu.TryLock() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]string{"error": "更新已在进行中", "status": updateStatus})
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "更新已在进行中", "status": updateState.Status, "progress": updateState.Progress, "message": updateState.Message})
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "updating",
-		"message": "下载并安装更新中...",
-	})
+	json.NewEncoder(w).Encode(updateState)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
 
 	go func() {
 		defer updateMu.Unlock()
-		defer func() { updateStatus = "idle" }()
-		updateStatus = "downloading"
-		installerURL := "https://github.com/zm328876490-del/zilong-releases/releases/latest/download/installer.exe"
+		defer func() { updateState = UpdateState{Status: "idle"} }()
+		updateState = UpdateState{Status: "downloading", Message: "正在下载更新..."}
+		installerURLs := []string{
+			"https://ghproxy.com/https://github.com/zm328876490-del/zilong-releases/releases/latest/download/installer.exe",
+			"https://github.com/zm328876490-del/zilong-releases/releases/latest/download/installer.exe",
+		}
 		tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("ai-translation-update-%d.exe", time.Now().UnixNano()))
-		if err := downloadFile(installerURL, tmpFile); err != nil {
-			fmt.Printf("[update] download failed: %v\n", err)
-			updateStatus = "failed"
+		var lastErr error
+		ok := false
+		for _, u := range installerURLs {
+			fmt.Printf("[update] trying: %s\n", u)
+			if err := downloadFileProgress(u, tmpFile); err != nil {
+				fmt.Printf("[update] download failed: %v\n", err)
+				lastErr = err
+				os.Remove(tmpFile)
+				continue
+			}
+			ok = true
+			break
+		}
+		if !ok {
+			updateState = UpdateState{Status: "failed", Message: "下载失败", Error: lastErr.Error()}
 			return
 		}
-		updateStatus = "installing"
+		updateState = UpdateState{Status: "installing", Progress: 100, Message: "正在安装更新..."}
 		cmd := exec.Command(tmpFile)
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			HideWindow:    true,
@@ -260,21 +285,60 @@ func handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := cmd.Start(); err != nil {
 			fmt.Printf("[update] launch installer failed: %v\n", err)
-			updateStatus = "failed"
+			updateState = UpdateState{Status: "failed", Message: "安装启动失败", Error: err.Error()}
 			return
 		}
 		fmt.Printf("[update] installer launched (PID %d), waiting for restart...\n", cmd.Process.Pid)
 		cmd.Process.Release()
+		updateState = UpdateState{Status: "done", Progress: 100, Message: "更新完成，服务正在重启..."}
 	}()
 }
 
 func handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": updateStatus})
+	json.NewEncoder(w).Encode(updateState)
 }
 
-func downloadFile(url, dest string) error {
-	client := &http.Client{Timeout: 120 * time.Second}
+func handleInstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Path == "" {
+		http.Error(w, `{"error":"invalid path"}`, http.StatusBadRequest)
+		return
+	}
+	fmt.Printf("[install] launching: %s\n", req.Path)
+	cmd := exec.Command(req.Path, "/VERYSILENT", "/NORESTART")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x00000200 | 0x00000008,
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Printf("[install] launch failed: %v\n", err)
+		http.Error(w, `{"error":"launch failed"}`, http.StatusInternalServerError)
+		return
+	}
+	fmt.Printf("[install] installer launched (PID %d)\n", cmd.Process.Pid)
+	cmd.Process.Release()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func handlePrepareStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if prepareManager == nil {
+		json.NewEncoder(w).Encode(map[string]string{"phase": "error", "message": "prepare manager not initialized"})
+		return
+	}
+	json.NewEncoder(w).Encode(prepareManager.State())
+}
+
+func downloadFileProgress(url, dest string) error {
+	client := &http.Client{Timeout: 30 * time.Minute}
 	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", url, err)
@@ -288,11 +352,74 @@ func downloadFile(url, dest string) error {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		os.Remove(dest)
-		return fmt.Errorf("download: %w", err)
+
+	totalSize := resp.ContentLength
+	fmt.Printf("[update] Content-Length=%d, starting body read...\n", totalSize)
+	buf := make([]byte, 32*1024)
+	var downloaded int64
+	var lastBroadcast time.Time
+
+	for {
+		nr, readErr := resp.Body.Read(buf)
+		if nr > 0 {
+			nw, writeErr := f.Write(buf[:nr])
+			if writeErr != nil {
+				os.Remove(dest)
+				return fmt.Errorf("write: %w", writeErr)
+			}
+			if nw != nr {
+				os.Remove(dest)
+				return fmt.Errorf("write incomplete")
+			}
+			downloaded += int64(nw)
+			if time.Since(lastBroadcast) > 300*time.Millisecond {
+				lastBroadcast = time.Now()
+				pct := 0
+				msg := "正在下载更新... " + formatBytes(downloaded)
+				if totalSize > 0 {
+					pct = int(downloaded * 100 / totalSize)
+					msg = "正在下载更新..."
+				}
+				updateState = UpdateState{
+					Status:     "downloading",
+					Progress:   pct,
+					Downloaded: formatBytes(downloaded),
+					Total:      formatBytes(totalSize),
+					Message:    msg,
+				}
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				fmt.Printf("[update] download complete, %s written\n", formatBytes(downloaded))
+				return nil
+			}
+			os.Remove(dest)
+			return fmt.Errorf("download interrupted: %w", readErr)
+		}
 	}
-	return nil
+}
+
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for n1 := n / unit; n1 >= unit; n1 /= unit {
+		div *= unit
+		exp++
+	}
+	switch exp {
+	case 0:
+		return fmt.Sprintf("%.0fKB", float64(n)/float64(div))
+	case 1:
+		return fmt.Sprintf("%.0fMB", float64(n)/float64(div))
+	case 2:
+		return fmt.Sprintf("%.1fGB", float64(n)/float64(div))
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 func requireLicense(w http.ResponseWriter) bool {
@@ -517,7 +644,7 @@ func (c *Client) onASRResult(text string, speechRate float64, duration float64, 
 	}
 
 
-	translated, err := c.translator.Translate(text, c.sourceLang, c.targetLang)
+		translated, err := c.translator.Translate(text, c.sourceLang, c.targetLang)
 	if err != nil {
 		if !isPartial {
 			c.sendJSON(OutMsg{Type: "error", Message: fmt.Sprintf("Translation error: %v", err)})
@@ -2045,6 +2172,12 @@ func main() {
 
 	ensureOllama()
 
+	hw := hardware.Detect()
+	fmt.Printf("[main] hardware: GPU=%s VRAM=%dMB RAM=%dMB tier=%s model=%s\n",
+		hw.GPUModel, hw.VRAMMB, hw.RAMMB, hw.Tier, hw.DefaultModel)
+	prepareManager = model.NewPrepareManager(hw)
+	prepareManager.Start()
+
 	modelManager = model.NewManager(cfg.ModelDir)
 
 	// Start whisper-server (keeps model warm)
@@ -2085,6 +2218,8 @@ func main() {
 	mux.HandleFunc("/fetch-subtitles", handleFetchSubtitles)
 	mux.HandleFunc("/update", handleUpdate)
 	mux.HandleFunc("/update/status", handleUpdateStatus)
+	mux.HandleFunc("/install", handleInstall)
+	mux.HandleFunc("/model/prepare/status", handlePrepareStatus)
 	mux.HandleFunc("/model/list", handleModelList)
 	mux.HandleFunc("/model/download", handleModelDownload)
 	mux.HandleFunc("/model/download/status", handleModelDownloadStatus)

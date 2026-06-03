@@ -161,6 +161,10 @@ body::after {
   position: relative; z-index: 1;
 }
 
+#localServiceCard {
+  padding: 12px 16px;
+}
+
 .section-label {
   font-size: 10px; font-weight: 700; color: #9ca3af;
   text-transform: uppercase; letter-spacing: 0.5px;
@@ -277,39 +281,56 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
 }
 
 .service-status {
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
+  line-height: 1;
 }
 
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: baseline;
+  flex-shrink: 0;
+}
+
+.service-status.checking .status-dot { background: #9ca3af; }
+.service-status.running .status-dot   { background: #10b981; box-shadow: 0 0 6px rgba(16,185,129,0.4); }
+.service-status.stopped .status-dot   { background: #ef4444; box-shadow: 0 0 6px rgba(239,68,68,0.3); }
+
 .service-status.checking { color: #9ca3af; }
-.service-status.running   { color: #059669; }
+
+.service-hint {
+  font-size: 10px;
+  color: #9ca3af;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+.service-status.running   { color: #374151; }
 .service-status.stopped   { color: #dc2626; }
 
 .btn-install {
   width: auto !important;
-  padding: 8px 16px !important;
+  padding: 6px 14px !important;
   margin: 0 !important;
-  font-size: 12px !important; font-weight: 700 !important;
-  border-radius: 10px !important;
+  font-size: 11px !important; font-weight: 600 !important;
+  border-radius: 8px !important;
   background: linear-gradient(135deg, #059669, #10b981) !important;
   color: #fff !important;
   white-space: nowrap;
   flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(5,150,105,0.25);
+  transition: all 0.2s;
 }
-
-.version-badge {
-  font-size: 10px;
-  background: #fef3c7;
-  color: #92400e;
-  padding: 2px 8px;
-  border-radius: 8px;
-  font-weight: 700;
-  white-space: nowrap;
-  flex-shrink: 0;
+.btn-install:hover {
+  box-shadow: 0 4px 12px rgba(5,150,105,0.35);
+  transform: translateY(-1px);
 }
 
 /* ─── Button ─────────────────────────────── */
@@ -495,12 +516,6 @@ input[type="range"]:focus {
   margin-bottom: 14px;
 }
 
-.ollama-modal-box {
-  width: 320px;
-  max-height: 80vh;
-  overflow-y: auto;
-}
-
 .modal-actions {
   display: flex;
   gap: 8px;
@@ -611,4 +626,77 @@ input[type="range"]:focus {
   cursor: pointer; line-height: 1; transition: background 0.15s;
 }
 .modal-close:hover { background: rgba(0,0,0,0.12); color: #374151; }
+
+/* ─── Model Status Brief ─────────────────── */
+.model-status-brief {
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 6px;
+  line-height: 1;
+}
+.model-status-brief.checking .status-dot { background: #9ca3af; }
+.model-status-brief.running .status-dot   { background: #10b981; box-shadow: 0 0 6px rgba(16,185,129,0.4); }
+.model-status-brief.stopped .status-dot   { background: #ef4444; box-shadow: 0 0 6px rgba(239,68,68,0.3); }
+
+.model-status-brief.checking { color: #9ca3af; }
+.model-status-brief.running   { color: #374151; }
+.model-status-brief.stopped   { color: #dc2626; }
+
+/* ─── Model Status ────────────────────────── */
+.model-status {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.5);
+  border-radius: 10px;
+  border: 1px solid rgba(0,0,0,0.05);
+  cursor: default;
+}
+
+.model-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-status-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  color: #9ca3af;
+}
+
+#modelStatusText {
+  font-size: 11px;
+  font-weight: 600;
+  color: #4b5563;
+}
+
+/* ─── Model Progress Bar ──────────────────── */
+.model-progress-bar {
+  margin-top: 8px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(0,0,0,0.06);
+  overflow: hidden;
+}
+
+.model-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #059669, #10b981);
+  transition: width 0.3s ease;
+}
+
+.model-progress-detail {
+  margin-top: 5px;
+  font-size: 10px;
+  font-weight: 500;
+  color: #9ca3af;
+}
+
+.model-hardware-hint {
+  margin-top: 6px;
+  font-size: 10px;
+  color: #9ca3af;
+}
 
