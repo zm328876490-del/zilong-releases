@@ -131,6 +131,11 @@ func (pm *PrepareManager) setState(s PrepareState) {
 func (pm *PrepareManager) run() {
 	model := pm.hw.DefaultModel
 
+	if model == "" {
+		pm.setState(PrepareState{Phase: PhaseError, Model: "", Message: "内存不足（<4GB），无法安装本地翻译模型"})
+		return
+	}
+
 	// Step 1: Check Ollama
 	pm.setState(PrepareState{Phase: PhaseCheckOllama, Model: model, Message: "正在检测运行环境..."})
 
@@ -297,7 +302,9 @@ func (pm *PrepareManager) ensureOllamaOrigins() {
 		} else {
 			fmt.Println("[prepare] OLLAMA_ORIGINS=* set")
 			// Restart Ollama so the new env var takes effect
-			exec.Command("taskkill", "/f", "/im", "ollama.exe").Run()
+			killCmd := exec.Command("taskkill", "/f", "/im", "ollama.exe")
+		killCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		killCmd.Run()
 			time.Sleep(2 * time.Second)
 		}
 	}
@@ -494,6 +501,7 @@ func (pm *PrepareManager) warmupModel(modelName string) {
 
 func registryGetString(key, name string) (string, error) {
 	cmd := exec.Command("reg", "query", key, "/v", name)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err

@@ -49,16 +49,28 @@ func Detect() Info {
 	info.GPUModel, info.VRAMMB = detectVRAM()
 
 	// ── Tier assignment ───────────────────────────────────────────
+	// Decision tree based on GPU VRAM and system RAM.
+	// No dedicated GPU → CPU inference, RAM is the only limit.
+	// With GPU → VRAM determines model size, RAM acts as a hard floor.
 	switch {
-	case info.VRAMMB >= 6000:
-		info.Tier = "advanced"
-		info.DefaultModel = "qwen2.5:7b"
-	case info.VRAMMB >= 2000:
+	case info.RAMMB < 4096:
+		info.Tier = ""
+		info.DefaultModel = ""
+	case info.VRAMMB == 0:
+		info.Tier = "light"
+		info.DefaultModel = "qwen2.5:1.5b"
+	case info.RAMMB < 8192:
+		info.Tier = "light"
+		info.DefaultModel = "qwen2.5:1.5b"
+	case info.VRAMMB < 3072:
+		info.Tier = "light"
+		info.DefaultModel = "qwen2.5:1.5b"
+	case info.VRAMMB < 6144 || info.RAMMB < 16384:
 		info.Tier = "standard"
 		info.DefaultModel = "qwen2.5:3b"
 	default:
-		info.Tier = "light"
-		info.DefaultModel = "qwen2.5:1.5b"
+		info.Tier = "advanced"
+		info.DefaultModel = "qwen2.5:3b"
 	}
 
 	return info
@@ -101,19 +113,14 @@ func detectNvidiaSMI() (string, int) {
 	names := parseCSV(string(nameOut))
 	mems := parseCSV(string(memOut))
 
-	var totalMB int
-	var modelNames []string
-	for i, m := range mems {
-		if mb, err := strconv.Atoi(strings.TrimSpace(m)); err == nil {
-			totalMB += mb
+	if len(mems) > 0 {
+		if mb, err := strconv.Atoi(strings.TrimSpace(mems[0])); err == nil && mb > 0 {
+			model := ""
+			if len(names) > 0 {
+				model = strings.TrimSpace(names[0])
+			}
+			return model, mb
 		}
-		if i < len(names) {
-			modelNames = append(modelNames, strings.TrimSpace(names[i]))
-		}
-	}
-
-	if totalMB > 0 {
-		return strings.Join(modelNames, ", "), totalMB
 	}
 	return "", 0
 }

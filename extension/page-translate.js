@@ -35,69 +35,6 @@
   const API = 'http://localhost:29527/translate/page';
   const host = location.hostname;
 
-  // ─── Built-in glossary for common short UI terms ─────────────────────
-  // Qwen3-1.7B often returns identity for short proper nouns / brand names.
-  // These are common across Amazon and other e-commerce sites.
-  const BUILT_IN_GLOSSARY = {
-    'prime': 'Prime会员',
-    'en': '英文',
-    'best sellers': '畅销榜',
-    'today\'s deals': '今日特惠',
-    'buy again': '再次购买',
-    'shop now': '立即购买',
-    'see more': '查看更多',
-    'see all': '查看全部',
-    'free delivery': '免费配送',
-    'free shipping': '免费配送',
-    'in stock': '有货',
-    'out of stock': '缺货',
-    'add to cart': '加入购物车',
-    'buy now': '立即购买',
-    'save more': '更多优惠',
-    'subscribe & save': '订阅省',
-    'customer reviews': '用户评价',
-    'top reviews': '热门评价',
-    'your orders': '我的订单',
-    'your account': '我的账户',
-    'your lists': '我的清单',
-    'your recommendations': '我的推荐',
-    'your recently viewed items': '最近浏览',
-    'back to top': '返回顶部',
-    'back to results': '返回结果',
-    'filter by': '筛选方式',
-    'sort by': '排序方式',
-    'facebook': '脸书',
-    'twitter': '推特',
-    'instagram': 'Instagram',
-    'youtube': 'YouTube',
-    'twitch': 'Twitch',
-    'tiktok': 'TikTok',
-    'unlimited': '无限',
-    'exclusive': '独家',
-    'limited time deal': '限时优惠',
-    'lightning deal': '闪购',
-    'coupon': '优惠券',
-    'featured': '精选',
-    'recommended': '推荐',
-    'sponsored': '赞助',
-    'bestseller': '畅销品',
-    'new arrival': '新品上市',
-    'top rated': '高评分',
-    'most wished for': '心愿榜单',
-    'gift ideas': '礼品推荐',
-    'gift cards': '礼品卡',
-    'top up your account': '账户充值',
-    'sell on amazon': '在Amazon开店',
-    'become an affiliate': '成为联盟会员',
-    'fulfilment by amazon': '亚马逊物流',
-    'see details': '查看详情',
-    'product details': '商品详情',
-    'product description': '商品描述',
-    'about this item': '商品信息',
-    'technical details': '技术参数',
-    'compare with similar items': '对比相似商品',
-  };
-
   // ─── State ──────────────────────────────────────────────────────────
   let isActive = false;
   let bilingualMode = false;
@@ -130,6 +67,7 @@
   }
 
   const memCache = new Map();
+  let _cacheGen = 0;
   const idleCB = window.requestIdleCallback || function (cb, opts) { return setTimeout(cb, (opts && opts.timeout) || 100); };
 
   // Maps original (cleanText.toLowerCase()) → translation, for bilingual toggle
@@ -188,11 +126,11 @@
     });
   }
 
-  function makeKey(h, src) {
-    return h + '::' + src;
+  function makeKey(h, src, lang) {
+    return h + '::' + src + '::' + lang;
   }
 
-  async function dbLookup(h, srcs) {
+  async function dbLookup(h, srcs, lang) {
     try {
       var db = await openDB();
       var result = new Map();
@@ -200,7 +138,7 @@
       var store = tx.objectStore(STORE);
       await Promise.all(srcs.map(function (src) {
         return new Promise(function (resolve) {
-          var r = store.get(makeKey(h, src));
+          var r = store.get(makeKey(h, src, lang));
           r.onsuccess = function (e) { var row = e.target.result; if (row && row.dst) result.set(src, row.dst); resolve(); };
           r.onerror = function () { resolve(); };
         });
@@ -209,26 +147,37 @@
     } catch (_) { return new Map(); }
   }
 
-  async function dbSave(h, pairs) {
+  async function dbSave(h, pairs, lang) {
     if (!pairs.length) return;
     try {
       var db = await openDB();
       var tx = db.transaction(STORE, 'readwrite');
       var store = tx.objectStore(STORE);
       var now = Date.now();
+      var keys = [];
+      var validPairs = [];
       for (var i = 0; i < pairs.length; i++) {
         var src = pairs[i].src, dst = pairs[i].dst;
         if (!src || !dst) continue;
         if (src.toLowerCase() === dst.toLowerCase()) continue;
-        var key = makeKey(h, src);
-        var existing = await new Promise(function (resolve) {
+        validPairs.push(pairs[i]);
+        keys.push(makeKey(h, src, lang));
+      }
+      if (!validPairs.length) return;
+      // Parallel get all existing records first, then batch put
+      var existingMap = {};
+      await Promise.all(keys.map(function (key) {
+        return new Promise(function (resolve) {
           var r = store.get(key);
-          r.onsuccess = function (e) { resolve(e.target.result); };
-          r.onerror = function () { resolve(null); };
+          r.onsuccess = function (e) { if (e.target.result) existingMap[key] = e.target.result.hits; resolve(); };
+          r.onerror = function () { resolve(); };
         });
+      }));
+      for (var j = 0; j < validPairs.length; j++) {
+        var key = keys[j];
         store.put({
-          key: key, host: h, src: src, dst: dst,
-          hits: (existing && existing.hits || 0) + 1,
+          key: key, host: h, src: validPairs[j].src, dst: validPairs[j].dst,
+          hits: (existingMap[key] || 0) + 1,
           updatedAt: now,
         });
       }
@@ -255,14 +204,15 @@
   }
 
   // ─── Page Snapshots ─────────────────────────────────────────────────
-  async function dbSavePageSnapshot(h, url, pairs) {
+  async function dbSavePageSnapshot(h, url, pairs, lang) {
     if (!pairs.length) return;
     try {
       var db = await openDB();
       var tx = db.transaction(SNAP_STORE, 'readwrite');
       var store = tx.objectStore(SNAP_STORE);
+      var key = url + '::' + lang;
       var capped = pairs.slice(0, 500);
-      store.put({ url: url, host: h, pairs: capped, count: capped.length, updatedAt: Date.now() });
+      store.put({ url: key, host: h, pairs: capped, count: capped.length, updatedAt: Date.now() });
       var total = await new Promise(function (r) { var q = store.count(); q.onsuccess = function (e) { r(e.target.result); }; });
       if (total > MAX_SNAPSHOTS) {
         var all = await new Promise(function (r) { var q = store.getAll(); q.onsuccess = function (e) { r(e.target.result); }; });
@@ -272,13 +222,14 @@
     } catch (_) {}
   }
 
-  async function dbLoadPageSnapshot(url) {
+  async function dbLoadPageSnapshot(url, lang) {
     try {
       var db = await openDB();
       var tx = db.transaction(SNAP_STORE, 'readonly');
       var store = tx.objectStore(SNAP_STORE);
+      var key = url + '::' + lang;
       return new Promise(function (resolve) {
-        var req = store.get(url);
+        var req = store.get(key);
         req.onsuccess = function (e) { resolve((e.target.result && e.target.result.pairs) || []); };
         req.onerror = function () { resolve([]); };
       });
@@ -299,14 +250,19 @@
   }
 
   async function warmupCache() {
+    var gen = _cacheGen;
     try {
       // 1. Load page snapshot (instant restore for revisit)
-      var snapPairs = await dbLoadPageSnapshot(location.href);
+      var snapPairs = await dbLoadPageSnapshot(location.href, targetLang);
+      if (gen !== _cacheGen) return;
       if (snapPairs.length > 0) {
         snapPairs.forEach(function (r) { if (r.src && r.dst && r.src.toLowerCase() !== r.dst.toLowerCase()) { cacheSet(r.src.toLowerCase(), r.dst); pageTranslationMap.set(r.src.toLowerCase(), r.dst); } });
       }
-      // 2. Load domain phrases (cross-page reuse)
+      // 2. Load domain phrases (cross-page reuse), filtered to current language
       var rows = await dbExportDomain(host);
+      if (gen !== _cacheGen) return;
+      var langSuffix = '::' + targetLang;
+      rows = rows.filter(function (r) { return r.key && r.key.slice(-langSuffix.length) === langSuffix; });
       rows.sort(function (a, b) { return b.hits - a.hits; });
       rows.forEach(function (r) { if (r.src && r.dst && r.src.toLowerCase() !== r.dst.toLowerCase() && !memCache.has(r.src.toLowerCase())) cacheSet(r.src.toLowerCase(), r.dst); });
     } catch (_) {}
@@ -503,26 +459,6 @@
   function enqueueGroup(group) {
     if (!group.cleanText || group.cleanText.length < 2) return;
 
-    // ── Glossary hook: apply immediately, bypass the pump/queue entirely ──
-    // This avoids race conditions where the page JS re-renders the element
-    // (e.g. Amazon nav hydration) before pump() gets to it, causing the group
-    // to be silently dropped in takeBatch() due to parent.isConnected=false.
-    var glossaryHit = BUILT_IN_GLOSSARY[group.cleanText.toLowerCase()];
-    if (glossaryHit) {
-      // Only apply if parent is still connected (just found by TreeWalker ms ago)
-      if (group.parent.isConnected) {
-        var allAttached = true;
-        for (var gi = 0; gi < group.nodes.length; gi++) {
-          if (group.nodes[gi].parentNode !== group.parent) { allAttached = false; break; }
-        }
-        if (allAttached) {
-          applyGroupTranslation(group, glossaryHit);
-          return;
-        }
-      }
-    }
-    // ── End glossary hook ─────────────────────────────────────────────────
-
     var rect = group.parent.getBoundingClientRect();
     if (rect.top >= -300 && rect.bottom <= window.innerHeight + 300) {
       viewQ.push(group);
@@ -614,7 +550,7 @@
       var group = valid[j];
       var ck = group.key;
       // Check dictionary first (sub-ms, no network)
-      var dictHit = dict && dict.localTranslate(group.cleanText);
+      var dictHit = dict && dict.localTranslate(group.cleanText, targetLang);
       if (dictHit) {
         var pp = dict.postProcess(dictHit);
         cacheSet(ck, pp);
@@ -623,18 +559,7 @@
         applyGroupTranslation(group, pp);
         continue;
       }
-      // ── L1: memory cache + built-in glossary ──────────────────────────
-      // Built-in glossary for common short UI terms that small models
-      // (Qwen3-1.7B) refuse to translate, returning identity instead.
-      var glossaryHit = BUILT_IN_GLOSSARY[group.cleanText.toLowerCase()];
-      if (glossaryHit) {
-        console.log('[page-translate] glossary hit: "%s" → "%s"', group.cleanText, glossaryHit);
-        cacheSet(ck, glossaryHit);
-        pageTranslationMap.set(ck, glossaryHit);
-        translatedPairs.push({ src: group.cleanText, dst: glossaryHit });
-        applyGroupTranslation(group, glossaryHit);
-        continue;
-      }
+      // ── L1: memory cache ─────────────────────────────────────────────
       var hit = cacheGet(ck);
       if (hit !== undefined && hit.toLowerCase() !== group.cleanText.toLowerCase()) {
         pageTranslationMap.set(ck, hit);
@@ -654,8 +579,12 @@
       if (!seenTexts[needTexts[ui]]) { seenTexts[needTexts[ui]] = true; uniqueTexts.push(needTexts[ui]); }
     }
     if (dbReady) {
-      var dbHits = await dbLookup(host, uniqueTexts);
-      if (dbHits.size > 0) {
+      var dbGen = _cacheGen;
+      var dbHits = await dbLookup(host, uniqueTexts, targetLang);
+      if (dbGen !== _cacheGen) {
+        // cache was cleared (e.g. language change) during async lookup;
+        // discard stale results, let everything fall through to L3
+      } else if (dbHits.size > 0) {
         var stillNeed = [];
         for (var k = 0; k < needModel.length; k++) {
           var t = needTexts[k];
@@ -678,33 +607,24 @@
     if (!needModel.length) return;
 
     // ── L3: translation API ───────────────────────────────────────────
-    // Ollama: small pool of concurrent requests for speed while keeping
-    // instant-on-screen feedback (each text rendered as it completes).
+    // Ollama: send all texts in one message, background.js handles concurrency
     if (engine === 'ollama') {
       var toSave = [];
-      var POOL = 2;
-      var pi = 0;
-      async function ollamaWorker() {
-        while (pi < needModel.length) {
-          var mi = pi++;
-          var mg = needModel[mi];
-          if (!mg.parent.isConnected) { pendingCount--; continue; }
-          var src = needTexts[mi];
-          var translation = await translateSingleOllama(src);
-          if (!translation || translation.toLowerCase() === src.toLowerCase()) { requeueOrGiveUp(mg); continue; }
-          var sk = src.toLowerCase();
-          cacheSet(sk, translation);
-          pageTranslationMap.set(sk, translation);
-          toSave.push({ src: src, dst: translation });
-          translatedPairs.push({ src: src, dst: translation });
-          applyGroupTranslation(mg, translation);
-        }
+      var translations = await translateOllamaBatch(needTexts);
+      for (var mi = 0; mi < needModel.length; mi++) {
+        var mg = needModel[mi];
+        var translation = translations[mi] || '';
+        var src = needTexts[mi];
+        if (!translation || translation.toLowerCase() === src.toLowerCase()) { requeueOrGiveUp(mg); continue; }
+        var sk = src.toLowerCase();
+        cacheSet(sk, translation);
+        pageTranslationMap.set(sk, translation);
+        toSave.push({ src: src, dst: translation });
+        translatedPairs.push({ src: src, dst: translation });
+        applyGroupTranslation(mg, translation);
       }
-      var workers = [];
-      for (var w = 0; w < POOL; w++) workers.push(ollamaWorker());
-      await Promise.all(workers);
       if (toSave.length > 0) {
-        dbSave(host, toSave).catch(function () {});
+        dbSave(host, toSave, targetLang).catch(function () {});
         snapshotDirty = true;
         if (Math.random() < 0.02) dbPrune();
       }
@@ -738,7 +658,7 @@
     }
 
     if (toSave.length > 0) {
-      dbSave(host, toSave).catch(function () {});
+      dbSave(host, toSave, targetLang).catch(function () {});
       snapshotDirty = true;
       if (Math.random() < 0.02) dbPrune();
     }
@@ -762,7 +682,6 @@
     }
 
     // Non-Ollama engines route through Go backend or Google via background.
-    // Ollama is handled by translateSingleOllama in translateBatch L3 above.
     var effectiveEngine = toBackendEnginePage(engine);
 
     return new Promise(function (resolve) {
@@ -790,31 +709,20 @@
     });
   }
 
-  var _ollamaReqId = 0;
-  async function translateSingleOllama(text) {
-    var reqId = ++_ollamaReqId;
-    console.log('[page-translate] translateSingleOllama #%s called, text=%s', reqId, text.substring(0, 50));
+  function translateOllamaBatch(texts) {
     return new Promise(function (resolve) {
       chrome.runtime.sendMessage({
-        type: 'PAGE_OLLAMA_TRANSLATE_ONE',
-        text: text,
+        type: 'PAGE_OLLAMA_TRANSLATE_CONCURRENT',
+        texts: texts,
         to: targetLang,
         ollamaUrl: ollamaUrl,
         ollamaModel: ollamaModel,
-        reqId: reqId,
       }, function (resp) {
-        if (chrome.runtime.lastError) {
-          console.error('[page-translate] sendMessage #%s error:', reqId, chrome.runtime.lastError.message);
-          resolve('');
+        if (chrome.runtime.lastError || !resp || !resp.ok) {
+          resolve(new Array(texts.length).fill(''));
           return;
         }
-        if (!resp || !resp.ok) {
-          console.error('[page-translate] translation #%s failed: resp=%s', reqId, JSON.stringify(resp));
-          resolve('');
-          return;
-        }
-        console.log('[page-translate] translation #%s success: "%s"', reqId, resp.translation);
-        resolve(resp.translation || '');
+        resolve(resp.results || new Array(texts.length).fill(''));
       });
     });
   }
@@ -981,7 +889,7 @@
     if (!snapshotDirty || translatedCount === 0) return;
     snapshotDirty = false;
     if (translatedPairs.length > 0) {
-      try { await dbSavePageSnapshot(host, location.href, translatedPairs); } catch (_) {}
+      try { await dbSavePageSnapshot(host, location.href, translatedPairs, targetLang); } catch (_) {}
     }
   }
 
@@ -1078,6 +986,57 @@
     }, { passive: true });
   }
 
+  // ─── Link hover prewarming ──────────────────────────────────────────
+  var _preloadedHosts = {};
+  var _prewarmTimer = null;
+  var _prewarmActive = false;
+
+  function watchLinkHover() {
+    if (_prewarmActive) return;
+    _prewarmActive = true;
+    document.addEventListener('mouseover', function (e) {
+      if (!isActive || document.hidden) return;
+      var a = e.target.closest('a[href]');
+      if (!a) return;
+      try {
+        var linkUrl = new URL(a.href, location.href);
+      } catch (_) { return; }
+      var linkHost = linkUrl.hostname;
+      if (!linkHost || linkHost === host || linkHost === location.hostname) return;
+      var cacheKey = linkHost + '::' + targetLang;
+      if (_preloadedHosts[cacheKey]) return;
+      _preloadedHosts[cacheKey] = true;
+      if (_prewarmTimer) clearTimeout(_prewarmTimer);
+      _prewarmTimer = setTimeout(function () {
+        prewarmHost(linkHost);
+      }, 300);
+    }, { passive: true });
+  }
+
+  async function prewarmHost(h) {
+    try {
+      var rows = await dbExportDomain(h);
+      if (!rows.length) return;
+      var langSuffix = '::' + targetLang;
+      var count = 0;
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        if (!r.key || r.key.slice(-langSuffix.length) !== langSuffix) continue;
+        if (!r.src || !r.dst || r.src.toLowerCase() === r.dst.toLowerCase()) continue;
+        if (memCache.has(r.src.toLowerCase())) continue;
+        cacheSet(r.src.toLowerCase(), r.dst);
+        count++;
+        if (count >= 200) break;
+      }
+    } catch (_) {}
+  }
+
+  function stopPrewarm() {
+    _prewarmActive = false;
+    _preloadedHosts = {};
+    if (_prewarmTimer) { clearTimeout(_prewarmTimer); _prewarmTimer = null; }
+  }
+
   // ─── Public API ──────────────────────────────────────────────────────
   function start() {
     if (isActive) return;
@@ -1086,6 +1045,7 @@
     startPump();
     watchMutations();
     watchScroll();
+    watchLinkHover();
   }
 
   function stop() {
@@ -1100,6 +1060,7 @@
     bgQ = [];
     pendingCount = 0;
     activeRequests = 0;
+    stopPrewarm();
   }
 
   function updateSettings(settings) {
@@ -1121,12 +1082,14 @@
   }
 
   function clearPageCache() {
+    _cacheGen++;
     memCache.clear();
     pageTranslationMap.clear();
     translatedPairs = [];
     translatedCount = 0;
+    _preloadedHosts = {};
 
-    // Restore original text: remove all bilingual wraps
+    // Restore original text from bilingual wraps
     var wraps = document.querySelectorAll('.ot-bi-wrap');
     for (var i = wraps.length - 1; i >= 0; i--) {
       var wrap = wraps[i];
@@ -1136,18 +1099,38 @@
       } catch (_) {}
     }
 
+    // Restore original text for monolingual-replaced nodes
+    var monos = document.querySelectorAll('[data-ot-mono]');
+    for (var mi = 0; mi < monos.length; mi++) {
+      var mono = monos[mi];
+      mono.removeAttribute('data-ot-mono');
+      var pairsStr = mono.getAttribute('data-ot-pairs');
+      if (!pairsStr) continue;
+      try {
+        var pairs = JSON.parse(pairsStr);
+        // Build reverse map: translation text → original text
+        var revMap = {};
+        for (var pi = 0; pi < pairs.length; pi++) {
+          if (pairs[pi].t && pairs[pi].o) revMap[pairs[pi].t] = pairs[pi].o;
+        }
+        // Walk text nodes and restore originals
+        var tw = document.createTreeWalker(mono, NodeFilter.SHOW_TEXT, null, false);
+        var tn;
+        while ((tn = tw.nextNode())) {
+          var trimmed = tn.textContent.trim();
+          if (trimmed && revMap[trimmed]) {
+            tn.textContent = revMap[trimmed];
+          }
+        }
+      } catch (_) {}
+    }
+
     // Remove page markers and pair data
     var markers = document.querySelectorAll('[data-ot-page]');
     for (var j = 0; j < markers.length; j++) {
       markers[j].removeAttribute('data-ot-page');
       markers[j].removeAttribute('data-ot-pairs');
     }
-
-    openDB().then(function (db) {
-      var tx = db.transaction([SNAP_STORE, STORE], 'readwrite');
-      tx.objectStore(SNAP_STORE).clear();
-      tx.objectStore(STORE).clear();
-    }).catch(function () {});
   }
 
   function setBilingual(enabled) {
@@ -1224,6 +1207,42 @@
     }
   });
 
+  // ─── Listen for settings changes from popup ────────────────────────
+  chrome.storage.onChanged.addListener(function (changes) {
+    var s = {};
+
+    // From page-* keys (syncPageLangEngine)
+    if (changes.pageTargetLang) s.targetLang = changes.pageTargetLang.newValue;
+    if (changes.pageEngine) s.engine = changes.pageEngine.newValue;
+    if (changes.pageSourceLang) s.sourceLang = changes.pageSourceLang.newValue;
+    if (changes.pageOllamaUrl) s.ollamaUrl = changes.pageOllamaUrl.newValue;
+    if (changes.pageOllamaModel) s.ollamaModel = changes.pageOllamaModel.newValue;
+    if (changes.pageOpenAIUrl) s.openaiUrl = changes.pageOpenAIUrl.newValue;
+    if (changes.pageOpenAIKey) s.openaiKey = changes.pageOpenAIKey.newValue;
+    if (changes.pageOpenAIModel) s.openaiModel = changes.pageOpenAIModel.newValue;
+    if (changes.pageDeepLKey) s.deeplKey = changes.pageDeepLKey.newValue;
+
+    // From translationSettings (saveSettings)
+    if (changes.translationSettings && changes.translationSettings.newValue) {
+      var ts = changes.translationSettings.newValue;
+      if (ts.targetLang !== undefined) s.targetLang = ts.targetLang;
+      if (ts.engine !== undefined) s.engine = ts.engine;
+      if (ts.sourceLang !== undefined) s.sourceLang = ts.sourceLang;
+      if (ts.ollamaUrl !== undefined) s.ollamaUrl = ts.ollamaUrl;
+      if (ts.ollamaModel !== undefined) s.ollamaModel = ts.ollamaModel;
+      if (ts.openaiUrl !== undefined) s.openaiUrl = ts.openaiUrl;
+      if (ts.openaiKey !== undefined) s.openaiKey = ts.openaiKey;
+      if (ts.openaiModel !== undefined) s.openaiModel = ts.openaiModel;
+      if (ts.deeplKey !== undefined) s.deeplKey = ts.deeplKey;
+    }
+
+    if (Object.keys(s).length > 0) updateSettings(s);
+
+    if (changes.pageBilingual) {
+      setBilingual(!!changes.pageBilingual.newValue);
+    }
+  });
+
   // ─── Auto-start on load ─────────────────────────────────────────────
   chrome.storage.local.get('pageGlobalEnabled', function (result) {
     if (result.pageGlobalEnabled !== false) {
@@ -1233,7 +1252,9 @@
           if (r.pageBilingual !== undefined) bilingualMode = r.pageBilingual;
           else if (r.translationSettings && r.translationSettings.pageBilingual !== undefined) bilingualMode = r.translationSettings.pageBilingual;
           if (r.pageTargetLang) targetLang = r.pageTargetLang;
+          else if (r.translationSettings && r.translationSettings.targetLang) targetLang = r.translationSettings.targetLang;
           if (r.pageEngine) engine = r.pageEngine;
+          else if (r.translationSettings && r.translationSettings.engine) engine = r.translationSettings.engine;
           if (r.pageOllamaUrl) ollamaUrl = r.pageOllamaUrl;
           if (r.pageOllamaModel) ollamaModel = r.pageOllamaModel;
           if (r.pageOpenAIUrl) openaiUrl = r.pageOpenAIUrl;

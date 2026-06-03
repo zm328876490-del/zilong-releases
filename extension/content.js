@@ -135,7 +135,7 @@
     region: 'eastasia',
     engine: 'microsoft',
     ollamaUrl: 'http://localhost:11434',
-    ollamaModel: 'qwen2.5:7b',
+    ollamaModel: '',
     openaiUrl: 'https://api.deepseek.com/v1',
     openaiKey: '',
     openaiModel: 'deepseek-chat',

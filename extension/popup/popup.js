@@ -202,7 +202,7 @@
     targetLang: 'zh-Hans',
     engine: 'microsoft',
     ollamaUrl: 'http://127.0.0.1:11434',
-    ollamaModel: 'qwen2.5:7b',
+    ollamaModel: '',  // filled by backend prepare status
     openaiUrl: 'https://api.deepseek.com/v1',
     openaiKey: '',
     openaiModel: 'deepseek-chat',
@@ -262,7 +262,7 @@
       targetLang: targetLangSelect.value,
       engine: translateEngineSelect.value,
       ollamaUrl: 'http://127.0.0.1:11434',
-      ollamaModel: 'qwen2.5:7b',
+      ollamaModel: (_modelState && _modelState.model) || apiModelInput.value || '',
       openaiUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
       openaiKey: apiKeyInput.value.trim(),
       openaiModel: apiModelInput.value.trim() || DEFAULT_SETTINGS.openaiModel,
@@ -425,12 +425,14 @@
   // Page translation toggles
   toggleGlobal.addEventListener('change', function () {
     var enabled = toggleGlobal.checked;
+    saveSettings();
     chrome.storage.local.set({ pageGlobalEnabled: enabled });
     pushPageMessage('PAGE_TRANSLATE_TOGGLE', { enabled: enabled });
   });
 
   toggleBilingualPage.addEventListener('change', function () {
     var enabled = toggleBilingualPage.checked;
+    saveSettings();
     chrome.storage.local.set({ pageBilingual: enabled });
     pushPageMessage('PAGE_UPDATE_BILINGUAL', { enabled: enabled });
   });
@@ -488,7 +490,7 @@
         targetLang: targetLangSelect.value,
         engine: engine,
         ollamaUrl: 'http://127.0.0.1:11434',
-        ollamaModel: 'qwen2.5:7b',
+        ollamaModel: (_modelState && _modelState.model) || apiModelInput.value || '',
         openaiUrl: apiUrlInput.value.trim() || DEFAULT_SETTINGS.openaiUrl,
         openaiKey: apiKeyInput.value.trim(),
         openaiModel: apiModelInput.value.trim() || DEFAULT_SETTINGS.openaiModel,
@@ -942,7 +944,7 @@
   }
 
   function fetchModelStatus() {
-    fetch(LOCAL_BASE + '/model/prepare/status')
+    return fetch(LOCAL_BASE + '/model/prepare/status')
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (s) { updateModelStatus(s); })
       .catch(function () {});
@@ -967,14 +969,11 @@
     renderEngineDropdown(translateEngineSelect.value);
     await Promise.all([checkLocalService(), checkLoginState()]);
     checkLicenseWarning();
-    fetchModelStatus();
+    await fetchModelStatus();
     setInterval(fetchModelStatus, 2000);
 
-    // Sync separate keys for page-translate.js (which reads them individually)
-    chrome.storage.local.set({
-      pageBilingual: toggleBilingualPage.checked,
-      pageGlobalEnabled: toggleGlobal.checked,
-    });
+    // Sync all page translation settings so every open tab picks them up
+    syncPageLangEngine();
 
     // Check current status from the active tab
     try {

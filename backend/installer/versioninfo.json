@@ -3,13 +3,13 @@
     "FileVersion": {
       "Major": 1,
       "Minor": 0,
-      "Patch": 45,
+      "Patch": 48,
       "Build": 0
     },
     "ProductVersion": {
       "Major": 1,
       "Minor": 0,
-      "Patch": 45,
+      "Patch": 48,
       "Build": 0
     },
     "FileFlagsMask": "3f",
@@ -22,12 +22,12 @@
     "Comments": "AI Translation - 实时翻译后台服务",
     "CompanyName": "AI Translation",
     "FileDescription": "AI Translation Installer",
-    "FileVersion": "1.0.45",
+    "FileVersion": "1.0.48",
     "InternalName": "installer.exe",
     "LegalCopyright": "",
     "OriginalFilename": "AI-Translation-Installer.exe",
     "ProductName": "AI Translation",
-    "ProductVersion": "1.0.45"
+    "ProductVersion": "1.0.48"
   },
   "VarFileInfo": {
     "Translation": {

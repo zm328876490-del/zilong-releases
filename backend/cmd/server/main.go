@@ -38,6 +38,7 @@ import (
 var version = "dev"
 
 var prepareManager *model.PrepareManager
+var defaultModel string // from hardware detection, fallback when client doesn't specify
 
 type UpdateState struct {
 	Status     string `json:"status"`
@@ -101,6 +102,7 @@ func ensureOllama() {
 		fmt.Println("[ollama] installing from:", setupExe)
 		cmd := exec.Command(setupExe, "/VERYSILENT", "/NORESTART")
 		cmd.Dir = exeDir
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		if err := cmd.Run(); err != nil {
 			fmt.Println("[ollama] install failed:", err)
 			return
@@ -115,12 +117,15 @@ func ensureOllama() {
 	val, err := registryGetString(key, "OLLAMA_ORIGINS")
 	if err != nil || val != "*" {
 		cmd := exec.Command("setx", "OLLAMA_ORIGINS", "*")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		if err := cmd.Run(); err != nil {
 			fmt.Println("[ollama] warn: failed to set OLLAMA_ORIGINS=*:", err)
 		} else {
 			fmt.Println("[ollama] OLLAMA_ORIGINS=* set")
 			// Restart Ollama so the new env var takes effect
-			exec.Command("taskkill", "/f", "/im", "ollama.exe").Run()
+			killCmd := exec.Command("taskkill", "/f", "/im", "ollama.exe")
+			killCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+			killCmd.Run()
 			time.Sleep(2 * time.Second)
 		}
 	}
@@ -134,6 +139,7 @@ func ensureOllama() {
 	fmt.Println("[ollama] starting...")
 	launchCmd := exec.Command(ollamaPath)
 	launchCmd.Dir = filepath.Dir(ollamaPath)
+	launchCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := launchCmd.Start(); err != nil {
 		fmt.Println("[ollama] failed to start:", err)
 	} else {
@@ -157,6 +163,7 @@ func fileExists(path string) bool {
 
 func registryGetString(key, name string) (string, error) {
 	cmd := exec.Command("reg", "query", key, "/v", name)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -2015,7 +2022,7 @@ func handleImageTranslate(w http.ResponseWriter, r *http.Request) {
 	ollamaUrl := strings.TrimRight(req.OllamaUrl, "/")
 	ollamaModel := req.OllamaModel
 	if ollamaModel == "" {
-		ollamaModel = "qwen2.5:7b"
+		ollamaModel = defaultModel
 	}
 	openaiUrl := strings.TrimRight(req.OpenAIUrl, "/")
 	openaiModel := req.OpenAIModel
@@ -2105,6 +2112,7 @@ func findPython() string {
 	for _, name := range candidates {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		cmd := exec.CommandContext(ctx, name, "--version")
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		if err := cmd.Run(); err == nil {
 			cancel()
 			return name
@@ -2175,6 +2183,7 @@ func main() {
 	hw := hardware.Detect()
 	fmt.Printf("[main] hardware: GPU=%s VRAM=%dMB RAM=%dMB tier=%s model=%s\n",
 		hw.GPUModel, hw.VRAMMB, hw.RAMMB, hw.Tier, hw.DefaultModel)
+	defaultModel = hw.DefaultModel
 	prepareManager = model.NewPrepareManager(hw)
 	prepareManager.Start()
 

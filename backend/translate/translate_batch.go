@@ -260,6 +260,7 @@ func (t *Translator) translateOllamaBatch(w io.Writer, texts []string, from, to 
 	}
 
 	toName := ollamaLangName(to)
+	toNative := ollamaNativeName(to)
 
 	// Separate empty texts — they'll get empty results
 	indexMap := make([]int, 0, len(texts)) // original index for each non-empty text
@@ -277,14 +278,25 @@ func (t *Translator) translateOllamaBatch(w io.Writer, texts []string, from, to 
 	}
 
 	payloadJSON, _ := json.Marshal(payload)
-	systemPrompt := "Translate each text in the JSON array below into " + toName + ". Return a JSON string array of the same length and order. Only return the JSON array, no markdown, no explanation, no extra text."
+	systemPrompt := "You are a professional web page translator. Translate each text in the JSON array below into " + toNative + " (" + toName + ").\n" +
+		"\n" +
+		"Rules:\n" +
+		"· Proper nouns, brand names, trademarks, personal names: keep in original language\n" +
+		"· URLs, email addresses, code, technical identifiers, version numbers: DO NOT translate\n" +
+		"· Currency symbols and amounts: preserve formatting\n" +
+		"· Short country/language codes in isolation (au, de, fr, nl, es, se, etc.): expand to full name in " + toNative + "\n" +
+		"· UI labels and buttons: translate naturally, keep concise\n" +
+		"· Numbers and dates: use " + toNative + " conventions when appropriate\n" +
+		"· Do NOT include any reasoning, thinking, or analysis in your response\n" +
+		"\n" +
+		"Return ONLY a JSON string array of the same length and order. No markdown fences, no extra text."
 
 	reqBody := ollamaGenerateRequest{
 		Model:   t.ollamaModel,
 		System:  systemPrompt,
 		Prompt:  string(payloadJSON),
 		Stream:  false,
-		Options: map[string]interface{}{"temperature": 0, "num_predict": 2048},
+		Options: map[string]interface{}{"temperature": 0, "num_predict": 2048, "enable_thinking": false},
 	}
 
 	var results []string
@@ -406,7 +418,8 @@ func (t *Translator) translateOpenAIBatch(w io.Writer, texts []string, from, to 
 		return fmt.Errorf("OpenAI model not configured")
 	}
 
-	toName := langNameForOllama(to)
+	toNative := langNameForOllama(to)
+	toEng := ollamaLangName(to)
 
 	indexMap := make([]int, 0, len(texts))
 	payload := make([]string, 0, len(texts))
@@ -424,8 +437,17 @@ func (t *Translator) translateOpenAIBatch(w io.Writer, texts []string, from, to 
 
 	payloadJSON, _ := json.Marshal(payload)
 	systemPrompt := fmt.Sprintf(
-		"将以下 JSON 数组中的每一条文本翻译为%s。返回相同长度和顺序的 JSON 字符串数组。只返回 JSON 数组，不要解释、不要 markdown 代码块、不要多余文字。",
-		toName,
+		"You are a professional web page translator. Translate each text in the JSON array below into %s (%s).\n\n"+
+			"Rules:\n"+
+			"· Proper nouns, brand names, trademarks, personal names: keep in original language\n"+
+			"· URLs, email addresses, code, technical identifiers, version numbers: DO NOT translate\n"+
+			"· Currency symbols and amounts: preserve formatting\n"+
+			"· Short country/language codes in isolation (au, de, fr, nl, es, se, etc.): expand to full name in %s\n"+
+			"· UI labels and buttons: translate naturally, keep concise\n"+
+			"· Numbers and dates: use %s conventions when appropriate\n"+
+			"· Do NOT add explanations, notes, or commentary to translations\n\n"+
+			"Return ONLY a JSON string array of the same length and order. No markdown fences, no extra text.",
+		toNative, toEng, toNative, toNative,
 	)
 
 	reqBody := ollamaChatRequest{
@@ -523,7 +545,8 @@ func (t *Translator) translateOpenAIBatchResults(texts []string, from, to string
 		return nil, fmt.Errorf("OpenAI model not configured")
 	}
 
-	toName := langNameForOllama(to)
+	toNative := langNameForOllama(to)
+	toEng := ollamaLangName(to)
 
 	indexMap := make([]int, 0, len(texts))
 	payload := make([]string, 0, len(texts))
@@ -541,8 +564,17 @@ func (t *Translator) translateOpenAIBatchResults(texts []string, from, to string
 
 	payloadJSON, _ := json.Marshal(payload)
 	systemPrompt := fmt.Sprintf(
-		"将以下 JSON 数组中的每一条文本翻译为%s。返回相同长度和顺序的 JSON 字符串数组。只返回 JSON 数组，不要解释、不要 markdown 代码块、不要多余文字。",
-		toName,
+		"You are a professional web page translator. Translate each text in the JSON array below into %s (%s).\n\n"+
+			"Rules:\n"+
+			"· Proper nouns, brand names, trademarks, personal names: keep in original language\n"+
+			"· URLs, email addresses, code, technical identifiers, version numbers: DO NOT translate\n"+
+			"· Currency symbols and amounts: preserve formatting\n"+
+			"· Short country/language codes in isolation (au, de, fr, nl, es, se, etc.): expand to full name in %s\n"+
+			"· UI labels and buttons: translate naturally, keep concise\n"+
+			"· Numbers and dates: use %s conventions when appropriate\n"+
+			"· Do NOT add explanations, notes, or commentary to translations\n\n"+
+			"Return ONLY a JSON string array of the same length and order. No markdown fences, no extra text.",
+		toNative, toEng, toNative, toNative,
 	)
 
 	reqBody := ollamaChatRequest{

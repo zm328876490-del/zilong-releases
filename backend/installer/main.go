@@ -16,6 +16,7 @@ import (
 	"time"
 	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -136,16 +137,41 @@ var (
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
-func runHidden(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
-	return cmd.Run()
+func killProcessByName(name string) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(snapshot)
+
+	var pe windows.ProcessEntry32
+	pe.Size = uint32(unsafe.Sizeof(pe))
+	for err = windows.Process32First(snapshot, &pe); err == nil; err = windows.Process32Next(snapshot, &pe) {
+		if windows.UTF16ToString(pe.ExeFile[:]) == name {
+			h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, pe.ProcessID)
+			if err == nil {
+				windows.TerminateProcess(h, 1)
+				windows.CloseHandle(h)
+			}
+		}
+	}
 }
 
-func runHiddenOutput(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
-	return cmd.Output()
+func isProcessRunning(name string) bool {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(snapshot)
+
+	var pe windows.ProcessEntry32
+	pe.Size = uint32(unsafe.Sizeof(pe))
+	for err = windows.Process32First(snapshot, &pe); err == nil; err = windows.Process32Next(snapshot, &pe) {
+		if windows.UTF16ToString(pe.ExeFile[:]) == name {
+			return true
+		}
+	}
+	return false
 }
 
 func msgBox(title, text string, flags int) int {
@@ -303,9 +329,9 @@ func sendDone(err error) {
 func doInstall(targetDir string, totalFiles int) {
 	// Step 1: Kill old processes
 	sendProgress("正在停止旧服务...", 0)
-	runHidden("taskkill", "/f", "/im", serviceExe)
-	runHidden("taskkill", "/f", "/im", "whisper-server.exe")
-		runHidden("taskkill", "/f", "/im", "python.exe")
+	killProcessByName(serviceExe)
+	killProcessByName("whisper-server.exe")
+	killProcessByName("python.exe")
 	time.Sleep(1000 * time.Millisecond)
 
 	// Wait for processes to exit (max 10s), update label during wait
@@ -313,8 +339,7 @@ func doInstall(targetDir string, totalFiles int) {
 	for i := 0; i < 50; i++ {
 		allGone := true
 		for _, name := range procs {
-			out, _ := runHiddenOutput("tasklist", "/fi", "imagename eq "+name, "/fo", "csv")
-			if strings.Contains(string(out), name) {
+			if isProcessRunning(name) {
 				allGone = false
 				break
 			}
@@ -419,6 +444,13 @@ func doInstall(targetDir string, totalFiles int) {
 func main() {
 	runtime.LockOSThread()
 
+	silent := false
+	for _, a := range os.Args[1:] {
+		if a == "/S" || a == "/VERYSILENT" || a == "/SILENT" {
+			silent = true
+		}
+	}
+
 	localAppData := os.Getenv("LOCALAPPDATA")
 	if localAppData == "" {
 		localAppData = filepath.Join(os.Getenv("APPDATA"), "..", "Local")
@@ -434,11 +466,24 @@ func main() {
 		title = "AI Translation - 安装"
 		msg = "即将安装 AI Translation，是否继续？"
 	}
-	if msgBox(title, msg, MB_OKCANCEL|MB_ICONQUESTION) != IDOK {
-		os.Exit(0)
+	if !silent {
+		if msgBox(title, msg, MB_OKCANCEL|MB_ICONQUESTION) != IDOK {
+			os.Exit(0)
+		}
 	}
 
 	totalFiles := countEmbeddedFiles()
+	if silent {
+		doInstall(targetDir, totalFiles)
+		progressMu.Lock()
+		err := progressErr
+		progressMu.Unlock()
+		if err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	if !createProgressWindow("AI Translation - 安装中...", totalFiles) {
 		// Fallback: window creation failed, run without UI
 		doInstall(targetDir, totalFiles)

@@ -54,6 +54,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       handlePageOllamaTranslateOne(message, sendResponse);
       return true;
 
+    // ─── Ollama concurrent batch: all texts in one message, internal POOL ───
+    case 'PAGE_OLLAMA_TRANSLATE_CONCURRENT':
+      handlePageOllamaTranslateConcurrent(message, sendResponse);
+      return true;
+
     // ─── Ollama model management (pull in SW, poll progress from popup) ──
     case 'OLLAMA_PULL_START':
       handleOllamaPullStart(message, sendResponse);
@@ -121,7 +126,7 @@ async function handleImageTranslate(srcUrl, tabId) {
         targetLang: settings.targetLang || 'zh-Hans',
         engine: (function(e) { return (e === 'deepseek' || e === 'doubao' || e === 'qwen') ? 'openai' : e; })(settings.engine || 'microsoft'),
         ollamaUrl: (settings.ollamaUrl || 'http://localhost:11434').replace(/\/$/, ''),
-        ollamaModel: settings.ollamaModel || 'qwen2.5:7b',
+        ollamaModel: settings.ollamaModel || '',
         openaiUrl: (settings.openaiUrl || 'https://api.deepseek.com/v1').replace(/\/$/, ''),
         openaiKey: settings.openaiKey || '',
         openaiModel: settings.openaiModel || 'deepseek-chat',
@@ -287,6 +292,11 @@ async function handlePageOllamaTranslate(message, sendResponse) {
     if (!model) { sendResponse({ ok: false, results: null }); return; }
 
     const toName = ollamaLangName(message.to || 'zh-Hans');
+    const langNative = { 'zh-Hans': '简体中文', 'zh-Hant': '繁體中文', 'zh': '中文',
+      'en': 'English', 'ja': '日本語', 'ko': '한국어',
+      'fr': 'Français', 'de': 'Deutsch', 'es': 'Español',
+      'pt': 'Português', 'ru': 'Русский', 'th': 'ไทย', 'vi': 'Tiếng Việt' };
+    const toNative = langNative[message.to] || toName;
     const payload = [];
     const payloadTexts = [];
     for (let i = 0; i < texts.length; i++) {
@@ -296,8 +306,18 @@ async function handlePageOllamaTranslate(message, sendResponse) {
     const payloadJSON = JSON.stringify(payloadTexts);
 
     const systemPrompt =
-      'Translate each text in the JSON array below into ' + toName +
-      '. Translate ALL text, do not keep any English original (except model numbers and URLs). Return a JSON string array of the same length and order. Only return the JSON array, no markdown, no explanation, no extra text.';
+      'You are a professional web page translator. Translate each text in the JSON array below into ' + toNative + ' (' + toName + ').\n' +
+      '\n' +
+      'Rules:\n' +
+      '· Proper nouns, brand names, trademarks, personal names: keep in original language\n' +
+      '· URLs, email addresses, code, technical identifiers, version numbers: DO NOT translate\n' +
+      '· Currency symbols and amounts: preserve formatting (e.g. "S$ 19.90" stays "S$ 19.90")\n' +
+      '· Short country/language codes in isolation (au, de, fr, nl, es, se, etc.): expand to full name in ' + toNative + '\n' +
+      '· UI labels and buttons: translate naturally, keep concise\n' +
+      '· Numbers and dates: use ' + toNative + ' conventions when appropriate\n' +
+      '· Do NOT include any reasoning, thinking, or analysis in your response\n' +
+      '\n' +
+      'Return ONLY a JSON string array of the same length and order. No markdown fences, no extra text.';
 
     const resp = await fetch(url + '/api/generate', {
       method: 'POST',
@@ -307,7 +327,7 @@ async function handlePageOllamaTranslate(message, sendResponse) {
         system: systemPrompt,
         prompt: payloadJSON,
         stream: false,
-        options: { temperature: 0, num_predict: 2048 },
+        options: { temperature: 0, num_predict: 2048, enable_thinking: false },
       }),
     });
 
@@ -387,10 +407,18 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
       return;
     }
     const toName = ollamaLangName(message.to || 'zh-Hans');
+    const langNative = { 'zh-Hans': '简体中文', 'zh-Hant': '繁體中文', 'zh': '中文',
+      'en': 'English', 'ja': '日本語', 'ko': '한국어',
+      'fr': 'Français', 'de': 'Deutsch', 'es': 'Español',
+      'pt': 'Português', 'ru': 'Русский', 'th': 'ไทย', 'vi': 'Tiếng Việt' };
+    const toNative = langNative[message.to] || toName;
 
     const systemPrompt =
-      'You are a translator. Translate the user input into ' + toName +
-      '. Translate ALL text, do not keep any English original (except model numbers and URLs). Output only the translation, one line, no explanation, no quotes, no extra text.';
+      'You are a professional web page translator. Translate the user input into ' + toNative + ' (' + toName + ').\n' +
+      'Proper nouns, brands, URLs, code, currency amounts, version numbers: keep in original form.\n' +
+      'Short isolated codes (au, de, fr, nl, etc.): expand to full name in ' + toNative + '.\n' +
+      'UI labels and buttons: translate naturally, keep concise.\n' +
+      'Output only the translation, one line, no explanation, no quotes.';
 
     const apiUrl = url + '/api/generate';
     const resp = await fetch(apiUrl, {
@@ -424,6 +452,72 @@ async function handlePageOllamaTranslateOne(message, sendResponse) {
   } catch (e) {
     console.error('[ollama-translate] exception:', e.message || e);
     sendResponse({ ok: false, translation: '' });
+  }
+}
+
+// ─── Ollama concurrent batch: all texts in one message, internal POOL ──────
+async function handlePageOllamaTranslateConcurrent(message, sendResponse) {
+  try {
+    const texts = message.texts || [];
+    if (texts.length === 0) { sendResponse({ ok: true, results: [] }); return; }
+
+    const url = (message.ollamaUrl || 'http://127.0.0.1:11434').replace(/\/$/, '');
+    let model = message.ollamaModel || '';
+    if (!model) { model = await getDefaultModel(url); }
+    if (!model) { sendResponse({ ok: false, results: null }); return; }
+
+    const toName = ollamaLangName(message.to || 'zh-Hans');
+    const langNative = { 'zh-Hans': '简体中文', 'zh-Hant': '繁體中文', 'zh': '中文',
+      'en': 'English', 'ja': '日本語', 'ko': '한국어',
+      'fr': 'Français', 'de': 'Deutsch', 'es': 'Español',
+      'pt': 'Português', 'ru': 'Русский', 'th': 'ไทย', 'vi': 'Tiếng Việt' };
+    const toNative = langNative[message.to] || toName;
+
+    const systemPrompt =
+      'You are a professional web page translator. Translate the user input into ' + toNative + ' (' + toName + ').\n' +
+      'Proper nouns, brands, URLs, code, currency amounts, version numbers: keep in original form.\n' +
+      'Short isolated codes (au, de, fr, nl, etc.): expand to full name in ' + toNative + '.\n' +
+      'UI labels and buttons: translate naturally, keep concise.\n' +
+      'Output only the translation, one line. Do not include any reasoning, thinking, or explanation.';
+
+    const results = new Array(texts.length).fill('');
+    const POOL = 3;
+    let pi = 0;
+
+    async function worker() {
+      while (pi < texts.length) {
+        const i = pi++;
+        const text = (texts[i] || '').trim();
+        if (!text) continue;
+        try {
+          const resp = await fetch(url + '/api/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: model,
+              system: systemPrompt,
+              prompt: text,
+              stream: false,
+              options: { temperature: 0.1, num_predict: 1024, enable_thinking: false },
+            }),
+          });
+          if (!resp.ok) continue;
+          const data = await resp.json();
+          const raw = (data.response || '').trim();
+          const translation = stripThinkingTags(raw);
+          if (translation && translation.toLowerCase() !== text.toLowerCase()) {
+            results[i] = translation;
+          }
+        } catch (_) {}
+      }
+    }
+
+    const workers = [];
+    for (let w = 0; w < POOL; w++) workers.push(worker());
+    await Promise.all(workers);
+    sendResponse({ ok: true, results: results });
+  } catch (e) {
+    sendResponse({ ok: false, results: null, error: e.message });
   }
 }
 

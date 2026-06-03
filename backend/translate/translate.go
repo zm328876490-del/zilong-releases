@@ -375,6 +375,19 @@ func ollamaLangName(lang string) string {
 	return lang
 }
 
+func ollamaNativeName(lang string) string {
+	m := map[string]string{
+		"zh-Hans": "简体中文", "zh-Hant": "繁體中文", "zh": "中文",
+		"en": "English", "ja": "日本語", "ko": "한국어",
+		"fr": "Français", "de": "Deutsch", "es": "Español",
+		"pt": "Português", "ru": "Русский", "th": "ไทย", "vi": "Tiếng Việt",
+	}
+	if v, ok := m[lang]; ok {
+		return v
+	}
+	return lang
+}
+
 // stripThinking removes <｜end▁of▁thinking｜> /  Slow  blocks that thinking models
 // (qwen3, deepseek-r1, etc.) may emit via /api/generate. It also drops
 // leading "Okay, let me..." / "First, I need to..." preamble lines.
@@ -451,7 +464,8 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 	}
 
 	toName := ollamaLangName(to)
-	systemPrompt := "You are a translator. Translate the input into " + toName + ". Output only the translation, one line, no explanation, no extra text."
+	toNative := ollamaNativeName(to)
+	systemPrompt := "You are a professional subtitle translator. Translate into natural " + toNative + " (" + toName + "). Keep it concise, conversational, one line. Do not include any reasoning or thinking."
 
 	reqBody := ollamaGenerateRequest{
 		Model:  t.ollamaModel,
@@ -461,6 +475,7 @@ func (t *Translator) translateOllama(text, from, to string) (string, error) {
 		Options: map[string]interface{}{
 			"temperature": 0.1,
 			"num_predict": 1024,
+				"enable_thinking":  false,
 		},
 	}
 
@@ -548,7 +563,11 @@ func (t *Translator) translateOllamaImage(text, from, to string) (string, error)
 	}
 
 	toName := ollamaLangName(to)
-	systemPrompt := "You are a translator. Translate image text (signs, menus, UI labels, buttons) into natural " + toName + ". Keep it concise, no explanations. ALL-CAPS English should be translated in normal case. Proper nouns, brand names, abbreviations stay in original language. Output only the translation, one line."
+	toNative := ollamaNativeName(to)
+	systemPrompt := "You are a professional translator. Translate image text (signs, menus, UI labels, buttons) into natural " + toNative + " (" + toName + ").\n" +
+		"Keep it concise. Do not include any reasoning. ALL-CAPS English → normal case in " + toNative + ".\n" +
+		"Proper nouns, brand names, abbreviations, URLs, codes: keep in original language.\n" +
+		"Output only the translation, one line."
 
 	reqBody := ollamaGenerateRequest{
 		Model:  t.ollamaModel,
@@ -558,6 +577,7 @@ func (t *Translator) translateOllamaImage(text, from, to string) (string, error)
 		Options: map[string]interface{}{
 			"temperature": 0.1,
 			"num_predict": 1024,
+				"enable_thinking":  false,
 		},
 	}
 
@@ -627,15 +647,7 @@ func buildOllamaPrompt(to string) string {
 		toName = to
 	}
 
-	fillerByLang := map[string]string{
-		"zh-Hans": "呀哦哈啦", "zh-Hant": "呀哦哈啦", "zh": "呀哦哈啦",
-		"ja": "あの、ええと、まあ", "ko": "음, 그, 저, 뭐",
-	}
-	filler := fillerByLang[to]
-	if filler == "" {
-		filler = "无意义语气词堆砌"
-	}
-
+	// ── Chinese (simplified & traditional) ──────────────────────────
 	if to == "zh-Hans" || to == "zh-Hant" || to == "zh" {
 		return fmt.Sprintf(`你是视频字幕本地化专家。将英文口语翻译为地道自然的%s字幕——不是机械翻译，而是让中文观众觉得这句话本来就是用中文说的。
 
@@ -647,40 +659,116 @@ func buildOllamaPrompt(to string) string {
   "Come on, you gotta be kidding me." → "别闹，开玩笑的吧。"
 
 本地化原则：
-· 英文填充词（well, you know, I mean, like, basically, actually）直接省略，不翻译
-· 英文习语用中文对应表达，不要字面直译（如 kidding→开玩笑，not sure→不好说）
+· 英文填充词（well, you know, I mean, like, basically, actually）直接省略
+· 英文习语用中文对应表达，不要字面直译（kidding→开玩笑，not sure→不好说）
 · 英文长句拆成短句，中文不习惯一句话塞太多信息
 · 感叹和语气通过标点和措辞自然体现，不要括号注释
 · 品牌名、缩写、专有名词保留原文
 
-禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰（~~！！），原文照抄英文输出。
+禁止：加前缀废话、括号注释、过度口语化（呀哦哈啦）、标点装饰（~~！！），原文照抄英文输出。
 
 上文是同一段话已翻译的内容，用于保持语气、人称和语境的连贯。
 翻译最后一句时要与上文自然衔接：
 · 上文用"他/她"则继续用同一人称，不要换主语
 · 上文是问句则当前句可省略主语直接回答
-· 当前句若是上文的延续（开头是 and/but/so/because 等），用"而且/但是/所以/因为"承接，不要重起一句
-· 当前句若被切成半句（结尾没有标点），翻译时也不要硬补句号，用逗号或省略号自然衔接
+· 当前句若是上文的延续（开头是 and/but/so/because 等），用"而且/但是/所以/因为"承接
+· 当前句若被切成半句（结尾没有标点），不要硬补句号，用逗号或省略号自然衔接
 
-只翻译最后一句，一行输出。`, toName, filler)
+只翻译最后一句，一行输出。`, toName)
 	}
 
-	return fmt.Sprintf(`你是视频字幕本地化专家。将英文口语翻译为地道自然的%s字幕——不是机械翻译，而是让%s观众觉得这就是母语者说的话。
+	// ── Japanese ───────────────────────────────────────────────────
+	if to == "ja" {
+		return `You are a professional subtitle localizer. Translate English speech into natural, conversational Japanese (日本語) subtitles — not literal translation, but localization that sounds like a native speaker.
 
-本地化原则：
-· 英文填充词（well, you know, I mean, like, basically, actually）直接省略，不翻译
-· 英文习语用%s的地道对应表达，不要字面直译
-· 英文长句拆成短句，%s不习惯一句话塞太多信息
-· 感叹和语气通过标点和措辞自然体现，不要括号注释
-· 品牌名、缩写、专有名词保留原文
+Examples:
+  "I'm not sure about that."   → "ちょっと分からないですね。"
+  "What the hell is going on?" → "一体何が起きてるんだ？"
+  "That's a great idea!"       → "いいアイデアですね！"
+  "To be honest, I don't think so." → "正直言って、そうは思わない。"
+  "Come on, you gotta be kidding me." → "おいおい、冗談だろ。"
 
-禁止：加前缀废话、括号注释、过度口语化（%s）、标点装饰，原文照抄输出。
+Principles:
+· English fillers (well, you know, I mean, like, basically) → drop or use natural Japanese fillers (あの、ええと、まあ、なんか)
+· English idioms → natural Japanese equivalents, not literal
+· Long English sentences → break into shorter Japanese clauses
+· Use appropriate sentence-ending particles (ね、よ、な、か) for natural tone
+· Proper nouns, brand names, abbreviations: keep in original form
+· Never add commentary, parenthetical notes, or decorative punctuation (～～！！)
 
-上文是同一段话已翻译的内容，用于保持语气、人称和语境的连贯。
-翻译最后一句时要与上文自然衔接：保持同一人称，承接上文的逻辑关系
-（and/but/so 等连接词译为对应承接词），半句话不要硬补句号。
+The context above contains previously translated lines. Translate the LAST line only:
+· Keep the same person references and pronouns from context
+· Natural logical flow (and/but/so/because → そして/でも/だから/なぜなら)
+· Sentence fragment (no ending punctuation) → use て-form or comma, don't force a period
 
-只翻译最后一句，一行输出。`, toName, toName, toName, toName, filler)
+Output ONLY the translation, one line.`
+	}
+
+	// ── Korean ─────────────────────────────────────────────────────
+	if to == "ko" {
+		return `You are a professional subtitle localizer. Translate English speech into natural, conversational Korean (한국어) subtitles — not literal translation, but localization that sounds like a native speaker.
+
+Examples:
+  "I'm not sure about that."   → "잘 모르겠네요."
+  "What the hell is going on?" → "대체 무슨 일이야?"
+  "That's a great idea!"       → "좋은 생각이에요!"
+  "To be honest, I don't think so." → "솔직히 그렇게 생각하지 않아요."
+  "Come on, you gotta be kidding me." → "야, 장난하지 마."
+
+Principles:
+· English fillers (well, you know, I mean, like, basically) → drop or use natural Korean fillers (음, 그, 저, 뭐, 있잖아)
+· English idioms → natural Korean equivalents, not literal
+· Long English sentences → break into shorter Korean clauses
+· Use appropriate speech levels (해요체/해체) for consistent tone — pick one and stick to it
+· Proper nouns, brand names, abbreviations: keep in original form
+· Never add commentary, parenthetical notes, or decorative punctuation (~~!!)
+
+The context above contains previously translated lines. Translate the LAST line only:
+· Keep the same person references and speech level from context
+· Natural logical flow (and/but/so/because → 그리고/그런데/그래서/때문에)
+· Sentence fragment → use connecting ending (~고, ~서), don't force a period
+
+Output ONLY the translation, one line.`
+	}
+
+	// ── European & other languages ──────────────────────────────────
+	euroFillers := map[string]string{
+		"fr": "euh, ben, tu vois, genre", "de": "ähm, naja, also, quasi",
+		"es": "eh, bueno, o sea, en plan", "pt": "é, bom, tipo, sabe",
+		"ru": "ну, как бы, типа, это самое", "th": "อืม, คือ, แบบว่า, เอ่อ",
+		"vi": "ừm, kiểu như, đại loại là", "en": "um, well, you know, like",
+	}
+	euroConnectors := map[string]string{
+		"fr": "et/mais/donc/parce que", "de": "und/aber/also/weil",
+		"es": "y/pero/entonces/porque", "pt": "e/mas/então/porque",
+		"ru": "и/но/поэтому/потому что", "th": "และ/แต่/ดังนั้น/เพราะว่า",
+		"vi": "và/nhưng/vì vậy/bởi vì", "en": "and/but/so/because",
+	}
+	fillers := euroFillers[to]
+	if fillers == "" {
+		fillers = "natural filler words"
+	}
+	connectors := euroConnectors[to]
+	if connectors == "" {
+		connectors = "and/but/so/because → appropriate connectors"
+	}
+
+	return fmt.Sprintf(`You are a professional subtitle localizer. Translate English speech into natural, conversational %s subtitles — not literal translation, but localization that sounds like a native speaker.
+
+Principles:
+· English fillers (well, you know, I mean, like, basically) → drop or use natural %s fillers (%s)
+· English idioms → natural %s equivalents, not literal translation
+· Long English sentences → break into shorter, natural %s clauses
+· Express tone and emphasis through natural word choice and punctuation, not parenthetical notes
+· Proper nouns, brand names, abbreviations: keep in original form
+· Never add commentary, decorative punctuation, or literal English copies
+
+The context above contains previously translated lines. Translate the LAST line only:
+· Keep consistent person references, gender, and formality from context
+· Natural logical flow (%s)
+· Sentence fragment (no ending punctuation) → don't force a period, use comma or natural connector
+
+Output ONLY the translation, one line.`, toName, toName, fillers, toName, toName, connectors)
 }
 
 func buildOllamaImagePrompt(to string) string {
@@ -704,9 +792,35 @@ func buildOllamaImagePrompt(to string) string {
 翻译原则：
 · 保持简洁自然，不添加解释或修饰
 · 英文全大写按正常大小写翻译（如 SUBMIT → 提交）
-· 专有名词、品牌名、缩写保留原文不翻译
+· 专有名词、品牌名、缩写、网址、代码保留原文不翻译
 · 日语按中文习惯表达，不要逐字直译
 · 只输出译文，一行，不要任何多余文字`, toName)
+	}
+
+	if to == "ja" {
+		return `You are a translation expert. Translate image text into natural Japanese (日本語).
+
+The text may come from signs, menus, buttons, labels, UI elements, etc.
+
+Rules:
+· Keep it concise and natural, no explanations
+· ALL-CAPS English → normal case in Japanese (SUBMIT → 送信)
+· Proper nouns, brand names, abbreviations, URLs, code: keep in original
+· Use appropriate Japanese conventions (katakana for loanwords, natural word order)
+· Output ONLY the translation, one line, nothing else`
+	}
+
+	if to == "ko" {
+		return `You are a translation expert. Translate image text into natural Korean (한국어).
+
+The text may come from signs, menus, buttons, labels, UI elements, etc.
+
+Rules:
+· Keep it concise and natural, no explanations
+· ALL-CAPS English → normal case in Korean (SUBMIT → 제출)
+· Proper nouns, brand names, abbreviations, URLs, code: keep in original
+· Use natural Korean conventions and speech style
+· Output ONLY the translation, one line, nothing else`
 	}
 
 	return fmt.Sprintf(`You are a translation expert. Translate image text into natural %s.
@@ -715,9 +829,9 @@ The text may come from signs, menus, buttons, labels, UI elements, etc.
 
 Rules:
 · Keep it concise and natural, no explanations
-· ALL-CAPS English should be translated in normal case
-· Proper nouns, brand names, abbreviations stay in original language
-· Output ONLY the translation, one line, nothing else`, toName)
+· ALL-CAPS English → normal case in %s
+· Proper nouns, brand names, abbreviations, URLs, code: keep in original
+· Output ONLY the translation, one line, nothing else`, toName, toName)
 }
 
 func (t *Translator) translateOpenAI(text, from, to string) (string, error) {

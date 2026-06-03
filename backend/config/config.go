@@ -44,7 +44,7 @@ func Load() *Config {
 		Port:        "29527",
 		ModelDir:    filepath.Join(ed, "models"),
 		OllamaUrl:   "http://localhost:11434",
-		OllamaModel: "qwen2.5:7b",
+		OllamaModel: "",
 	}
 
 	if p := os.Getenv("PORT"); p != "" {
